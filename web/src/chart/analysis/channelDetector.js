@@ -279,6 +279,9 @@ function twoPointLine(a, b) {
   return { slope, intercept }
 }
 
+
+
+
 function findPivots(bars, pivotK, startIndex) {
   const highs = []
   const lows = []
@@ -660,38 +663,75 @@ function normalizeOutput(segments) {
   }))
 }
 
+/**
+ * 在当前可见区内检测通道候选（极值 / RANSAC / 回归），并返回最终自动结果。
+ *
+ * 设计目标：
+ * 1) 只在可见范围计算，避免全量历史带来的噪声和开销；
+ * 2) 通过滑窗+多算法并行生成候选；
+ * 3) 先在“算法内”做 NMS 去重，再跨算法合并后按质量分数排序；
+ * 4) 输出统一补充自动状态字段，供前端“自动结果 + 人工决策”流程消费。
+ *
+ * @param {object} input
+ * @param {Array<object>} input.bars 全量K线（至少包含 high/low/close/time）
+ * @param {number} input.visibleStartIndex 当前可见区起始索引（允许乱序，内部会纠正）
+ * @param {number} input.visibleEndIndex 当前可见区结束索引（允许乱序，内部会纠正）
+ * @param {string} input.timeframe 周期字符串（如 1m/5m/1h/1d）
+ * @param {object} input.settings 通道参数（支持新旧格式，内部归一化）
+ * @returns {Array<object>} 排序后的通道结果（已注入 status/manual/locked/hidden/recalcVersion）
+ */
 export function detectChannelsInVisibleRange(input) {
+  // 1) 基础输入兜底：bars 不合法直接视为空。
   const bars = Array.isArray(input?.bars) ? input.bars : []
+  // 数据过少时不做检测：避免统计指标和斜率估计不稳定。
   if (bars.length < 40) return []
+
+  // 2) 参数归一化：兼容 legacy 字段并落地默认值。
   const settings = normalizeChannelSettingsV2(input?.settings)
   const display = settings.display
   const common = settings.common
+  // 三类算法都关闭时直接返回空结果。
   if (!display.showExtrema && !display.showRansac && !display.showRegression) return []
 
+  // 3) 可见区索引规范化：
+  // - 支持 start/end 颠倒；
+  // - 强制截断到 [0, bars.length-1]；
+  // - 可见区过短不检测。
   const rawStart = Number(input?.visibleStartIndex ?? 0)
   const rawEnd = Number(input?.visibleEndIndex ?? (bars.length - 1))
   const visibleStart = clamp(Math.floor(Math.min(rawStart, rawEnd)), 0, bars.length - 1)
   const visibleEnd = clamp(Math.ceil(Math.max(rawStart, rawEnd)), 0, bars.length - 1)
   if (visibleEnd - visibleStart + 1 < 40) return []
 
+  // 4) 根据周期桶选择窗口和 pivot 参数，确定滑窗步长。
+  // step 越小越密集，结果更多但计算更重；设置下限 8 防止过密遍历。
   const bucket = timeframeBucket(input?.timeframe || '1m')
   const windowSize = commonWindowSize(bucket, common)
   const step = Math.max(8, Math.floor(windowSize / Math.max(1, common.stepDivisor)))
+  // slopeBase 用于把 ATR 量纲归一到斜率容差，避免不同窗口大小下容差失真。
   const slopeBase = Math.max(1, windowSize)
+  // 按算法分桶收集候选，后续各自 NMS。
   const byMethod = {
     extrema: [],
     ransac: [],
     regression: [],
   }
 
+  // 5) 在可见区内按滑窗扫描。
   for (let winStart = visibleStart; winStart <= visibleEnd; winStart += step) {
     const winEnd = Math.min(visibleEnd, winStart + windowSize - 1)
     const winBars = bars.slice(winStart, winEnd + 1)
+    // 过短窗口跳过：窗口太小时触点/包络统计不可靠。
     if (winBars.length < Math.max(40, Math.floor(windowSize * 0.45))) continue
+
+    // 计算该窗口局部波动（ATR），作为多处容差基准。
     const atr = calcAtr(winBars, 14)
+    // RANSAC/回归共享斜率容差：ATR 越大，允许的斜率差适当放宽。
     const ransacSlopeTol = Math.max(1e-6, (settings.algorithms.ransac.slopeTolAtrFactor * Math.max(atr, 1e-6)) / slopeBase)
+    // 稳定随机种子：保证同一窗口在同一数据下结果可复现。
     const seed = safeTime(winBars[0]) + winStart * 31
 
+    // 5.1 回归通道候选
     if (display.showRegression) {
       const reg = regressionChannelCandidate({
         common,
@@ -705,6 +745,7 @@ export function detectChannelsInVisibleRange(input) {
       if (reg) byMethod.regression.push(reg)
     }
 
+    // 5.2 RANSAC 通道候选
     if (display.showRansac) {
       const ran = ransacChannelCandidate({
         common,
@@ -720,6 +761,7 @@ export function detectChannelsInVisibleRange(input) {
       if (ran) byMethod.ransac.push(ran)
     }
 
+    // 5.3 极值通道候选
     if (display.showExtrema) {
       const ext = extremaChannelCandidate({
         common,
@@ -734,18 +776,23 @@ export function detectChannelsInVisibleRange(input) {
       if (ext) byMethod.extrema.push(ext)
     }
 
+    // 覆盖到可见区尾部时提前结束，避免无意义迭代。
     if (winEnd === visibleEnd) break
   }
 
+  // 6) 先做“算法内”NMS，去除同类高度重叠候选，保留高质量代表。
   const merged = []
   if (display.showExtrema) merged.push(...nmsSegments(byMethod.extrema, common))
   if (display.showRansac) merged.push(...nmsSegments(byMethod.ransac, common))
   if (display.showRegression) merged.push(...nmsSegments(byMethod.regression, common))
 
+  // 7) 跨算法统一排序：
+  // 主排序 score，次排序 insideRatio，最后截断到 maxSegments。
   const ranked = merged
     .slice()
     .sort((a, b) => (Number(b.score) - Number(a.score)) || (Number(b.insideRatio) - Number(a.insideRatio)))
     .slice(0, common.maxSegments)
 
+  // 8) 输出归一化：补充自动通道状态字段，便于 UI 与人工决策链路直接消费。
   return normalizeOutput(ranked)
 }
