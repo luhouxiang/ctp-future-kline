@@ -540,6 +540,7 @@ function extremaChannelCandidate(args) {
   const pivots = findPivots(bars, pivotK, startIndex)
   const len = endIndex - startIndex + 1
   const out = []
+  console.log('[extrema] pivots:', { 'startIndex':startIndex, 'highs': pivots.highs, 'lows': pivots.lows })
 
   // 第二步（上升通道）：在 lows 中选两点锚定支撑线斜率。
   const upPair = pickExtremaPair(pivots.lows, 'up', atr, settings, len - 1)

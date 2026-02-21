@@ -223,7 +223,7 @@ function formatInt(v) {
 }
 
 function applySelectedByTime(ts, candleData) {
-  const bar = state.bars.find((x) => x.adjusted_time === ts)
+  const bar = state.bars.find((x) => x.time === ts)
   const openValue = candleData?.open ?? bar?.open
   const highValue = candleData?.high ?? bar?.high
   const lowValue = candleData?.low ?? bar?.low
@@ -254,8 +254,8 @@ function selectLatestBar() {
     return
   }
   const bar = state.bars[n - 1]
-  applySelectedByTime(bar.adjusted_time, {
-    time: bar.adjusted_time,
+  applySelectedByTime(bar.time, {
+    time: bar.time,
     open: bar.open,
     high: bar.high,
     low: bar.low,
@@ -265,7 +265,7 @@ function selectLatestBar() {
 
 function buildCandleData(bars) {
   return bars.map((bar) => ({
-    time: bar.adjusted_time,
+    time: bar.time,
     open: bar.open,
     high: bar.high,
     low: bar.low,
@@ -275,7 +275,7 @@ function buildCandleData(bars) {
 
 function buildVolumeData(bars) {
   return bars.map((bar) => ({
-    time: bar.adjusted_time,
+    time: bar.time,
     value: bar.volume,
     color: bar.close >= bar.open ? '#e53935' : '#2e7d32',
   }))
@@ -290,7 +290,7 @@ function buildMA20Data(bars) {
       sum -= bars[i - 20].close
     }
     out.push({
-      time: bars[i].adjusted_time,
+      time: bars[i].time,
       value: i >= 19 ? sum / 20 : null,
     })
   }
@@ -325,7 +325,7 @@ function calcMACDLocally(bars) {
       signalEMA = dif * signalK + signalEMA * (1 - signalK)
     }
     const hist = (dif - signalEMA) * 2
-    const ts = bars[i].adjusted_time
+    const ts = bars[i].time
     difData.push({ time: ts, value: dif })
     deaData.push({ time: ts, value: signalEMA })
     histData.push({ time: ts, value: hist, color: hist >= 0 ? '#4fc3f7' : '#ef9a9a' })
@@ -378,16 +378,13 @@ async function fetchChunk(endParam, isInitial) {
   if (isInitial) {
     state.meta = data.meta || state.meta
   }
-  return (data.bars || []).map((bar) => ({
-    ...bar,
-    adjusted_time: Number(bar.adjusted_time ?? bar.time ?? 0),
-  }))
+  return data.bars || []
 }
 
 async function loadInitialChunk() {
   const p = getParams()
   if (!p.symbol || !p.type) {
-    state.error = '缂傚搫鐨?symbol 閹?type 閸欏倹鏆?
+    state.error = '缺少 symbol 或 type 参数'
     return
   }
   state.loading = true
@@ -398,11 +395,11 @@ async function loadInitialChunk() {
     state.bars = bars
     state.hasMore = bars.length >= CHUNK_SIZE
     if (bars.length === 0) {
-      state.error = '瑜版挸澧犻崣鍌涙殶閺堫亝鐓＄拠銏犲煂K缁炬寧鏆熼幑?
+      state.error = '当前参数未查询到K线数据'
     }
     renderSeries()
   } catch (error) {
-    state.error = `閸旂姾娴囬崶鎹愩€冩径杈Е: ${error.message}`
+    state.error = `加载图表失败: ${error.message}`
   } finally {
     state.loading = false
   }
@@ -414,15 +411,15 @@ async function loadOlderChunk() {
   }
   state.loadingMore = true
   try {
-    const oldest = state.bars[0].adjusted_time
+    const oldest = state.bars[0].time
     const nextEnd = formatEndParamByUnix(oldest - 60)
     const olderBars = await fetchChunk(nextEnd, false)
     if (olderBars.length === 0) {
       state.hasMore = false
       return
     }
-    const seen = new Set(state.bars.map((x) => x.adjusted_time))
-    const toPrepend = olderBars.filter((x) => !seen.has(x.adjusted_time))
+    const seen = new Set(state.bars.map((x) => x.time))
+    const toPrepend = olderBars.filter((x) => !seen.has(x.time))
     if (toPrepend.length === 0) {
       state.hasMore = false
       return
@@ -431,7 +428,7 @@ async function loadOlderChunk() {
     state.hasMore = olderBars.length >= CHUNK_SIZE
     renderSeries()
   } catch (error) {
-    state.error = `閸旂姾娴囬弴鏉戭樋婢惰精瑙? ${error.message}`
+    state.error = `加载更多失败: ${error.message}`
   } finally {
     state.loadingMore = false
   }
@@ -453,7 +450,7 @@ onMounted(async () => {
     await loadInitialChunk()
   } catch (error) {
     console.error('[ChartView] init failed', error)
-    state.error = `閸ユ崘銆冮崚婵嗩潗閸栨牕銇戠拹? ${error.message || error}`
+    state.error = `图表初始化失败: ${error.message || error}`
   }
   window.addEventListener('resize', resizeCharts)
 })
@@ -467,18 +464,18 @@ onUnmounted(() => {
 <template>
   <div class="chart-page">
     <div class="chart-header">
-      <h2>{{ state.meta.symbol || 'K缁惧灝娴樼悰? }} 璺?{{ state.meta.type }} <small>v{{ APP_VERSION.replace('v', '') }}</small></h2>
+      <h2>{{ state.meta.symbol || 'K线图表' }} · {{ state.meta.type }} <small>v{{ APP_VERSION.replace('v', '') }}</small></h2>
       <div class="chart-meta quote-line">
-        <span>閺冨爼妫? {{ state.selected.timeText }}</span>
-        <span>瀵偓: {{ state.selected.open }}</span>
-        <span>妤? {{ state.selected.high }}</span>
-        <span>娴? {{ state.selected.low }}</span>
-        <span>閺€? {{ state.selected.close }}</span>
-        <span>闁? {{ state.selected.volume }}</span>
-        <span>閹镐椒绮? {{ state.selected.openInterest }}</span>
+        <span>时间: {{ state.selected.timeText }}</span>
+        <span>开: {{ state.selected.open }}</span>
+        <span>高: {{ state.selected.high }}</span>
+        <span>低: {{ state.selected.low }}</span>
+        <span>收: {{ state.selected.close }}</span>
+        <span>量: {{ state.selected.volume }}</span>
+        <span>持仓: {{ state.selected.openInterest }}</span>
       </div>
-      <p v-if="state.loading">閸旂姾娴囨稉?..</p>
-      <p v-if="state.loadingMore">閸氭垵澧犻崝鐘烘祰閺囨潙顦?..</p>
+      <p v-if="state.loading">加载中...</p>
+      <p v-if="state.loadingMore">向前加载更多...</p>
       <p v-if="state.error" class="error-text">{{ state.error }}</p>
     </div>
     <div ref="candleRef" class="chart-box main"></div>

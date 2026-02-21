@@ -582,34 +582,46 @@ function buildMA20Data(bars) {
   const out = [];
   let sum = 0;
   for (let i = 0; i < bars.length; i += 1) {
-    sum += bars[i].close;
-    if (i >= 20) sum -= bars[i - 20].close;
-    out.push({ time: bars[i].adjusted_time, value: i >= 19 ? sum / 20 : null });
+    const close = Number(bars[i]?.close);
+    sum += Number.isFinite(close) ? close : 0;
+    if (i >= 20) {
+      const drop = Number(bars[i - 20]?.close);
+      sum -= Number.isFinite(drop) ? drop : 0;
+    }
+    const t = Number(bars[i]?.adjusted_time || 0);
+    // lightweight-charts LineSeries uses whitespace points (without `value`)
+    // for gaps; `value: null` can throw and break following series updates.
+    if (i >= 19) out.push({ time: t, value: sum / 20 });
+    else out.push({ time: t });
   }
   return out;
 }
 
 function calcMACD(bars) {
-  const closes = bars.map((x) => x.close);
+  const closes = bars.map((x) => Number(x?.close));
   if (closes.length === 0) return { dif: [], dea: [], hist: [] };
+  const firstClose = Number.isFinite(closes[0]) ? closes[0] : 0;
   const shortK = 2 / 13;
   const longK = 2 / 27;
   const signalK = 2 / 10;
-  let shortEMA = closes[0];
-  let longEMA = closes[0];
+  let shortEMA = firstClose;
+  let longEMA = firstClose;
   let signalEMA = 0;
   const dif = [];
   const dea = [];
   const hist = [];
+  let lastClose = firstClose;
   for (let i = 0; i < closes.length; i += 1) {
+    const close = Number.isFinite(closes[i]) ? closes[i] : lastClose;
+    lastClose = close;
     if (i > 0) {
-      shortEMA = closes[i] * shortK + shortEMA * (1 - shortK);
-      longEMA = closes[i] * longK + longEMA * (1 - longK);
+      shortEMA = close * shortK + shortEMA * (1 - shortK);
+      longEMA = close * longK + longEMA * (1 - longK);
     }
     const d = shortEMA - longEMA;
     signalEMA = i === 0 ? d : d * signalK + signalEMA * (1 - signalK);
     const h = (d - signalEMA) * 2;
-    const ts = bars[i].adjusted_time;
+    const ts = Number(bars[i]?.adjusted_time || 0);
     dif.push({ time: ts, value: d });
     dea.push({ time: ts, value: signalEMA });
     hist.push({ time: ts, value: h, color: h >= 0 ? "#4fc3f7" : "#ef9a9a" });
@@ -620,28 +632,53 @@ function calcMACD(bars) {
 function renderSeries() {
   const bars = state.bars;
   if (!seriesRefs.candle) return;
-  seriesRefs.candle.setData(
-    bars.map((bar) => ({
-      time: bar.adjusted_time,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
+  const candleData = bars
+    .map((bar) => ({
+      time: Number(bar?.adjusted_time || 0),
+      open: Number(bar?.open),
+      high: Number(bar?.high),
+      low: Number(bar?.low),
+      close: Number(bar?.close),
     }))
-  );
-  seriesRefs.ma20.setData(buildMA20Data(bars));
-  seriesRefs.volume.setData(
-    bars.map((bar) => ({
-      time: bar.adjusted_time,
-      value: bar.volume,
-      color: "rgba(0,0,0,0)",
-    }))
-  );
+    .filter(
+      (x) =>
+        Number.isFinite(x.time) &&
+        Number.isFinite(x.open) &&
+        Number.isFinite(x.high) &&
+        Number.isFinite(x.low) &&
+        Number.isFinite(x.close)
+    );
+  const ma20Data = buildMA20Data(bars);
+  const volumeData = bars.map((bar) => ({
+    time: Number(bar?.adjusted_time || 0),
+    value: Number.isFinite(Number(bar?.volume)) ? Number(bar?.volume) : 0,
+    color: "rgba(0,0,0,0)",
+  }));
+
+  try {
+    seriesRefs.candle.setData(candleData);
+  } catch (e) {
+    console.error("[chart] candle setData failed", e);
+  }
+  try {
+    seriesRefs.ma20.setData(ma20Data);
+  } catch (e) {
+    console.error("[chart] ma20 setData failed", e);
+  }
+  try {
+    seriesRefs.volume.setData(volumeData);
+  } catch (e) {
+    console.error("[chart] volume setData failed", e);
+  }
   const m = calcMACD(bars);
   state.macdHist = m.hist;
-  seriesRefs.dif.setData(m.dif);
-  seriesRefs.dea.setData(m.dea);
-  seriesRefs.hist.setData(m.hist.map((x) => ({ ...x, color: "rgba(0,0,0,0)" })));
+  try {
+    seriesRefs.dif.setData(m.dif);
+    seriesRefs.dea.setData(m.dea);
+    seriesRefs.hist.setData(m.hist.map((x) => ({ ...x, color: "rgba(0,0,0,0)" })));
+  } catch (e) {
+    console.error("[chart] macd setData failed", e);
+  }
   scheduleChannelRecalc();
   viewVersion.value += 1;
 }
@@ -1930,6 +1967,7 @@ const selectedPrevBar = computed(() => {
 const quoteHeader = computed(() => {
   const bar = selectedBar.value;
   const prev = selectedPrevBar.value;
+  const barIndex = selectedBarIndex.value;
   const changeRaw =
     bar &&
     prev &&
@@ -1958,6 +1996,7 @@ const quoteHeader = computed(() => {
     close: bar ? formatPrice(bar.close) : "--",
     volume: bar ? formatVolume(bar.volume) : "--",
     change: Number.isFinite(changeRaw) ? formatSignedChange(changeRaw) : "--",
+    index: barIndex >= 0 ? String(barIndex) : "--",
     changeClass,
   };
 });
@@ -2469,6 +2508,8 @@ onUnmounted(() => {
           <span>{{ quoteHeader.volume }}</span>
           <span class="dim">Change</span>
           <span :class="quoteHeader.changeClass">{{ quoteHeader.change }}</span>
+          <span class="dim">Index</span>
+          <span>{{ quoteHeader.index }}</span>
         </div>
         <div v-if="props.showChannelDebug" class="channel-debug-panel">
           <div class="channel-debug-title">
