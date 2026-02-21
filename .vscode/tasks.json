@@ -1,0 +1,67 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "go: debug prep",
+      "dependsOn": [
+        "go: build"
+      ],
+      "dependsOrder": "sequence"
+    },
+    {
+      "label": "go: build",
+      "type": "shell",
+      "command": "go build ./...",
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "go: test",
+      "type": "shell",
+      "command": "go test ./...",
+      "group": "test",
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "go: run",
+      "type": "shell",
+      "command": "go run . -config ./config.json",
+      "problemMatcher": [
+        "$go"
+      ]
+    },
+    {
+      "label": "web: dev",
+      "type": "shell",
+      "command": "npm --prefix web run dev",
+      "isBackground": true,
+      "problemMatcher": {
+        "owner": "vite",
+        "pattern": {
+          "regexp": "^(?!x)x$"
+        },
+        "background": {
+          "activeOnStart": true,
+          "beginsPattern": ".*vite.*building|.*VITE.*",
+          "endsPattern": ".*Local:\\s+http://localhost:5173/.*|.*ready in.*"
+        }
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "dedicated"
+      }
+    },
+    {
+      "label": "web: dev stop",
+      "type": "shell",
+      "command": "echo web dev stop"
+    }
+  ]
+}

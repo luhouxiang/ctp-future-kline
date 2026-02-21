@@ -7,7 +7,8 @@
 *.dll
 *.so
 *.dylib
-
+*.lib
+*.con
 # Test binary, built with `go test -c`
 *.test
 
@@ -15,8 +16,14 @@
 *.out
 coverage.*
 *.coverprofile
-profile.cov
-
+*.cov
+flow/*.db
+flow/*.db-shm
+flow/*.db-wal
+flow/*.log
+web/package-lock.json
+web/dist/
+web/node_modules/
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
@@ -27,6 +34,11 @@ go.work.sum
 # env file
 .env
 
+# frontend
+
+
 # Editor/IDE
 # .idea/
 # .vscode/
+__debug_bin.exe*
+.tmp/

@@ -1,0 +1,47 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "name": "Go: Run ctp-future-kline",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}",
+      "cwd": "${workspaceFolder}",
+      "args": [
+        "-config",
+        "${workspaceFolder}/config.json"
+      ],
+      "preLaunchTask": "go: debug prep",
+      "presentation": {
+        "order": 2
+      }
+    },
+    {
+      "name": "Vue: Launch Chrome (Vite)",
+      "type": "pwa-chrome",
+      "request": "launch",
+      "url": "http://localhost:5173",
+      "webRoot": "${workspaceFolder}/web",
+      "sourceMaps": true,
+      "preLaunchTask": "web: dev",
+      "postDebugTask": "web: dev stop",
+      "presentation": {
+        "order": 3
+      }
+    }
+  ],
+  "compounds": [
+    {
+      "name": "Go + Vue: Full Debug",
+      "configurations": [
+        "Go: Run ctp-future-kline",
+        "Vue: Launch Chrome (Vite)"
+      ],
+      "stopAll": true,
+      "presentation": {
+        "order": 1
+      }
+    }
+  ]
+}
