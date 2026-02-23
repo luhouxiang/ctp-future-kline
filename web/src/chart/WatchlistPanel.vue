@@ -8,8 +8,9 @@ const props = defineProps({
   current: { type: String, default: '' },
   drawings: { type: Array, default: () => [] },
   selectedDrawingId: { type: String, default: '' },
-  activeTab: { type: String, default: 'watchlist' },
+  activeTab: { type: String, default: 'reversal' },
   channels: { type: Object, default: () => ({ rows: [], selected_id: '', settings: {}, detail: null }) },
+  reversal: { type: Object, default: () => ({ settings: {}, results: { lines: [], events: [] }, selected_id: '' }) },
 })
 
 const emit = defineEmits([
@@ -21,6 +22,7 @@ const emit = defineEmits([
   'delete-drawing',
   'channel-action',
   'channel-settings',
+  'reversal-action',
 ])
 
 const hoverRowId = ref('')
@@ -87,6 +89,36 @@ const filteredChannels = computed(() => {
   if (filterStatus.value !== 'all') rows = rows.filter((x) => String(x.status || '') === filterStatus.value)
   if (filterMethod.value !== 'all') rows = rows.filter((x) => String(x.method || '') === filterMethod.value)
   rows = rows.filter((x) => Number(x.score || 0) >= Number(scoreMin.value || 0))
+  return rows
+})
+
+const reversalRows = computed(() => {
+  const events = Array.isArray(props.reversal?.results?.events) ? props.reversal.results.events : []
+  return events
+    .slice()
+    .sort((a, b) => Number(b?.score || 0) - Number(a?.score || 0))
+    .map((ev, idx) => ({
+      id: String(ev?.id || idx),
+      direction: String(ev?.direction || ''),
+      confirmed: !!ev?.confirmed,
+      invalidated: !!ev?.invalidated,
+      score: Number(ev?.score || 0),
+      p1: Number(ev?.p1?.index ?? -1),
+      p2: Number(ev?.p2?.index ?? -1),
+      p3: Number(ev?.p3?.index ?? -1),
+      label: String(ev?.label || '1-2-3 反转'),
+      active: String(props.reversal?.selected_id || '') === String(ev?.id || ''),
+    }))
+})
+
+const reversalDiagnostics = computed(() => {
+  const lines = Array.isArray(props.reversal?.results?.lines) ? props.reversal.results.lines : []
+  const events = Array.isArray(props.reversal?.results?.events) ? props.reversal.results.events : []
+  const debug = Array.isArray(props.reversal?.results?.debug) ? props.reversal.results.debug : []
+  const rows = []
+  rows.push(`mid_lines=${lines.length} events=${events.length}`)
+  if (!lines.length) rows.push('当前为何无线: 当前可视区未产出中趋势线')
+  debug.forEach((x) => rows.push(String(x || '')))
   return rows
 })
 
@@ -157,6 +189,9 @@ function statusLabel(s) {
         <button class="tv-watch-tab" :class="{ active: props.activeTab === 'channel' }" @click="emit('set-active-tab', 'channel')">
           通道
         </button>
+        <button class="tv-watch-tab" :class="{ active: props.activeTab === 'reversal' }" @click="emit('set-active-tab', 'reversal')">
+          反转
+        </button>
       </div>
       <button class="tv-btn" @click="emit('toggle')">{{ props.open ? '收起' : '展开' }}</button>
     </div>
@@ -211,7 +246,7 @@ function statusLabel(s) {
       <div v-if="!props.drawings.length" class="tv-object-empty">暂无对象</div>
     </div>
 
-    <div v-else-if="props.open" class="tv-watchlist-body tv-channel-tab">
+    <div v-else-if="props.open && props.activeTab === 'channel'" class="tv-watchlist-body tv-channel-tab">
       <details class="tv-channel-help" open>
         <summary>参数说明与操作语义</summary>
         <div class="tv-channel-help-content">
@@ -342,6 +377,40 @@ function statusLabel(s) {
         <div class="mono">时间: {{ props.channels.detail.updated_at || '-' }}</div>
       </div>
     </div>
+
+    <div v-else-if="props.open" class="tv-watchlist-body tv-channel-tab">
+      <div class="tv-channel-settings-head">1-2-3 反转信号</div>
+      <div class="tv-channel-actions-row">
+        <button class="tv-btn" @click="emit('reversal-action', { type: 'recalc' })">重算</button>
+      </div>
+      <div class="tv-reversal-diagnostics">
+        <div class="tv-reversal-diagnostics-title">当前为何无线</div>
+        <div v-for="(row, idx) in reversalDiagnostics" :key="`rev-diag-${idx}`" class="mono tv-reversal-diagnostics-row">
+          {{ row }}
+        </div>
+      </div>
+      <div class="tv-channel-list">
+        <div
+          v-for="row in reversalRows"
+          :key="row.id"
+          class="tv-channel-row"
+          :class="{ active: row.active }"
+        >
+          <div class="tv-channel-row-main" @click="emit('reversal-action', { type: 'select', id: row.id })">
+            <div class="tv-channel-row-top">
+              <span class="mono">{{ row.direction }}</span>
+              <span class="mono">S {{ row.score.toFixed(3) }}</span>
+            </div>
+            <div class="mono">P1 {{ row.p1 }} · P2 {{ row.p2 }} · P3 {{ row.p3 }}</div>
+            <div class="mono">确认 {{ row.confirmed ? 'Y' : 'N' }} · 失效 {{ row.invalidated ? 'Y' : 'N' }}</div>
+            <div class="mono">{{ row.label }}</div>
+          </div>
+          <div class="tv-channel-row-actions">
+            <button class="tv-icon-btn" title="定位" @click.stop="emit('reversal-action', { type: 'focus', id: row.id })">◎</button>
+          </div>
+        </div>
+      </div>
+      <div v-if="!reversalRows.length" class="tv-object-empty">暂无反转信号</div>
+    </div>
   </aside>
 </template>
-

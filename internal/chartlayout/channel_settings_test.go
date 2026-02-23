@@ -37,8 +37,8 @@ func TestChannelSettingsUnmarshalGroupedKeepsDefaults(t *testing.T) {
 	if !s.Display.ShowRansac {
 		t.Fatalf("show_ransac should be true")
 	}
-	if !s.Display.ShowExtrema {
-		t.Fatalf("show_extrema should keep default true")
+	if s.Display.ShowExtrema {
+		t.Fatalf("show_extrema should keep default false")
 	}
 	if !s.Common.LiveApply {
 		t.Fatalf("live_apply should keep default true")

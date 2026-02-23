@@ -66,11 +66,10 @@ function detectWith(settings, bars = makeChannelBars(260)) {
   })
 }
 
-test('default settings produce extrema channels only', () => {
+test('default settings produce no channels when all display switches are off', () => {
   const segments = detectWith(undefined)
   assert.ok(Array.isArray(segments))
-  assert.ok(segments.length >= 1)
-  assert.ok(segments.every((x) => x.method === 'extrema'))
+  assert.deepEqual(segments, [])
 })
 
 test('display switch: only ransac', () => {
@@ -117,7 +116,7 @@ test('legacy flat settings are migrated to grouped structure', () => {
   assert.equal(out.algorithms.extrema.pivotKMinute, 7)
   assert.equal(out.algorithms.ransac.slopeTolAtrFactor, 0.2)
   assert.equal(out.common.hideAuto, true)
-  assert.equal(out.display.showExtrema, true)
+  assert.equal(out.display.showExtrema, false)
   assert.equal(out.display.showRansac, false)
   assert.equal(out.display.showRegression, false)
 })

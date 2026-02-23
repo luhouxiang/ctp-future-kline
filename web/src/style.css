@@ -253,6 +253,57 @@ select {
   gap: 6px;
 }
 
+.tv-reversal-wrap {
+  position: relative;
+  display: flex;
+  gap: 6px;
+}
+
+.tv-reversal-panel {
+  position: absolute;
+  top: 34px;
+  right: 0;
+  z-index: 40;
+  width: 270px;
+  padding: 10px;
+  border: 1px solid #2e4159;
+  border-radius: 8px;
+  background: #132033;
+  display: grid;
+  gap: 8px;
+}
+
+.theme-light .tv-reversal-panel {
+  background: #ffffff;
+  border-color: #d7e2ef;
+}
+
+.tv-reversal-panel label {
+  display: grid;
+  grid-template-columns: 1fr 90px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.tv-reversal-panel input[type="number"] {
+  min-width: 0;
+  width: 90px;
+  padding: 4px 6px;
+}
+
+.tv-reversal-check {
+  display: flex !important;
+  grid-template-columns: none !important;
+  align-items: center;
+  gap: 6px !important;
+}
+
+.tv-reversal-actions {
+  display: flex;
+  gap: 6px;
+}
+
 .tv-btn {
   border: 1px solid #2e4159;
   background: #1a2637;
@@ -682,6 +733,27 @@ select {
   box-sizing: border-box;
 }
 
+.tv-reversal-diagnostics {
+  border: 1px solid #244a85;
+  background: rgba(6, 18, 38, 0.78);
+  border-radius: 8px;
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.tv-reversal-diagnostics-title {
+  color: #9ec7ff;
+  font-size: 12px;
+  margin-bottom: 6px;
+}
+
+.tv-reversal-diagnostics-row {
+  color: #b7c7df;
+  font-size: 11px;
+  line-height: 1.4;
+  word-break: break-all;
+}
+
 .theme-light .tv-channel-grid input,
 .theme-light .tv-channel-filter input,
 .theme-light .tv-channel-filter select {
@@ -957,6 +1029,13 @@ select {
   z-index: 7;
 }
 
+.reversal-overlay-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 8;
+}
+
 .channel-fill {
   fill-opacity: 0.06;
 }
@@ -993,6 +1072,62 @@ select {
 .theme-light .channel-label {
   fill: #8a4b1a;
   stroke: rgba(248, 251, 255, 0.9);
+}
+
+.reversal-line {
+  stroke: #9ad1ff;
+  stroke-width: 1.4;
+  stroke-opacity: 0.85;
+}
+
+.reversal-line.selected {
+  stroke: #ffd166;
+  stroke-width: 2;
+}
+
+.reversal-point {
+  fill: #ffe0b2;
+  stroke: #ff7043;
+  stroke-width: 1;
+}
+
+.reversal-point.selected {
+  stroke-width: 1.4;
+}
+
+.reversal-label {
+  font-size: 10px;
+  fill: #ffd180;
+  stroke: rgba(11, 18, 32, 0.65);
+  stroke-width: 0.9;
+  paint-order: stroke;
+}
+
+.reversal-signal {
+  fill: #ffd166;
+  stroke: #fca311;
+  stroke-width: 1;
+}
+
+.reversal-signal.selected {
+  stroke-width: 1.8;
+}
+
+.reversal-signal.invalid {
+  fill: #9aa4b2;
+  stroke: #7f8c9a;
+}
+
+.reversal-signal-label {
+  font-size: 10px;
+  fill: #ffd166;
+  stroke: rgba(11, 18, 32, 0.65);
+  stroke-width: 0.9;
+  paint-order: stroke;
+}
+
+.reversal-signal-label.invalid {
+  fill: #9aa4b2;
 }
 
 .macd-stem-layer,

@@ -4,6 +4,8 @@ import TopToolbar from './TopToolbar.vue'
 import LeftDrawToolbar from './LeftDrawToolbar.vue'
 import WatchlistPanel from './WatchlistPanel.vue'
 import PriceChartPane from './PriceChartPane.vue'
+import { DEFAULT_CHANNEL_SETTINGS, normalizeChannelSettingsV2 } from './analysis/channelDetector'
+import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis/reversalDetector'
 
 const paneRef = ref(null)
 const owner = ref('admin')
@@ -31,7 +33,7 @@ const layout = reactive({
 
 const drawings = ref([])
 const watchlist = ref([])
-const activeRightTab = ref('watchlist')
+const activeRightTab = ref('reversal')
 const selectedDrawingId = ref('')
 const saveStatus = ref('idle')
 const activeTool = ref('cursor')
@@ -43,6 +45,12 @@ const channelState = reactive({
   rows: [],
   detail: null,
   persistVersion: 0,
+})
+const reversalState = reactive({
+  settings: normalizeReversalSettings(DEFAULT_REVERSAL_SETTINGS),
+  results: { lines: [], events: [] },
+  persistVersion: 0,
+  selected_id: '',
 })
 const watchlistWidth = ref(280)
 const minWatchlistWidth = 180
@@ -56,6 +64,14 @@ const DRAWING_TYPE_LABELS = {
   vline: '垂直线',
   rect: '矩形',
   text: '文本',
+}
+
+function normalizeChannelSettingsWithDisplayOff(raw) {
+  const out = normalizeChannelSettingsV2(raw || DEFAULT_CHANNEL_SETTINGS)
+  out.display.showExtrema = false
+  out.display.showRansac = false
+  out.display.showRegression = false
+  return out
 }
 
 function normalizeDrawingForSave(d) {
@@ -118,6 +134,12 @@ const layoutPayload = computed(() => ({
     settings: channelState.settings,
     decisions: channelState.decisions,
     selected_id: channelState.selected_id,
+  },
+  reversal: {
+    settings: reversalState.settings,
+    results: reversalState.results,
+    persistVersion: reversalState.persistVersion,
+    selected_id: reversalState.selected_id,
   },
   drawings: drawings.value,
 }))
@@ -193,9 +215,17 @@ async function loadLayout() {
     layout.indicators.ma20 = data.indicators?.ma20 ?? true
     layout.indicators.macd = data.indicators?.macd ?? true
     layout.indicators.volume = data.indicators?.volume ?? true
-    channelState.settings = data.channels?.settings || {}
-    channelState.decisions = Array.isArray(data.channels?.decisions) ? data.channels.decisions : []
-    channelState.selected_id = data.channels?.selected_id || ''
+    channelState.settings = normalizeChannelSettingsWithDisplayOff(data.channels?.settings || {})
+    channelState.decisions = []
+    channelState.selected_id = ''
+    reversalState.settings = normalizeReversalSettings({
+      ...(data.reversal?.settings || {}),
+      enabled: true,
+    })
+    reversalState.results = data.reversal?.results || { lines: [], events: [] }
+    reversalState.persistVersion = Number(data.reversal?.persistVersion || data.reversal?.persist_version || 0) || 0
+    reversalState.selected_id = String(data.reversal?.selected_id || '')
+    activeRightTab.value = 'reversal'
     drawings.value = (data.drawings || []).map((d) => normalizeDrawingForSave(d))
     selectedDrawingId.value = ''
   } catch {
@@ -308,6 +338,16 @@ function onToggleChannelDebug() {
   channelDebug.value = !channelDebug.value
 }
 
+function onToggleReversal() {
+  reversalState.settings = normalizeReversalSettings({
+    ...reversalState.settings,
+    enabled: !reversalState.settings?.enabled,
+  })
+  paneRef.value?.applyReversalSettings?.({ settings: reversalState.settings, force: true })
+  reversalState.persistVersion += 1
+  scheduleSave()
+}
+
 function onChannelViewChange(payload) {
   if (!payload || typeof payload !== 'object') return
   channelState.rows = Array.isArray(payload.rows) ? payload.rows : []
@@ -328,6 +368,35 @@ function onChannelAction(action) {
 
 function onChannelSettings(payload) {
   paneRef.value?.applyChannelSettings?.(payload || null)
+}
+
+function onReversalViewChange(payload) {
+  if (!payload || typeof payload !== 'object') return
+  if (payload.results) reversalState.results = payload.results
+  if (payload.selected_id !== undefined) reversalState.selected_id = String(payload.selected_id || '')
+  const pv = Number(payload.persistVersion || payload.persist_version || 0)
+  if (Number.isFinite(pv) && pv !== Number(reversalState.persistVersion || 0)) {
+    if (payload.settings) reversalState.settings = normalizeReversalSettings(payload.settings)
+    reversalState.persistVersion = pv
+    scheduleSave()
+  }
+}
+
+function onSetReversalSettings(payload) {
+  paneRef.value?.applyReversalSettings?.(payload || null)
+}
+
+function onRecalcReversal() {
+  paneRef.value?.recalcReversalNow?.()
+}
+
+function onReversalAction(action) {
+  const type = String(action?.type || '')
+  if (type === 'recalc') {
+    onRecalcReversal()
+    return
+  }
+  paneRef.value?.applyReversalAction?.(action || null)
 }
 
 const bodyStyle = computed(() => {
@@ -406,11 +475,15 @@ onUnmounted(() => {
       :save-status="saveStatus"
       :active-tool="activeTool"
       :channel-debug="channelDebug"
+      :reversal-settings="reversalState.settings"
       @set-timeframe="onSetTimeframe"
       @set-theme="onSetTheme"
       @set-tool="onSetTool"
       @delete-selected="onDeleteSelected"
       @toggle-channel-debug="onToggleChannelDebug"
+      @toggle-reversal="onToggleReversal"
+      @set-reversal-settings="onSetReversalSettings"
+      @recalc-reversal="onRecalcReversal"
     />
 
     <div class="tv-body" :style="bodyStyle">
@@ -427,9 +500,11 @@ onUnmounted(() => {
           :indicators="layout.indicators"
           :show-channel-debug="channelDebug"
           :channel-state="channelState"
+          :reversal-state="reversalState"
           @set-drawings="onSetDrawings"
           @select-drawing="onSelectDrawing"
           @channel-view-change="onChannelViewChange"
+          @reversal-view-change="onReversalViewChange"
         />
       </div>
 
@@ -446,6 +521,11 @@ onUnmounted(() => {
         :current="scope.symbol"
         :drawings="objectTreeRows"
         :channels="channelState"
+        :reversal="{
+          settings: reversalState.settings,
+          results: reversalState.results,
+          selected_id: reversalState.selected_id || ''
+        }"
         :selected-drawing-id="selectedDrawingId"
         :active-tab="activeRightTab"
         @toggle="layout.panes.right_watchlist_open = !layout.panes.right_watchlist_open"
@@ -456,6 +536,7 @@ onUnmounted(() => {
         @delete-drawing="onDeleteDrawingById"
         @channel-action="onChannelAction"
         @channel-settings="onChannelSettings"
+        @reversal-action="onReversalAction"
       />
     </div>
   </div>

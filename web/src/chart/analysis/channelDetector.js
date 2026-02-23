@@ -1,6 +1,6 @@
 export const DEFAULT_CHANNEL_SETTINGS = {
   display: {
-    showExtrema: true,
+    showExtrema: false,
     showRansac: false,
     showRegression: false,
   },

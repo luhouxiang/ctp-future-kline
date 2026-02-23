@@ -15,6 +15,11 @@ import {
   detectChannelsInVisibleRange,
   normalizeChannelSettingsV2,
 } from "./analysis/channelDetector";
+import {
+  DEFAULT_REVERSAL_SETTINGS,
+  detectReversalsInVisibleRange,
+  normalizeReversalSettings,
+} from "./analysis/reversalDetector";
 
 const CHUNK_SIZE = 2000;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
@@ -39,9 +44,13 @@ const props = defineProps({
     type: Object,
     default: () => ({ settings: {}, decisions: [], selected_id: "" }),
   },
+  reversalState: {
+    type: Object,
+    default: () => ({ settings: {}, results: { lines: [], events: [] }, persistVersion: 0 }),
+  },
 });
 
-const emit = defineEmits(["set-drawings", "select-drawing", "channel-view-change"]);
+const emit = defineEmits(["set-drawings", "select-drawing", "channel-view-change", "reversal-view-change"]);
 
 const state = reactive({
   loading: false,
@@ -61,6 +70,10 @@ const state = reactive({
     visibleRange: { start: -1, end: -1 },
     params: null,
   },
+  reversalSettings: normalizeReversalSettings(DEFAULT_REVERSAL_SETTINGS),
+  reversalResults: { lines: [], events: [] },
+  reversalPersistVersion: 0,
+  selectedReversalEventId: "",
   hasMore: true,
   resolvedSymbol: "",
 });
@@ -122,6 +135,7 @@ let pointerDownMeta = null;
 let dragPointerId = null;
 let globalPointerMoveHandler = null;
 let channelRecalcTimer = null;
+let reversalRecalcTimer = null;
 let channelDrag = null;
 
 const drawState = reactive({
@@ -187,16 +201,26 @@ watch(
   ],
   () => {
     const val = props.channelState || {};
-    state.channelSettings = normalizeChannelSettingsV2(val.settings || {});
-    state.channelDecisions = Array.isArray(val.decisions)
-      ? JSON.parse(JSON.stringify(val.decisions))
-      : [];
-    state.selectedChannelId = String(val.selected_id || "");
+    state.channelSettings = forceChannelDisplayOff(val.settings || {});
+    state.channelDecisions = [];
+    state.selectedChannelId = "";
     scheduleChannelRecalc();
     publishChannelView();
   },
   { deep: true, immediate: true }
 );
+
+watch(
+  () => [props.reversalState?.settings, props.scope.symbol, props.scope.type, props.scope.variety, props.scope.timeframe],
+  () => {
+    const val = props.reversalState || {}
+    state.reversalSettings = normalizeReversalSettings(val.settings || {})
+    if (val.results && typeof val.results === "object") state.reversalResults = val.results
+    state.selectedReversalEventId = String(val.selected_id || "")
+    scheduleReversalRecalc()
+  },
+  { deep: true, immediate: true }
+)
 
 const overlaySize = computed(() => ({
   width: overlayMetrics.width,
@@ -444,6 +468,7 @@ function initCharts() {
       target2.timeScale().setVisibleLogicalRange(range);
       syncGuard = false;
       scheduleChannelRecalc();
+      scheduleReversalRecalc();
       viewVersion.value += 1;
       if (range.from < 30) void loadOlderChunk();
     });
@@ -680,6 +705,7 @@ function renderSeries() {
     console.error("[chart] macd setData failed", e);
   }
   scheduleChannelRecalc();
+  scheduleReversalRecalc();
   viewVersion.value += 1;
 }
 
@@ -723,10 +749,23 @@ function normalizeMethodName(method) {
 
 function methodDisplayName(method) {
   const m = normalizeMethodName(method);
-  if (m === "extrema") return "极值(extrema)";
+  if (m === "extrema") return "极�?extrema)";
   if (m === "ransac") return "RANSAC(ransac)";
   if (m === "regression") return "回归(regression)";
   return m || "-";
+}
+
+function forceChannelDisplayOff(raw) {
+  const out = normalizeChannelSettingsV2(raw || {});
+  out.display.showExtrema = false;
+  out.display.showRansac = false;
+  out.display.showRegression = false;
+  return out;
+}
+
+function allChannelDisplayOff(settings) {
+  const d = settings?.display || {};
+  return !d.showExtrema && !d.showRansac && !d.showRegression;
 }
 
 function isMethodEnabled(method) {
@@ -1029,6 +1068,55 @@ function scheduleChannelRecalc() {
     channelRecalcTimer = null;
     recalcChannelsNow();
   }, 80);
+}
+
+function publishReversalView() {
+  emit("reversal-view-change", {
+    settings: state.reversalSettings,
+    results: state.reversalResults,
+    persistVersion: state.reversalPersistVersion,
+    selected_id: state.selectedReversalEventId || "",
+  });
+}
+
+function recalcReversalNow() {
+  if (!state.bars.length) {
+    state.reversalResults = { lines: [], events: [] };
+    publishReversalView();
+    viewVersion.value += 1;
+    return;
+  }
+  const vr = currentVisibleIndexRange();
+  if (!vr) return;
+  state.reversalResults = detectReversalsInVisibleRange({
+    bars: state.bars,
+    visibleStartIndex: vr.start,
+    visibleEndIndex: vr.end,
+    timeframe: props.scope?.timeframe || "1m",
+    settings: state.reversalSettings,
+  });
+  if (state.selectedReversalEventId) {
+    const events = Array.isArray(state.reversalResults?.events)
+      ? state.reversalResults.events
+      : [];
+    if (
+      !events.some(
+        (x) => String(x.id || "") === String(state.selectedReversalEventId || "")
+      )
+    ) {
+      state.selectedReversalEventId = "";
+    }
+  }
+  publishReversalView();
+  viewVersion.value += 1;
+}
+
+function scheduleReversalRecalc() {
+  if (reversalRecalcTimer) clearTimeout(reversalRecalcTimer);
+  reversalRecalcTimer = setTimeout(() => {
+    reversalRecalcTimer = null;
+    recalcReversalNow();
+  }, 90);
 }
 
 async function fetchChunk(endParam) {
@@ -1478,7 +1566,7 @@ function applyChannelAction(action) {
     return;
   }
   if (type === "reset-settings") {
-    state.channelSettings = normalizeChannelSettingsV2(DEFAULT_CHANNEL_SETTINGS);
+    state.channelSettings = forceChannelDisplayOff(DEFAULT_CHANNEL_SETTINGS);
     state.channelPersistVersion += 1;
     scheduleChannelRecalc();
     publishChannelView();
@@ -1551,11 +1639,57 @@ function applyChannelAction(action) {
 }
 
 function applyChannelSettings(payload) {
-  const settings = normalizeChannelSettingsV2(payload?.settings || {});
+  const settings = forceChannelDisplayOff(payload?.settings || {});
   state.channelSettings = settings;
   state.channelPersistVersion += 1;
   if (payload?.force || settings?.common?.liveApply) scheduleChannelRecalc();
   publishChannelView();
+}
+
+function applyReversalSettings(payload) {
+  const settings = normalizeReversalSettings(payload?.settings || {});
+  state.reversalSettings = settings;
+  state.reversalPersistVersion += 1;
+  if (payload?.force || settings?.enabled) scheduleReversalRecalc();
+  publishReversalView();
+}
+
+function focusTimeOnCandle(time) {
+  const ts = Number(time || 0);
+  if (!Number.isFinite(ts) || ts <= 0 || !chartRefs.candle) return;
+  const sec = parseTimeframeSeconds(props.scope?.timeframe || "1m");
+  const vr = currentVisibleIndexRange();
+  const n = vr ? Math.max(60, vr.end - vr.start + 1) : 200;
+  const from = Math.max(0, Math.floor(ts - sec * n * 0.65));
+  const to = Math.max(from + sec * 20, Math.floor(ts + sec * n * 0.35));
+  try {
+    chartRefs.candle.timeScale().setVisibleRange({ from, to });
+    chartRefs.macd?.timeScale?.().setVisibleRange?.({ from, to });
+    chartRefs.volume?.timeScale?.().setVisibleRange?.({ from, to });
+  } catch {
+    // ignore
+  }
+}
+
+function applyReversalAction(action) {
+  if (!action || typeof action !== "object") return;
+  const type = String(action.type || "");
+  const id = String(action.id || "");
+  const events = Array.isArray(state.reversalResults?.events) ? state.reversalResults.events : [];
+  const ev = events.find((x) => String(x.id || "") === id) || null;
+  if (type === "select") {
+    state.selectedReversalEventId = id;
+    publishReversalView();
+    viewVersion.value += 1;
+    return;
+  }
+  if (type === "focus") {
+    state.selectedReversalEventId = id;
+    const p = ev?.p3 || ev?.p2 || ev?.p1 || null;
+    focusTimeOnCandle(Number(p?.time || 0));
+    publishReversalView();
+    viewVersion.value += 1;
+  }
 }
 
 function getChannelSegments() {
@@ -1581,11 +1715,14 @@ defineExpose({
   getChannelPanelState,
   applyChannelAction,
   applyChannelSettings,
+  applyReversalSettings,
+  applyReversalAction,
+  recalcReversalNow,
 });
 
 const channelOverlayShapes = computed(() => {
   void viewVersion.value;
-  if (!state.channelSegments.length || !seriesRefs.candle) return [];
+  if (allChannelDisplayOff(state.channelSettings) || !state.channelSegments.length || !seriesRefs.candle) return [];
   const w = overlaySize.value?.width || 0;
   const h = overlaySize.value?.height || 0;
   if (w <= 0 || h <= 0) return [];
@@ -1653,6 +1790,96 @@ const channelOverlayShapes = computed(() => {
       };
     })
     .filter((x) => !!x);
+});
+
+const reversalOverlayData = computed(() => {
+  void viewVersion.value;
+  if (!seriesRefs.candle) return { lines: [], events: [] };
+  const lines = Array.isArray(state.reversalResults?.lines) ? state.reversalResults.lines : [];
+  const events = Array.isArray(state.reversalResults?.events) ? state.reversalResults.events : [];
+  const outLines = lines
+    .map((ln, idx) => {
+      const x0 = mapTimeToXWithFallback(Number(state.bars[Number(ln.startIndex)]?.adjusted_time || 0));
+      const x1 = mapTimeToXWithFallback(Number(state.bars[Number(ln.endIndex)]?.adjusted_time || 0));
+      const y0 = Number(seriesRefs.candle.priceToCoordinate(Number(ln.startPrice)));
+      const y1 = Number(seriesRefs.candle.priceToCoordinate(Number(ln.endPrice)));
+      if (x0 === null || x1 === null || !Number.isFinite(y0) || !Number.isFinite(y1)) return null;
+      return {
+        id: String(ln.id || `rev-line-${idx}`),
+        x0,
+        y0,
+        x1,
+        y1,
+        side: String(ln.side || ""),
+      };
+    })
+    .filter((x) => !!x);
+  const outEvents = events
+    .map((ev, idx) => {
+      const p1 = ev?.p1 || null;
+      const p2 = ev?.p2 || null;
+      const p3 = ev?.p3 || null;
+      const mapPoint = (p) => {
+        if (!p) return null;
+        const t = Number(state.bars[Number(p.index)]?.adjusted_time || p.time || 0);
+        const x = mapTimeToXWithFallback(t);
+        const y = Number(seriesRefs.candle.priceToCoordinate(Number(p.price)));
+        if (x === null || !Number.isFinite(y)) return null;
+        return { x, y, price: Number(p.price), index: Number(p.index) };
+      };
+      const mp1 = mapPoint(p1);
+      const mp2 = mapPoint(p2);
+      const mp3 = mapPoint(p3);
+      return {
+        id: String(ev.id || `rev-ev-${idx}`),
+        lineId: String(ev.lineId || ""),
+        direction: String(ev.direction || ""),
+        confirmed: !!ev.confirmed,
+        invalidated: !!ev.invalidated,
+        selected:
+          String(ev.id || "") === String(state.selectedReversalEventId || ""),
+        label: String(ev.label || "1-2-3 反转"),
+        p1: mp1,
+        p2: mp2,
+        p3: mp3,
+      };
+    })
+    .filter((x) => !!x);
+  return { lines: outLines, events: outEvents };
+});
+
+const reversalDebugRows = computed(() => {
+  void viewVersion.value;
+  if (!props.showChannelDebug) return [];
+  const lines = Array.isArray(state.reversalResults?.lines) ? state.reversalResults.lines : [];
+  const events = Array.isArray(state.reversalResults?.events) ? state.reversalResults.events : [];
+  const rows = events.slice(0, 8).map((ev, idx) => {
+    const c1 = !!ev?.conditions?.c1?.met;
+    const c2 = !!ev?.conditions?.c2?.met;
+    const c3 = !!ev?.conditions?.c3?.met;
+    return {
+      id: String(ev.id || idx),
+      text: `${idx + 1}. ${String(ev.direction || "-")} C1:${c1 ? "Y" : "N"} C2:${
+        c2 ? "Y" : "N"
+      } C3:${c3 ? "Y" : "N"} confirmed:${ev.confirmed ? "Y" : "N"} invalid:${
+        ev.invalidated ? "Y" : "N"
+      } p3:${Number(ev?.p3?.index ?? -1)}`,
+    };
+  });
+  const dbg = Array.isArray(state.reversalResults?.debug) ? state.reversalResults.debug : [];
+  if (!lines.length) {
+    rows.unshift({
+      id: "__rev-no-line__",
+      text: "当前为何无线: 当前可视区未产出中趋势线",
+    });
+  }
+  dbg.slice(0, 8).forEach((txt, idx) => {
+    rows.push({
+      id: `__rev-dbg-${idx}`,
+      text: `[diag] ${String(txt || "")}`,
+    });
+  });
+  return rows;
 });
 
 const overlayShapes = computed(() => {
@@ -2429,6 +2656,10 @@ onUnmounted(() => {
     clearTimeout(channelRecalcTimer);
     channelRecalcTimer = null;
   }
+  if (reversalRecalcTimer) {
+    clearTimeout(reversalRecalcTimer);
+    reversalRecalcTimer = null;
+  }
   if (resizeObserver) resizeObserver.disconnect();
   window.removeEventListener("pointerup", onPointerUp);
   if (globalPointerMoveHandler)
@@ -2518,6 +2749,12 @@ onUnmounted(() => {
             }}-{{ state.channelDebug.visibleRange.end }}
           </div>
           <div v-for="row in channelDebugRows" :key="row.id" class="channel-debug-row">
+            {{ row.text }}
+          </div>
+          <div class="channel-debug-title" style="margin-top: 6px">
+            REV Debug | ev={{ reversalOverlayData.events.length }}
+          </div>
+          <div v-for="row in reversalDebugRows" :key="`rev-${row.id}`" class="channel-debug-row">
             {{ row.text }}
           </div>
         </div>
@@ -2614,6 +2851,42 @@ onUnmounted(() => {
                 :y="Math.min(seg.yUpper0, seg.yLower0) - 6"
               >
                 {{ seg.label }}
+              </text>
+            </template>
+          </svg>
+        </div>
+        <div class="reversal-overlay-layer">
+          <svg :width="overlaySize.width" :height="overlaySize.height">
+            <template v-for="ln in reversalOverlayData.lines" :key="ln.id">
+              <line
+                :class="['reversal-line', { selected: reversalOverlayData.events.some((e) => e.selected && String(e.lineId || '') === String(ln.id || '')) }]"
+                :x1="ln.x0"
+                :y1="ln.y0"
+                :x2="ln.x1"
+                :y2="ln.y1"
+              />
+            </template>
+            <template v-for="ev in reversalOverlayData.events" :key="ev.id">
+              <circle v-if="ev.p1" :class="['reversal-point', 'p1', { selected: ev.selected }]" :cx="ev.p1.x" :cy="ev.p1.y" :r="ev.selected ? 4.5 : 3.5" />
+              <circle v-if="ev.p2" :class="['reversal-point', 'p2', { selected: ev.selected }]" :cx="ev.p2.x" :cy="ev.p2.y" :r="ev.selected ? 4.5 : 3.5" />
+              <circle v-if="ev.p3" :class="['reversal-point', 'p3', { selected: ev.selected }]" :cx="ev.p3.x" :cy="ev.p3.y" :r="ev.selected ? 4.5 : 3.5" />
+              <text v-if="state.reversalSettings?.showLabels && ev.p1" class="reversal-label" :x="ev.p1.x + 4" :y="ev.p1.y - 4">1</text>
+              <text v-if="state.reversalSettings?.showLabels && ev.p2" class="reversal-label" :x="ev.p2.x + 4" :y="ev.p2.y - 4">2</text>
+              <text v-if="state.reversalSettings?.showLabels && ev.p3" class="reversal-label" :x="ev.p3.x + 4" :y="ev.p3.y - 4">3</text>
+              <path
+                v-if="ev.confirmed && ev.p3"
+                :class="['reversal-signal', { invalid: ev.invalidated, selected: ev.selected }]"
+                :d="ev.direction === 'bullish_reversal'
+                  ? `M ${ev.p3.x} ${ev.p3.y + 12} L ${ev.p3.x - 5} ${ev.p3.y + 20} L ${ev.p3.x + 5} ${ev.p3.y + 20} Z`
+                  : `M ${ev.p3.x} ${ev.p3.y - 12} L ${ev.p3.x - 5} ${ev.p3.y - 20} L ${ev.p3.x + 5} ${ev.p3.y - 20} Z`"
+              />
+              <text
+                v-if="ev.confirmed && ev.p3 && state.reversalSettings?.showLabels"
+                :class="['reversal-signal-label', { invalid: ev.invalidated }]"
+                :x="ev.p3.x + 6"
+                :y="ev.direction === 'bullish_reversal' ? ev.p3.y + 18 : ev.p3.y - 16"
+              >
+                {{ ev.label }}
               </text>
             </template>
           </svg>

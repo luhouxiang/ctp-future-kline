@@ -760,6 +760,12 @@ func (s *Server) handleChartLayout(w http.ResponseWriter, r *http.Request) {
 					Decisions:  []chartlayout.ChannelDecision{},
 					SelectedID: "",
 				},
+				Reversal: chartlayout.ReversalLayout{
+					Settings:       chartlayout.DefaultReversalSettings(),
+					Results:        chartlayout.ReversalResult{Lines: []chartlayout.ReversalLine{}, Events: []chartlayout.ReversalEvent{}},
+					PersistVersion: 0,
+					SelectedID:     "",
+				},
 				Drawings: []chartlayout.DrawingObject{},
 			})
 			return

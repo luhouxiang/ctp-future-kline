@@ -89,16 +89,16 @@ type ChannelExtremaSettings struct {
 	// - 小时级（如 1h/2h/4h）使用 PivotKHour
 	// - 日级及以上（如 1d/1w）使用 PivotKDay
 	// K 越大，极值识别越严格（极值点更少，通道更平滑）。
-	PivotKMinute            int     `json:"pivot_k_minute"`
-	PivotKHour              int     `json:"pivot_k_hour"`
-	PivotKDay               int     `json:"pivot_k_day"`
+	PivotKMinute int `json:"pivot_k_minute"`
+	PivotKHour   int `json:"pivot_k_hour"`
+	PivotKDay    int `json:"pivot_k_day"`
 	// MinPairSpanBars/MaxPairSpanBars 用于限制两端锚点极值之间的 K 线跨度（bar 数）。
 	// 跨度过小容易噪声化，跨度过大可能连接到不相关波段。
-	MinPairSpanBars         int     `json:"min_pair_span_bars"`
-	MaxPairSpanBars         int     `json:"max_pair_span_bars"`
+	MinPairSpanBars int `json:"min_pair_span_bars"`
+	MaxPairSpanBars int `json:"max_pair_span_bars"`
 	// SecondPointAtrFactor 表示第二个锚点与首锚点的最小有效分离阈值（以 ATR 为单位）。
 	// 用于过滤“过近的重复极值点”，避免形成无意义连线。
-	SecondPointAtrFactor    float64 `json:"second_point_atr_factor"`
+	SecondPointAtrFactor float64 `json:"second_point_atr_factor"`
 	// BreakToleranceAtrFactor 表示通道约束校验时允许的边界越界容差（以 ATR 为单位）。
 	// 数值越大，对边界附近的噪声/假突破容忍度越高。
 	BreakToleranceAtrFactor float64 `json:"break_tolerance_atr_factor"`
@@ -131,7 +131,7 @@ type ChannelSettings struct {
 func DefaultChannelSettings() ChannelSettings {
 	return ChannelSettings{
 		Display: ChannelDisplaySettings{
-			ShowExtrema:    true,
+			ShowExtrema:    false,
 			ShowRansac:     false,
 			ShowRegression: false,
 		},
@@ -319,6 +319,86 @@ type ChannelLayout struct {
 	SelectedID string            `json:"selected_id,omitempty"`
 }
 
+type ReversalSettings struct {
+	Enabled              bool    `json:"enabled"`
+	MidTrendMinBars      int     `json:"mid_trend_min_bars"`
+	MidTrendMaxBars      int     `json:"mid_trend_max_bars"`
+	PivotKMinute         int     `json:"pivot_k_minute"`
+	PivotKHour           int     `json:"pivot_k_hour"`
+	PivotKDay            int     `json:"pivot_k_day"`
+	LineToleranceAtr     float64 `json:"line_tolerance_atr_factor"`
+	BreakThresholdPct    float64 `json:"break_threshold_pct"`
+	MinSwingAmplitudeAtr float64 `json:"min_swing_amplitude_atr"`
+	ConfirmOnClose       bool    `json:"confirm_on_close"`
+	ShowLabels           bool    `json:"show_labels"`
+}
+
+type ReversalLine struct {
+	ID         string  `json:"id"`
+	Side       string  `json:"side"`
+	StartIndex int     `json:"start_index"`
+	EndIndex   int     `json:"end_index"`
+	StartPrice float64 `json:"start_price"`
+	EndPrice   float64 `json:"end_price"`
+	Slope      float64 `json:"slope"`
+	Intercept  float64 `json:"intercept"`
+	Touches    int     `json:"touches"`
+	Score      float64 `json:"score"`
+}
+
+type ReversalPoint struct {
+	Index int64   `json:"index"`
+	Time  int64   `json:"time"`
+	Price float64 `json:"price"`
+}
+
+type ReversalCondition struct {
+	Met bool  `json:"met"`
+	At  int64 `json:"at"`
+}
+
+type ReversalEvent struct {
+	ID          string                       `json:"id"`
+	LineID      string                       `json:"line_id"`
+	Direction   string                       `json:"direction"`
+	P1          *ReversalPoint               `json:"p1,omitempty"`
+	P2          *ReversalPoint               `json:"p2,omitempty"`
+	P3          *ReversalPoint               `json:"p3,omitempty"`
+	Conditions  map[string]ReversalCondition `json:"conditions,omitempty"`
+	Confirmed   bool                         `json:"confirmed"`
+	Invalidated bool                         `json:"invalidated"`
+	Score       float64                      `json:"score"`
+	Label       string                       `json:"label,omitempty"`
+}
+
+type ReversalResult struct {
+	Lines  []ReversalLine  `json:"lines"`
+	Events []ReversalEvent `json:"events"`
+}
+
+type ReversalLayout struct {
+	Settings       ReversalSettings `json:"settings"`
+	Results        ReversalResult   `json:"results"`
+	PersistVersion int64            `json:"persist_version"`
+	SelectedID     string           `json:"selected_id,omitempty"`
+}
+
+func DefaultReversalSettings() ReversalSettings {
+	return ReversalSettings{
+		Enabled:              true,
+		MidTrendMinBars:      50,
+		MidTrendMaxBars:      2000,
+		PivotKMinute:         3,
+		PivotKHour:           5,
+		PivotKDay:            8,
+		LineToleranceAtr:     1.0,
+		BreakThresholdPct:    3.0,
+		MinSwingAmplitudeAtr: 1.0,
+		ConfirmOnClose:       true,
+		ShowLabels:           true,
+	}
+}
+
 type LayoutSnapshot struct {
 	Owner      string            `json:"owner"`
 	Symbol     string            `json:"symbol"`
@@ -329,6 +409,7 @@ type LayoutSnapshot struct {
 	Panes      PaneSettings      `json:"panes"`
 	Indicators IndicatorSettings `json:"indicators"`
 	Channels   ChannelLayout     `json:"channels"`
+	Reversal   ReversalLayout    `json:"reversal"`
 	Drawings   []DrawingObject   `json:"drawings"`
 	UpdatedAt  time.Time         `json:"updated_at"`
 }
