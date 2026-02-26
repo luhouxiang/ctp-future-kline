@@ -63,6 +63,7 @@ function getParams() {
     symbol: params.get('symbol') || '',
     type: params.get('type') || '',
     variety: params.get('variety') || '',
+    timeframe: params.get('timeframe') || '1m',
     start: params.get('start') || '',
     end: params.get('end') || '',
   }
@@ -351,6 +352,7 @@ async function fetchChunk(endParam, isInitial) {
     symbol: p.symbol,
     type: p.type,
     variety: p.variety || '',
+    timeframe: p.timeframe || '1m',
     end: endParam,
     limit: String(CHUNK_SIZE),
   })
@@ -365,7 +367,11 @@ async function fetchChunk(endParam, isInitial) {
   state.debug.lastRequestEnd = endParam
   const resp = await fetch(`/api/kline/bars?${query}`)
   if (!resp.ok) {
-    throw new Error(`HTTP ${resp.status}`)
+    const msg = (await resp.text()) || `HTTP ${resp.status}`
+    if (resp.status === 400 || resp.status === 422) {
+      alert(msg)
+    }
+    throw new Error(msg)
   }
   const data = await resp.json()
   console.log('[ChartView] fetch result', {

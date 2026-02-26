@@ -37,6 +37,19 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 		`CREATE INDEX idx_kline_search_variety ON kline_search_index(variety)`,
 		`CREATE INDEX idx_kline_search_time_range ON kline_search_index(min_time, max_time)`,
 		`CREATE INDEX idx_kline_search_kind ON kline_search_index(kind)`,
+		`CREATE TABLE IF NOT EXISTS trading_sessions (
+  variety VARCHAR(32) NOT NULL,
+  session_text VARCHAR(255) NOT NULL,
+  session_json JSON NOT NULL,
+  is_completed TINYINT NOT NULL DEFAULT 0,
+  sample_trade_date DATE NULL,
+  validated_trade_date DATE NULL,
+  match_ratio DOUBLE NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (variety)
+)`,
+		`CREATE INDEX idx_trading_sessions_completed ON trading_sessions(is_completed)`,
+		`CREATE INDEX idx_trading_sessions_updated_at ON trading_sessions(updated_at)`,
 		`CREATE TABLE IF NOT EXISTS bus_consume_dedup (
   consumer_id VARCHAR(128) NOT NULL,
   event_id VARCHAR(128) NOT NULL,

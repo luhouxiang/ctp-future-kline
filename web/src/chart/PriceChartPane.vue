@@ -1124,11 +1124,18 @@ async function fetchChunk(endParam) {
     symbol: props.scope.symbol,
     type: props.scope.type,
     variety: props.scope.variety || "",
+    timeframe: props.scope.timeframe || "1m",
     end: endParam,
     limit: String(CHUNK_SIZE),
   });
   const resp = await fetch(`/api/kline/bars?${query.toString()}`);
-  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+  if (!resp.ok) {
+    const msg = (await resp.text()) || `HTTP ${resp.status}`;
+    if (resp.status === 400 || resp.status === 422) {
+      alert(msg);
+    }
+    throw new Error(msg);
+  }
   const data = await resp.json();
   const bars = (data.bars || []).map((bar) => ({
     ...bar,

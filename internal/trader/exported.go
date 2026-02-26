@@ -1,6 +1,10 @@
 package trader
 
-import "database/sql"
+import (
+	"database/sql"
+
+	"ctp-go-demo/internal/mmkline"
+)
 
 // 以下导出用于对外复用与测试调用。
 
@@ -56,6 +60,14 @@ func TableNameForVariety(variety string) (string, error) {
 
 func TableNameForL9Variety(variety string) (string, error) {
 	return tableNameForL9Variety(variety)
+}
+
+func TableNameForInstrumentMMVariety(variety string) (string, error) {
+	return mmkline.TableNameForInstrumentMMVariety(variety)
+}
+
+func TableNameForL9MMVariety(variety string) (string, error) {
+	return mmkline.TableNameForL9MMVariety(variety)
 }
 
 func NormalizeInstrumentIDForTable(instrumentID string, tableName string) string {

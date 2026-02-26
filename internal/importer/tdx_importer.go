@@ -21,6 +21,7 @@ import (
 	"ctp-go-demo/internal/klineclock"
 	"ctp-go-demo/internal/logger"
 	"ctp-go-demo/internal/trader"
+
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )
@@ -206,7 +207,7 @@ func (s *TDXImportSession) run() {
 		s.fail(err)
 		return
 	}
-	logger.Info("import open store success", "session_id", s.id)
+	// logger.Info("import open store success", "session_id", s.id)
 
 	for _, f := range s.files {
 		if s.isDone() {
@@ -214,7 +215,7 @@ func (s *TDXImportSession) run() {
 			break
 		}
 		currentFile := filepath.Base(strings.TrimSpace(f.Name))
-		logger.Info("import processing file", "session_id", s.id, "file", currentFile)
+		// logger.Info("import processing file", "session_id", s.id, "file", currentFile)
 		if err := s.processFile(db, f); err != nil {
 			s.recordError(err)
 		} else {
@@ -254,7 +255,7 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		logger.Info("import file skipped: name pattern mismatch", "session_id", s.id, "file", base)
 		return nil
 	}
-	logger.Info("import file begin", "session_id", s.id, "file", base, "size_bytes", len(f.Data))
+	// logger.Info("import file begin", "session_id", s.id, "file", base, "size_bytes", len(f.Data))
 	parts := strings.SplitN(strings.TrimSuffix(base, filepath.Ext(base)), "#", 2)
 	if len(parts) != 2 {
 		s.incSkippedFile()
@@ -361,6 +362,31 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		"overwritten_rows", after.OverwrittenRows-before.OverwrittenRows,
 		"skipped_rows", after.SkippedRows-before.SkippedRows,
 	)
+	if strings.EqualFold(strings.TrimSpace(bars[0].Period), "1m") {
+		logger.Info("import post process begin",
+			"session_id", s.id,
+			"file", base,
+			"variety", bars[0].Variety,
+			"instrument_id", bars[0].InstrumentID,
+			"is_l9", isL9,
+		)
+		if err := s.aggregateMultiPeriodsAfterImport(db, bars[0], isL9); err != nil {
+			logger.Error("import post process failed",
+				"session_id", s.id,
+				"file", base,
+				"variety", bars[0].Variety,
+				"instrument_id", bars[0].InstrumentID,
+				"error", err,
+			)
+			return err
+		}
+		logger.Info("import post process done",
+			"session_id", s.id,
+			"file", base,
+			"variety", bars[0].Variety,
+			"instrument_id", bars[0].InstrumentID,
+		)
+	}
 	return nil
 }
 

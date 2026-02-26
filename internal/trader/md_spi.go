@@ -9,6 +9,7 @@ import (
 
 	"ctp-go-demo/internal/klineclock"
 	"ctp-go-demo/internal/logger"
+	"ctp-go-demo/internal/mmkline"
 	ctp "github.com/kkqy/ctp-go"
 )
 
@@ -58,15 +59,20 @@ type mdSpiOptions struct {
 }
 
 type tickEvent struct {
-	InstrumentID    string
-	ExchangeID      string
-	ActionDay       string
-	TradingDay      string
-	UpdateTime      string
-	LastPrice       float64
-	Volume          int
-	OpenInterest    float64
-	SettlementPrice float64
+	InstrumentID     string
+	ExchangeID       string
+	ActionDay        string
+	TradingDay       string
+	UpdateTime       string
+	UpdateMillisec   int
+	ReceivedAt       time.Time
+	AdjustedTickTime time.Time
+	LastPrice        float64
+	Volume           int
+	OpenInterest     float64
+	SettlementPrice  float64
+	BidPrice1        float64
+	AskPrice1        float64
 }
 
 func newMdSpiWithOptions(store *klineStore, l9Async *l9AsyncCalculator, opts mdSpiOptions) *mdSpi {
@@ -278,24 +284,29 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	if p.onTick != nil {
+		p.onTick(tickEvent{
+			InstrumentID:     instrumentID,
+			ExchangeID:       exchangeID,
+			ActionDay:        strings.TrimSpace(pDepthMarketData.GetActionDay()),
+			TradingDay:       strings.TrimSpace(pDepthMarketData.GetTradingDay()),
+			UpdateTime:       strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
+			UpdateMillisec:   pDepthMarketData.GetUpdateMillisec(),
+			ReceivedAt:       now,
+			AdjustedTickTime: adjustedTickTime,
+			LastPrice:        price,
+			Volume:           currentVol,
+			OpenInterest:     openInterest,
+			SettlementPrice:  settlement,
+			BidPrice1:        pDepthMarketData.GetBidPrice1(),
+			AskPrice1:        pDepthMarketData.GetAskPrice1(),
+		})
+	}
 	if p.shouldDropDuplicateTick(instrumentID, fingerprint, now) {
 		if p.status != nil {
 			p.status.MarkTickDedupDropped()
 		}
 		return
-	}
-	if p.onTick != nil {
-		p.onTick(tickEvent{
-			InstrumentID:    instrumentID,
-			ExchangeID:      exchangeID,
-			ActionDay:       strings.TrimSpace(pDepthMarketData.GetActionDay()),
-			TradingDay:      strings.TrimSpace(pDepthMarketData.GetTradingDay()),
-			UpdateTime:      strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
-			LastPrice:       price,
-			Volume:          currentVol,
-			OpenInterest:    openInterest,
-			SettlementPrice: settlement,
-		})
 	}
 
 	if shouldCheckTickDrift(now, adjustedTickTime) {
@@ -304,33 +315,15 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 			p.status.MarkDrift(driftSec, p.driftPaused)
 		}
 		if time.Duration(driftSec*float64(time.Second)) > p.driftThreshold {
-			p.driftPaused = true
-			p.driftResumeCount = 0
 			if p.status != nil {
-				p.status.MarkDrift(driftSec, true)
+				p.status.MarkDrift(driftSec, false)
 			}
 			logger.Error(
-				"tick drift too large, pause writing",
+				"tick drift too large, continue writing",
 				"instrument_id", instrumentID,
 				"drift_seconds", driftSec,
 				"threshold_seconds", p.driftThreshold.Seconds(),
 			)
-			return
-		}
-		if p.driftPaused {
-			p.driftResumeCount++
-			if p.driftResumeCount < p.driftResumeTicks {
-				if p.status != nil {
-					p.status.MarkDrift(driftSec, true)
-				}
-				return
-			}
-			p.driftPaused = false
-			p.driftResumeCount = 0
-			if p.status != nil {
-				p.status.MarkDriftRecovered()
-			}
-			logger.Info("tick drift recovered, resume writing", "instrument_id", instrumentID)
 		}
 	}
 
@@ -368,9 +361,18 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 			endedBar := state.bar
 			if err := p.store.UpsertMinuteBar(endedBar); err != nil {
 				logger.Error("flush minute bar failed", "instrument_id", instrumentID, "error", err)
-			} else if p.l9Async != nil {
-				p.l9Async.ObserveMinuteBar(endedBar)
-				p.l9Async.Submit(endedBar.Variety, endedBar.MinuteTime)
+			} else {
+				if _, _, aggErr := mmkline.RebuildAndUpsert(p.store.DB(), mmkline.RebuildRequest{
+					Variety:      endedBar.Variety,
+					InstrumentID: endedBar.InstrumentID,
+					IsL9:         false,
+				}); aggErr != nil {
+					logger.Error("rebuild contract mm bars failed", "instrument_id", instrumentID, "variety", endedBar.Variety, "error", aggErr)
+				}
+				if p.l9Async != nil {
+					p.l9Async.ObserveMinuteBar(endedBar)
+					p.l9Async.Submit(endedBar.Variety, endedBar.MinuteTime)
+				}
 			}
 			if p.onBar != nil {
 				p.onBar(endedBar)
@@ -457,6 +459,13 @@ func (p *mdSpi) Flush() error {
 		endedBar := state.bar
 		if err := p.store.UpsertMinuteBar(endedBar); err != nil {
 			return fmt.Errorf("flush minute bar for %s failed: %w", instrumentID, err)
+		}
+		if _, _, aggErr := mmkline.RebuildAndUpsert(p.store.DB(), mmkline.RebuildRequest{
+			Variety:      endedBar.Variety,
+			InstrumentID: endedBar.InstrumentID,
+			IsL9:         false,
+		}); aggErr != nil {
+			return fmt.Errorf("flush mm bars for %s failed: %w", instrumentID, aggErr)
 		}
 		if p.l9Async != nil {
 			p.l9Async.ObserveMinuteBar(endedBar)

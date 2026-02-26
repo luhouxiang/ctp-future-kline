@@ -24,7 +24,7 @@ const emit = defineEmits([
   'recalc-reversal',
 ])
 
-const frames = ['1m', '5m', '15m', '1h', '1d']
+const frames = ['1m', '5m', '15m', '30m', '1h', '1d']
 const reversalPanelOpen = ref(false)
 const draft = reactive({
   midTrendMinBars: 50,

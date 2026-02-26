@@ -9,6 +9,7 @@ import (
 
 	dbx "ctp-go-demo/internal/db"
 	"ctp-go-demo/internal/logger"
+	"ctp-go-demo/internal/mmkline"
 	"ctp-go-demo/internal/searchindex"
 )
 
@@ -175,11 +176,16 @@ LIMIT ? OFFSET ?`, pageSize, offset)
 	}, nil
 }
 
-func (s *Service) BarsByEnd(symbol string, kind string, variety string, end time.Time, limit int) (BarsResponse, error) {
+func (s *Service) BarsByEnd(symbol string, kind string, variety string, timeframe string, end time.Time, limit int) (BarsResponse, error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	if kind != "contract" && kind != "l9" {
 		return BarsResponse{}, fmt.Errorf("invalid type: %s", kind)
 	}
+	tf, _, err := normalizeTimeframe(timeframe)
+	if err != nil {
+		return BarsResponse{}, err
+	}
+	logger.Info("kline pipeline", "stage", "bars_begin", "symbol", symbol, "kind", kind, "variety", variety, "timeframe", tf, "limit", limit, "end", end.Format("2006-01-02 15:04:05"))
 	if limit <= 0 {
 		limit = 2000
 	}
@@ -210,11 +216,29 @@ func (s *Service) BarsByEnd(symbol string, kind string, variety string, end time
 		return BarsResponse{}, fmt.Errorf("open mysql failed: %w", err)
 	}
 	defer db.Close()
-	timeExpr, err := resolveQueryTimeExpr(db, item.TableName)
+
+	queryTable := item.TableName
+	queryPeriod := "1m"
+	if tf != "1m" {
+		if _, sessErr := ensureCompletedTradingSession(db, item.Variety); sessErr != nil {
+			return BarsResponse{}, sessErr
+		}
+		if kind == "l9" {
+			queryTable, err = mmkline.TableNameForL9MMVariety(item.Variety)
+		} else {
+			queryTable, err = mmkline.TableNameForInstrumentMMVariety(item.Variety)
+		}
+		if err != nil {
+			return BarsResponse{}, err
+		}
+		queryPeriod = tf
+	}
+
+	timeExpr, err := resolveQueryTimeExpr(db, queryTable)
 	if err != nil {
 		return BarsResponse{}, err
 	}
-	adjustedExpr, err := resolveAdjustedTimeExpr(db, item.TableName, timeExpr)
+	adjustedExpr, err := resolveAdjustedTimeExpr(db, queryTable, timeExpr)
 	if err != nil {
 		return BarsResponse{}, err
 	}
@@ -226,20 +250,22 @@ WHERE (
     lower("InstrumentID") = ?
  OR lower("InstrumentID") = ?
 )
-  AND "Period" = '1m'
+  AND "Period" = ?
   AND %s <= ?
 ORDER BY "__sort_time" DESC
-LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, item.TableName, adjustedExpr)
+LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 
 	loadRows := func(endTime time.Time) ([]KlineBar, string, error) {
 		args := []any{
 			primarySymbol,
 			secondarySymbol,
+			queryPeriod,
 			endTime.Format("2006-01-02 15:04:00"),
 			limit,
 		}
 		logger.Info("kline query execute",
-			"table", item.TableName,
+			"table", queryTable,
+			"period", queryPeriod,
 			"args_symbol", primarySymbol,
 			"args_symbol_fallback", secondarySymbol,
 			"args_end", endTime.Format("2006-01-02 15:04:00"),
@@ -279,13 +305,13 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, item.TableName, adjustedExpr)
 		}
 		if len(bars) > 0 {
 			logger.Info("kline query result",
-				"table", item.TableName,
+				"table", queryTable,
 				"rows", len(bars),
 				"first_time", time.Unix(bars[len(bars)-1].AdjustedTime, 0).Format("2006-01-02 15:04:05"),
 				"last_time", time.Unix(bars[0].AdjustedTime, 0).Format("2006-01-02 15:04:05"),
 			)
 		} else {
-			logger.Info("kline query result empty", "table", item.TableName)
+			logger.Info("kline query result empty", "table", queryTable, "period", queryPeriod)
 		}
 		return bars, exchange, nil
 	}
@@ -308,6 +334,7 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, item.TableName, adjustedExpr)
 		return BarsResponse{}, sql.ErrNoRows
 	}
 	reverseBars(bars)
+	logger.Info("kline pipeline", "stage", "load_done", "symbol", symbol, "kind", kind, "variety", item.Variety, "timeframe", tf, "period", queryPeriod, "table", queryTable, "rows", len(bars), "first_time", time.Unix(bars[0].AdjustedTime, 0).Format("2006-01-02 15:04:05"), "last_time", time.Unix(bars[len(bars)-1].AdjustedTime, 0).Format("2006-01-02 15:04:05"))
 
 	var closes []float64
 	closes = closes[:0]
@@ -325,6 +352,7 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, item.TableName, adjustedExpr)
 			Hist: hist[i],
 		}
 	}
+	logger.Info("kline pipeline", "stage", "bars_done", "symbol", symbol, "kind", kind, "variety", item.Variety, "timeframe", tf, "bar_count", len(bars))
 
 	return BarsResponse{
 		Meta: BarsMeta{

@@ -9,6 +9,7 @@ import (
 
 	"ctp-go-demo/internal/klineclock"
 	"ctp-go-demo/internal/logger"
+	"ctp-go-demo/internal/mmkline"
 )
 
 type l9Task struct {
@@ -196,6 +197,13 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 
 	if err := c.store.UpsertL9MinuteBar(l9Bar); err != nil {
 		return fmt.Errorf("upsert l9 bar failed: %w", err)
+	}
+	if _, _, err := mmkline.RebuildAndUpsert(c.store.DB(), mmkline.RebuildRequest{
+		Variety:      variety,
+		InstrumentID: l9Bar.InstrumentID,
+		IsL9:         true,
+	}); err != nil {
+		return fmt.Errorf("rebuild l9 mm bars failed: %w", err)
 	}
 	return nil
 }

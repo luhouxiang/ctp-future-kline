@@ -215,11 +215,20 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 
 	var session *mdSession
 	busLog, _ := s.getBusLog()
+	tickRecorder, tickRecorderErr := newTickCSVRecorder(s.cfg.FlowPath)
+	if tickRecorderErr != nil {
+		logger.Error("init tick csv recorder failed", "flow_path", s.cfg.FlowPath, "error", tickRecorderErr)
+	}
 	options := mdSpiOptions{
 		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks: s.cfg.DriftResumeTicks,
 		onTick: func(t tickEvent) {
+			if tickRecorder != nil {
+				if err := tickRecorder.Append(t); err != nil {
+					logger.Error("append tick csv failed", "instrument_id", t.InstrumentID, "error", err)
+				}
+			}
 			if busLog == nil {
 				return
 			}

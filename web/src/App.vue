@@ -152,11 +152,8 @@ function toDateTimeLocal(date) {
 }
 
 function defaultTimeRange() {
-  const end = new Date()
-  const start = new Date(end.getTime())
-  start.setMonth(start.getMonth() - 3)
-  searchForm.end = toDateTimeLocal(end)
-  searchForm.start = toDateTimeLocal(start)
+  searchForm.end = ''
+  searchForm.start = ''
 }
 
 function normalizeDateTimeInput(value) {

@@ -354,9 +354,9 @@ func (m *Manager) rebuild() error {
 			return err
 		}
 		groupSQL := fmt.Sprintf(`
-SELECT "InstrumentID","Exchange",MIN(%s),MAX(%s),COUNT(1)
+SELECT "InstrumentID",MAX("Exchange"),MIN(%s),MAX(%s),COUNT(1)
 FROM "%s"
-GROUP BY "InstrumentID","Exchange"`, timeExpr, timeExpr, tableName)
+GROUP BY "InstrumentID"`, timeExpr, timeExpr, tableName)
 		logger.Info("search index rebuild table query", "table", tableName, "sql", navicatSQL(groupSQL))
 		rows, qErr := tx.Query(groupSQL)
 		if qErr != nil {
@@ -393,7 +393,13 @@ GROUP BY "InstrumentID","Exchange"`, timeExpr, timeExpr, tableName)
 			if _, execErr := tx.Exec(`
 INSERT INTO kline_search_index
 (table_name, symbol, symbol_norm, variety, exchange, kind, min_time, max_time, bar_count, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  exchange=VALUES(exchange),
+  min_time=VALUES(min_time),
+  max_time=VALUES(max_time),
+  bar_count=VALUES(bar_count),
+  updated_at=VALUES(updated_at)`,
 				tableName,
 				normSymbol,
 				normSymbol,

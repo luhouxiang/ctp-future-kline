@@ -27,6 +27,7 @@ import (
 	"ctp-go-demo/internal/replay"
 	"ctp-go-demo/internal/searchindex"
 	"ctp-go-demo/internal/trader"
+
 	"github.com/gorilla/websocket"
 )
 
@@ -239,7 +240,7 @@ func (s *Server) handleImportSession(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "no files uploaded", http.StatusBadRequest)
 		return
 	}
-	logger.Info("import upload received", "file_count", len(fileHeaders))
+	// logger.Info("import upload received", "file_count", len(fileHeaders))
 
 	uploadFiles := make([]importer.UploadFile, 0, len(fileHeaders))
 	var totalBytes int64
@@ -261,10 +262,10 @@ func (s *Server) handleImportSession(w http.ResponseWriter, r *http.Request) {
 		}
 		size := int64(len(data))
 		totalBytes += size
-		logger.Info("import upload file",
-			"name", name,
-			"size_bytes", size,
-		)
+		// logger.Info("import upload file",
+		// 	"name", name,
+		// 	"size_bytes", size,
+		// )
 		uploadFiles = append(uploadFiles, importer.UploadFile{Name: name, Data: data})
 	}
 	logger.Info("import upload completed", "file_count", len(uploadFiles), "total_size_bytes", totalBytes)
@@ -382,6 +383,10 @@ func (s *Server) handleKlineBars(w http.ResponseWriter, r *http.Request) {
 	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
 	kind := strings.TrimSpace(r.URL.Query().Get("type"))
 	variety := strings.TrimSpace(r.URL.Query().Get("variety"))
+	timeframe := strings.TrimSpace(r.URL.Query().Get("timeframe"))
+	if timeframe == "" {
+		timeframe = "1m"
+	}
 	if symbol == "" || kind == "" {
 		http.Error(w, "symbol and type are required", http.StatusBadRequest)
 		return
@@ -396,18 +401,29 @@ func (s *Server) handleKlineBars(w http.ResponseWriter, r *http.Request) {
 		"symbol", symbol,
 		"type", kind,
 		"variety", variety,
+		"timeframe", timeframe,
 		"end", end.Format("2006-01-02 15:04:00"),
 		"limit", limit,
 		"raw_query", r.URL.RawQuery,
 	)
-	resp, err := s.query.BarsByEnd(symbol, kind, variety, end, limit)
+	resp, err := s.query.BarsByEnd(symbol, kind, variety, timeframe, end, limit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			logger.Info("api kline bars no rows", "symbol", symbol, "type", kind, "variety", variety)
 			http.Error(w, "symbol not found", http.StatusNotFound)
 			return
 		}
-		logger.Error("api kline bars failed", "symbol", symbol, "type", kind, "variety", variety, "error", err)
+		if errors.Is(err, klinequery.ErrInvalidTimeframe) {
+			logger.Info("api kline bars bad request", "error_class", "invalid_timeframe", "symbol", symbol, "type", kind, "variety", variety, "timeframe", timeframe, "error", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if errors.Is(err, klinequery.ErrTradingSessionNotReady) {
+			logger.Info("api kline bars unprocessable", "error_class", "session_not_ready", "symbol", symbol, "type", kind, "variety", variety, "timeframe", timeframe, "error", err)
+			http.Error(w, err.Error(), http.StatusUnprocessableEntity)
+			return
+		}
+		logger.Error("api kline bars failed", "error_class", "internal", "symbol", symbol, "type", kind, "variety", variety, "timeframe", timeframe, "error", err)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -1005,9 +1021,8 @@ func (h sessionHandler) OnError(err error) {
 }
 
 func parseSearchTimeRange(startInput string, endInput string) (time.Time, time.Time, error) {
-	now := time.Now().Truncate(time.Minute)
-	start := now.AddDate(0, -3, 0)
-	end := now
+	start := time.Date(1970, 1, 1, 0, 0, 0, 0, time.Local)
+	end := time.Date(9999, 12, 31, 23, 59, 0, 0, time.Local)
 
 	var err error
 	if strings.TrimSpace(startInput) != "" {
