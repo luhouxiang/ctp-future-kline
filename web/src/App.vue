@@ -52,6 +52,15 @@ const replayState = reactive({
   end_time: '',
   from_cursor: null,
   last_cursor: null,
+  tick_dir: '',
+  tick_files: 0,
+  instruments: 0,
+  total_ticks: 0,
+  processed_ticks: 0,
+  current_instrument_id: '',
+  current_sim_time: '',
+  first_sim_time: '',
+  last_sim_time: '',
   dispatched: 0,
   skipped: 0,
   errors: 0,
@@ -63,13 +72,15 @@ const replayState = reactive({
 
 const replayForm = reactive({
   topicsText: '',
-  sourcesText: '',
+  sourcesText: 'replay.tickcsv',
   start: '',
   end: '',
-  mode: 'fast',
+  mode: 'realtime',
   speed: 1,
+  tickDir: 'flow/ticks',
   fromFile: '',
   fromOffset: 0,
+  fullReplay: true,
 })
 
 const replayLoading = reactive({
@@ -129,6 +140,31 @@ const canStartReplay = computed(() => replayEnabled.value && ['idle', 'done', 'e
 const canPauseReplay = computed(() => replayEnabled.value && replayStatus.value === 'running' && !replayLoading.pausing)
 const canResumeReplay = computed(() => replayEnabled.value && replayStatus.value === 'paused' && !replayLoading.resuming)
 const canStopReplay = computed(() => replayEnabled.value && ['running', 'paused'].includes(replayStatus.value) && !replayLoading.stopping)
+const replayProgressText = computed(() => {
+  const total = Number(replayState.total_ticks || 0)
+  const processed = Number(replayState.processed_ticks || 0)
+  if (total <= 0) return '--'
+  return `${processed}/${total} (${((processed / total) * 100).toFixed(1)}%)`
+})
+const replayRemainingText = computed(() => {
+  const current = Date.parse(String(replayState.current_sim_time || ''))
+  const last = Date.parse(String(replayState.last_sim_time || ''))
+  const speed = Number(replayState.speed || 1)
+  if (!Number.isFinite(current) || !Number.isFinite(last) || !Number.isFinite(speed) || speed <= 0 || last < current) {
+    return '--'
+  }
+  return formatDurationMs(last - current)
+})
+const replayEtaText = computed(() => {
+  const current = Date.parse(String(replayState.current_sim_time || ''))
+  const last = Date.parse(String(replayState.last_sim_time || ''))
+  const speed = Number(replayState.speed || 1)
+  if (!Number.isFinite(current) || !Number.isFinite(last) || !Number.isFinite(speed) || speed <= 0 || last < current) {
+    return '--'
+  }
+  const eta = new Date(Date.now() + (last - current) / speed)
+  return Number.isNaN(eta.getTime()) ? '--' : eta.toLocaleString()
+})
 
 function addLog(message) {
   logs.value.unshift(`${new Date().toLocaleTimeString()} ${message}`)
@@ -144,6 +180,16 @@ function formatBytes(bytes) {
   if (n < 1024 * 1024) return `${(n / 1024).toFixed(2)} KB`
   if (n < 1024 * 1024 * 1024) return `${(n / (1024 * 1024)).toFixed(2)} MB`
   return `${(n / (1024 * 1024 * 1024)).toFixed(2)} GB`
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms || 0) / 1000))
+  const hours = Math.floor(totalSeconds / 3600)
+  const minutes = Math.floor((totalSeconds % 3600) / 60)
+  const seconds = totalSeconds % 60
+  if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
+  if (minutes > 0) return `${minutes}m ${seconds}s`
+  return `${seconds}s`
 }
 
 function toDateTimeLocal(date) {
@@ -233,11 +279,18 @@ async function startReplay() {
     return
   }
 
+  const tickDir = String(replayForm.tickDir || '').trim() || 'flow/ticks'
+  const sources = parseCSVInput(replayForm.sourcesText)
+  if (tickDir && !sources.includes('replay.tickcsv')) {
+    sources.push('replay.tickcsv')
+  }
   const payload = {
     topics: parseCSVInput(replayForm.topicsText),
-    sources: parseCSVInput(replayForm.sourcesText),
-    mode: replayForm.mode || 'fast',
+    sources,
+    mode: replayForm.mode || 'realtime',
     speed: Number(replayForm.speed) || 1,
+    tick_dir: tickDir,
+    full_replay: replayForm.fullReplay !== false,
   }
   if (startISO) payload.start_time = startISO
   if (endISO) payload.end_time = endISO
@@ -646,7 +699,7 @@ onUnmounted(() => {
         <label>Topics(逗号分隔)</label>
         <input v-model="replayForm.topicsText" :disabled="!replayEnabled" placeholder="tick,bar,order_command,order_status" />
         <label>Sources(逗号分隔)</label>
-        <input v-model="replayForm.sourcesText" :disabled="!replayEnabled" placeholder="trader.md,trader.bar,replay" />
+        <input v-model="replayForm.sourcesText" :disabled="!replayEnabled" placeholder="replay.tickcsv" />
         <label>开始时间</label>
         <input v-model="replayForm.start" :disabled="!replayEnabled" type="datetime-local" />
         <label>结束时间</label>
@@ -658,8 +711,15 @@ onUnmounted(() => {
         </select>
         <label>速度</label>
         <input v-model.number="replayForm.speed" :disabled="!replayEnabled" type="number" min="0.1" step="0.1" />
+        <label>Tick目录</label>
+        <input v-model="replayForm.tickDir" :disabled="!replayEnabled" placeholder="flow/ticks" />
+        <label>全部回放</label>
+        <label class="checkbox-field">
+          <input v-model="replayForm.fullReplay" :disabled="!replayEnabled" type="checkbox" />
+          <span>启动前清空记账表并完整重放</span>
+        </label>
         <label>起始文件</label>
-        <input v-model="replayForm.fromFile" :disabled="!replayEnabled" placeholder="events-YYYYMMDD.log" />
+        <input v-model="replayForm.fromFile" :disabled="!replayEnabled" placeholder="rb2505.csv" />
         <label>起始偏移</label>
         <input v-model.number="replayForm.fromOffset" :disabled="!replayEnabled" type="number" min="0" step="1" />
       </div>
@@ -669,10 +729,22 @@ onUnmounted(() => {
         <div class="status-item">任务ID: {{ replayState.task_id || '--' }}</div>
         <div class="status-item">模式: {{ replayState.mode || '--' }}</div>
         <div class="status-item">速度: {{ replayState.speed || 1 }}</div>
+        <div class="status-item">合约数: {{ replayState.instruments || 0 }}</div>
+        <div class="status-item">Tick文件数: {{ replayState.tick_files || 0 }}</div>
+        <div class="status-item">总Tick数: {{ replayState.total_ticks || 0 }}</div>
+        <div class="status-item">已处理Tick: {{ replayState.processed_ticks || 0 }}</div>
+        <div class="status-item">回放进度: {{ replayProgressText }}</div>
+        <div class="status-item">当前回放合约: {{ replayState.current_instrument_id || '--' }}</div>
+        <div class="status-item">模拟当前时间: {{ replayState.current_sim_time || '--' }}</div>
+        <div class="status-item">模拟开始时间: {{ replayState.first_sim_time || '--' }}</div>
+        <div class="status-item">模拟结束时间: {{ replayState.last_sim_time || '--' }}</div>
+        <div class="status-item">剩余模拟时长: {{ replayRemainingText }}</div>
+        <div class="status-item">ETA: {{ replayEtaText }}</div>
         <div class="status-item">主题: {{ (replayState.topics || []).join(', ') || '--' }}</div>
         <div class="status-item">来源: {{ (replayState.sources || []).join(', ') || '--' }}</div>
         <div class="status-item">开始过滤: {{ replayState.start_time || '--' }}</div>
         <div class="status-item">结束过滤: {{ replayState.end_time || '--' }}</div>
+        <div class="status-item">Tick目录: {{ replayState.tick_dir || '--' }}</div>
         <div class="status-item">起始游标: {{ replayState.from_cursor ? `${replayState.from_cursor.file}@${replayState.from_cursor.offset}` : '--' }}</div>
         <div class="status-item">当前游标: {{ replayState.last_cursor ? `${replayState.last_cursor.file}@${replayState.last_cursor.offset}` : '--' }}</div>
         <div class="status-item">分发数: {{ replayState.dispatched || 0 }}</div>

@@ -9,6 +9,7 @@ type KlineStore = trader.KlineStore
 type MdSpi = trader.MdSpi
 type L9AsyncCalculator = trader.L9AsyncCalculator
 type InstrumentInfo = trader.InstrumentInfo
+type TickEvent = trader.TickEvent
 
 const (
 	ColInstrumentID = trader.ColInstrumentID
@@ -51,4 +52,12 @@ func TableNameForVariety(variety string) (string, error) {
 
 func TableNameForL9Variety(variety string) (string, error) {
 	return trader.TableNameForL9Variety(variety)
+}
+
+func TableNameForInstrumentMMVariety(variety string) (string, error) {
+	return trader.TableNameForInstrumentMMVariety(variety)
+}
+
+func TableNameForL9MMVariety(variety string) (string, error) {
+	return trader.TableNameForL9MMVariety(variety)
 }

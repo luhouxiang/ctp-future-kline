@@ -40,6 +40,9 @@ type Manager struct {
 const (
 	instrumentTablePrefix    = "future_kline_instrument_1m_"
 	l9TablePrefix            = "future_kline_l9_1m_"
+	instrumentMMTablePrefix  = "future_kline_instrument_mm_"
+	l9MMTablePrefix          = "future_kline_l9_mm_"
+	legacyInstrumentMMPrefix = "future_kline_instrument_1m_mm_"
 	weightedIndexTablePrefix = "future_kline_weighted_index_" // legacy
 	legacyTablePrefix        = "future_kline_"
 	legacyL9TablePrefix      = "future_kline_l9_" // legacy
@@ -514,6 +517,8 @@ func normalizeVariety(value string) string {
 
 func tableKindFromName(tableName string) string {
 	switch {
+	case strings.HasPrefix(tableName, instrumentMMTablePrefix), strings.HasPrefix(tableName, legacyInstrumentMMPrefix), strings.HasPrefix(tableName, l9MMTablePrefix):
+		return ""
 	case strings.HasPrefix(tableName, l9TablePrefix), strings.HasPrefix(tableName, weightedIndexTablePrefix), strings.HasPrefix(tableName, legacyL9TablePrefix):
 		return "l9"
 	case strings.HasPrefix(tableName, instrumentTablePrefix):
@@ -527,6 +532,8 @@ func tableKindFromName(tableName string) string {
 
 func extractVarietyFromTableName(tableName string) string {
 	switch {
+	case strings.HasPrefix(tableName, instrumentMMTablePrefix), strings.HasPrefix(tableName, legacyInstrumentMMPrefix), strings.HasPrefix(tableName, l9MMTablePrefix):
+		return ""
 	case strings.HasPrefix(tableName, instrumentTablePrefix):
 		return normalizeVariety(strings.TrimPrefix(tableName, instrumentTablePrefix))
 	case strings.HasPrefix(tableName, l9TablePrefix):
@@ -537,7 +544,7 @@ func extractVarietyFromTableName(tableName string) string {
 		return normalizeVariety(strings.TrimPrefix(tableName, legacyL9TablePrefix))
 	case strings.HasPrefix(tableName, legacyTablePrefix):
 		base := strings.TrimPrefix(tableName, legacyTablePrefix)
-		if strings.HasPrefix(base, "instrument_1m_") || strings.HasPrefix(base, "weighted_index_") || strings.HasPrefix(base, "l9_1m_") {
+		if strings.HasPrefix(base, "instrument_1m_") || strings.HasPrefix(base, "instrument_mm_") || strings.HasPrefix(base, "instrument_1m_mm_") || strings.HasPrefix(base, "weighted_index_") || strings.HasPrefix(base, "l9_1m_") || strings.HasPrefix(base, "l9_mm_") {
 			return ""
 		}
 		return normalizeVariety(base)

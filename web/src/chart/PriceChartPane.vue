@@ -654,8 +654,42 @@ function calcMACD(bars) {
   return { dif, dea, hist };
 }
 
+function normalizeBarsAscendingUnique(rawBars, source = "unknown") {
+  const byTime = new Map();
+  let duplicateCount = 0;
+  const duplicateSamples = [];
+  for (const bar of Array.isArray(rawBars) ? rawBars : []) {
+    const ts = Number(bar?.adjusted_time ?? bar?.time ?? 0);
+    if (!Number.isFinite(ts) || ts <= 0) continue;
+    if (byTime.has(ts)) {
+      duplicateCount += 1;
+      if (duplicateSamples.length < 5) {
+        duplicateSamples.push(fmtTime(ts));
+      }
+    }
+    const normalized = { ...bar, adjusted_time: ts };
+    // Keep the later record when timestamp duplicates.
+    byTime.set(ts, normalized);
+  }
+  if (duplicateCount > 0) {
+    console.error("[chart] duplicate adjusted_time detected", {
+      source,
+      symbol: props.scope?.symbol || "",
+      type: props.scope?.type || "",
+      variety: props.scope?.variety || "",
+      timeframe: props.scope?.timeframe || "",
+      duplicateCount,
+      sampleTimes: duplicateSamples,
+      before: Array.isArray(rawBars) ? rawBars.length : 0,
+      after: byTime.size,
+    });
+  }
+  const times = Array.from(byTime.keys()).sort((a, b) => a - b);
+  return times.map((t) => byTime.get(t));
+}
+
 function renderSeries() {
-  const bars = state.bars;
+  const bars = normalizeBarsAscendingUnique(state.bars, "render");
   if (!seriesRefs.candle) return;
   const candleData = bars
     .map((bar) => ({
@@ -1151,7 +1185,7 @@ async function loadInitialChunk() {
   try {
     const endParam = props.scope.end || fmtTime(Math.floor(Date.now() / 1000));
     const chunk = await fetchChunk(endParam);
-    state.bars = chunk.bars;
+    state.bars = normalizeBarsAscendingUnique(chunk.bars, "initial_chunk");
     state.hasMore = chunk.bars.length >= CHUNK_SIZE;
     const metaSymbol = String(chunk.meta?.symbol || "")
       .trim()
@@ -1179,7 +1213,7 @@ async function loadOlderChunk() {
     const oldest = state.bars[0].adjusted_time;
     const nextEnd = fmtTime(oldest - 60);
     const chunk = await fetchChunk(nextEnd);
-    const olderBars = chunk.bars;
+    const olderBars = normalizeBarsAscendingUnique(chunk.bars, "older_chunk");
     if (olderBars.length === 0) {
       state.hasMore = false;
       return;
@@ -1190,13 +1224,13 @@ async function loadOlderChunk() {
         .toLowerCase();
       if (metaSymbol) state.resolvedSymbol = metaSymbol;
     }
-    const seen = new Set(state.bars.map((x) => x.adjusted_time));
+    const seen = new Set(normalizeBarsAscendingUnique(state.bars, "dedup_seen").map((x) => x.adjusted_time));
     const toPrepend = olderBars.filter((x) => !seen.has(x.adjusted_time));
     if (toPrepend.length === 0) {
       state.hasMore = false;
       return;
     }
-    state.bars = [...toPrepend, ...state.bars];
+    state.bars = normalizeBarsAscendingUnique([...toPrepend, ...state.bars], "merge_older");
     state.hasMore = olderBars.length >= CHUNK_SIZE;
     renderSeries();
     scheduleChannelRecalc();
@@ -3077,3 +3111,5 @@ onUnmounted(() => {
     </div>
   </div>
 </template>
+
+

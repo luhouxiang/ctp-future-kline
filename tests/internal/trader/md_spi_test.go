@@ -1,19 +1,19 @@
 package trader_test
 
 import (
+	"database/sql"
 	"fmt"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"ctp-go-demo/tests/internal/testmysql"
 	"ctp-go-demo/tests/internal/trader/testkit"
-	ctp "github.com/kkqy/ctp-go"
 )
 
 func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	store, err := testkit.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("newKlineStore() error = %v", err)
@@ -21,6 +21,7 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
+	seedTradingSessions(t, store.DB(), "rb")
 
 	spi := testkit.NewMdSpi(store, nil)
 
@@ -75,8 +76,8 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 	type row struct {
 		code       string
 		exchange   string
-		tm         string
-		adjusted   string
+		tm         time.Time
+		adjusted   time.Time
 		period     string
 		open       float64
 		high       float64
@@ -101,8 +102,8 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 		t.Fatalf("row count = %d, want 2", len(got))
 	}
 
-	if got[0].code != "2405" || got[0].exchange != "SHFE" || got[0].tm != "2026-02-10 09:30:00" || got[0].adjusted != "2026-02-10 09:30:00" || got[0].period != "1m" {
-		t.Fatalf("first row meta = %+v, want code 2405, exchange SHFE, time+adjusted 2026-02-10 09:30:00, period 1m", got[0])
+	if got[0].code != "rb2405" || got[0].exchange != "SHFE" || got[0].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:30:00" || got[0].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:30:00" || got[0].period != "1m" {
+		t.Fatalf("first row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:30:00, period 1m", got[0])
 	}
 	if got[0].open != 100 || got[0].high != 102 || got[0].low != 100 || got[0].close != 102 {
 		t.Fatalf("first row ohlc = (%v,%v,%v,%v), want (100,102,100,102)", got[0].open, got[0].high, got[0].low, got[0].close)
@@ -111,8 +112,8 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 		t.Fatalf("first row vol/oi/settlement = (%d,%v,%v), want (4,201,99.5)", got[0].volume, got[0].openInt, got[0].settlement)
 	}
 
-	if got[1].code != "2405" || got[1].exchange != "SHFE" || got[1].tm != "2026-02-10 09:31:00" || got[1].adjusted != "2026-02-10 09:31:00" || got[1].period != "1m" {
-		t.Fatalf("second row meta = %+v, want code 2405, exchange SHFE, time+adjusted 2026-02-10 09:31:00, period 1m", got[1])
+	if got[1].code != "rb2405" || got[1].exchange != "SHFE" || got[1].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[1].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[1].period != "1m" {
+		t.Fatalf("second row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:31:00, period 1m", got[1])
 	}
 	if got[1].open != 101 || got[1].high != 101 || got[1].low != 101 || got[1].close != 101 {
 		t.Fatalf("second row ohlc = (%v,%v,%v,%v), want (101,101,101,101)", got[1].open, got[1].high, got[1].low, got[1].close)
@@ -134,10 +135,34 @@ func TestTableNameForVariety(t *testing.T) {
 	}
 }
 
+func TestTableNameForInstrumentMMVariety(t *testing.T) {
+	t.Parallel()
+
+	name, err := testkit.TableNameForInstrumentMMVariety("RB")
+	if err != nil {
+		t.Fatalf("TableNameForInstrumentMMVariety() error = %v", err)
+	}
+	if name != "future_kline_instrument_mm_rb" {
+		t.Fatalf("TableNameForInstrumentMMVariety() = %q, want %q", name, "future_kline_instrument_mm_rb")
+	}
+}
+
+func TestTableNameForL9MMVariety(t *testing.T) {
+	t.Parallel()
+
+	name, err := testkit.TableNameForL9MMVariety("RB")
+	if err != nil {
+		t.Fatalf("TableNameForL9MMVariety() error = %v", err)
+	}
+	if name != "future_kline_l9_mm_rb" {
+		t.Fatalf("TableNameForL9MMVariety() = %q, want %q", name, "future_kline_l9_mm_rb")
+	}
+}
+
 func TestMdSpiDedupDuplicateTickWithinWindow(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	store, err := testkit.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("newKlineStore() error = %v", err)
@@ -145,6 +170,7 @@ func TestMdSpiDedupDuplicateTickWithinWindow(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
+	seedTradingSessions(t, store.DB(), "rb")
 
 	spi := testkit.NewMdSpi(store, nil)
 
@@ -204,7 +230,7 @@ func TestMdSpiDedupDuplicateTickWithinWindow(t *testing.T) {
 func TestMdSpiDriftPauseAndResume(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	store, err := testkit.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("newKlineStore() error = %v", err)
@@ -212,6 +238,7 @@ func TestMdSpiDriftPauseAndResume(t *testing.T) {
 	t.Cleanup(func() {
 		_ = store.Close()
 	})
+	seedTradingSessions(t, store.DB(), "rb")
 	spi := testkit.NewMdSpi(store, nil)
 
 	now := time.Now()
@@ -295,19 +322,45 @@ type tickInput struct {
 
 func pushTick(t *testing.T, spi *testkit.MdSpi, in tickInput) {
 	t.Helper()
+	if err := spi.ProcessReplayTick(testkit.TickEvent{
+		InstrumentID:    in.instrumentID,
+		ExchangeID:      in.exchangeID,
+		ActionDay:       in.actionDay,
+		TradingDay:      in.tradingDay,
+		UpdateTime:      in.updateTime,
+		ReceivedAt:      time.Now(),
+		LastPrice:       in.lastPrice,
+		Volume:          in.volume,
+		OpenInterest:    in.openInterest,
+		SettlementPrice: in.settlement,
+	}); err != nil {
+		t.Fatalf("ProcessReplayTick() error = %v", err)
+	}
+}
 
-	tick := ctp.NewCThostFtdcDepthMarketDataField()
-	defer ctp.DeleteCThostFtdcDepthMarketDataField(tick)
-
-	tick.SetInstrumentID(in.instrumentID)
-	tick.SetExchangeID(in.exchangeID)
-	tick.SetActionDay(in.actionDay)
-	tick.SetTradingDay(in.tradingDay)
-	tick.SetUpdateTime(in.updateTime)
-	tick.SetLastPrice(in.lastPrice)
-	tick.SetVolume(in.volume)
-	tick.SetOpenInterest(in.openInterest)
-	tick.SetSettlementPrice(in.settlement)
-
-	spi.OnRtnDepthMarketData(tick)
+func seedTradingSessions(t *testing.T, db *sql.DB, variety string) {
+	t.Helper()
+	stmt := `
+INSERT INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
+VALUES(?,?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE
+  session_text=VALUES(session_text),
+  session_json=VALUES(session_json),
+  is_completed=VALUES(is_completed),
+  sample_trade_date=VALUES(sample_trade_date),
+  validated_trade_date=VALUES(validated_trade_date),
+  match_ratio=VALUES(match_ratio),
+  updated_at=VALUES(updated_at)`
+	if _, err := db.Exec(stmt,
+		variety,
+		"21:00-23:59,09:00-15:00",
+		`[{"start":"21:00","end":"23:59"},{"start":"09:00","end":"15:00"}]`,
+		true,
+		"2026-02-10",
+		"2026-02-10",
+		1.0,
+		"2026-02-10 15:00:00",
+	); err != nil {
+		t.Fatalf("seed trading_sessions failed: %v", err)
+	}
 }

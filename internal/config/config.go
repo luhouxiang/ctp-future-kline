@@ -13,6 +13,7 @@ type AppConfig struct {
 	DB       DBConfig       `json:"db"`
 	Web      WebConfig      `json:"web"`
 	Calendar CalendarConfig `json:"calendar"`
+	Log      LogConfig      `json:"log"`
 }
 
 type DBConfig struct {
@@ -78,6 +79,10 @@ type CalendarConfig struct {
 	BrowserFallback    *bool  `json:"browser_fallback"`
 	BrowserPath        string `json:"browser_path"`
 	BrowserHeadless    *bool  `json:"browser_headless"`
+}
+
+type LogConfig struct {
+	Level string `json:"level"`
 }
 
 func Load(path string) (AppConfig, error) {
@@ -227,7 +232,7 @@ func (c *AppConfig) Validate() error {
 		return errors.New("ctp.bus_flush_ms must be >= 0")
 	}
 	if c.CTP.ReplayDefaultMode == "" {
-		c.CTP.ReplayDefaultMode = "fast"
+		c.CTP.ReplayDefaultMode = "realtime"
 	}
 	switch c.CTP.ReplayDefaultMode {
 	case "fast", "realtime":
@@ -282,6 +287,14 @@ func (c *AppConfig) Validate() error {
 	}
 	if c.DB.Params == "" {
 		c.DB.Params = "parseTime=true&loc=Local&multiStatements=false"
+	}
+	if c.Log.Level == "" {
+		c.Log.Level = "info"
+	}
+	switch c.Log.Level {
+	case "debug", "DEBUG", "info", "INFO", "warn", "WARN", "error", "ERROR":
+	default:
+		return errors.New("log.level must be one of: debug,info,warn,error")
 	}
 
 	return nil

@@ -29,11 +29,20 @@ const (
 
 	instrumentTablePrefix    = "future_kline_instrument_1m_"
 	l9TablePrefix            = "future_kline_l9_1m_"
+	instrumentMMTablePrefix  = "future_kline_instrument_mm_"
+	l9MMTablePrefix          = "future_kline_l9_mm_"
+	legacyInstrumentMMPrefix = "future_kline_instrument_1m_mm_"
 	weightedIndexTablePrefix = "future_kline_weighted_index_" // legacy
 	legacyTablePrefix        = "future_kline_"
 	legacyL9TablePrefix      = "future_kline_l9_" // legacy
 )
 
+// minuteBar 是系统内部统一使用的分钟线结构。
+//
+// 其中：
+// 1. MinuteTime 表示原始分钟时间键
+// 2. AdjustedTime 表示经交易日历修正后的分钟时间键
+// 3. Period 对于实时聚合固定为 "1m"，在写入 mm 表时由聚合器另行生成
 type minuteBar struct {
 	Variety         string
 	InstrumentID    string
@@ -50,12 +59,14 @@ type minuteBar struct {
 	SettlementPrice float64
 }
 
+// klineStore 封装分钟线、L9 分钟线和相关表结构的写入逻辑。
 type klineStore struct {
 	db     *sql.DB
 	mu     sync.Mutex
 	tables map[string]struct{}
 }
 
+// newKlineStore 打开数据库并确保分钟线相关表结构已经准备好。
 func newKlineStore(path string) (*klineStore, error) {
 	logger.Info("kline store open begin", "db_path", path)
 	start := time.Now()
@@ -80,6 +91,7 @@ func (s *klineStore) Close() error {
 	return s.db.Close()
 }
 
+// UpsertMinuteBar 把普通合约的 1m bar 写入对应品种表。
 func (s *klineStore) UpsertMinuteBar(bar minuteBar) error {
 	tableName, err := tableNameForVariety(bar.Variety)
 	if err != nil {
@@ -88,6 +100,7 @@ func (s *klineStore) UpsertMinuteBar(bar minuteBar) error {
 	return s.upsertMinuteBarToTable(tableName, bar)
 }
 
+// UpsertL9MinuteBar 把 L9 主连 1m bar 写入对应品种的 L9 表。
 func (s *klineStore) UpsertL9MinuteBar(bar minuteBar) error {
 	tableName, err := tableNameForL9Variety(bar.Variety)
 	if err != nil {
@@ -96,6 +109,7 @@ func (s *klineStore) UpsertL9MinuteBar(bar minuteBar) error {
 	return s.upsertMinuteBarToTable(tableName, bar)
 }
 
+// QueryMinuteBarsByVariety 查询某个品种在指定分钟的全部合约 bar，供 L9 聚合使用。
 func (s *klineStore) QueryMinuteBarsByVariety(variety string, minuteTime time.Time) ([]minuteBar, error) {
 	tableName, err := tableNameForVariety(variety)
 	if err != nil {
@@ -154,6 +168,8 @@ WHERE "%s" = ? AND "%s" = ?;`,
 	return out, nil
 }
 
+// upsertMinuteBarToTable 是统一的分钟线写表实现。
+// 普通合约 1m 表和 L9 1m 表都会走这里，只是目标表名不同。
 func (s *klineStore) upsertMinuteBarToTable(tableName string, bar minuteBar) error {
 	if err := s.ensureTable(tableName); err != nil {
 		return err
@@ -416,6 +432,16 @@ func tableExists(db *sql.DB, tableName string) bool {
 }
 
 func legacyToNewTableName(tableName string) (string, bool) {
+	if strings.HasPrefix(tableName, instrumentMMTablePrefix) || strings.HasPrefix(tableName, l9MMTablePrefix) {
+		return "", false
+	}
+	if strings.HasPrefix(tableName, legacyInstrumentMMPrefix) {
+		variety := sanitizeSQLIdent(strings.TrimPrefix(tableName, legacyInstrumentMMPrefix))
+		if variety == "" {
+			return "", false
+		}
+		return instrumentMMTablePrefix + variety, true
+	}
 	if strings.HasPrefix(tableName, l9TablePrefix) {
 		return "", false
 	}
@@ -454,7 +480,7 @@ func normalizeInstrumentIDColumn(db *sql.DB, tableName string) error {
 		return err
 	}
 	// Backfill legacy l9 rows that used plain "l9" into "<variety>l9".
-	if strings.HasPrefix(tableName, l9TablePrefix) || strings.HasPrefix(tableName, weightedIndexTablePrefix) || strings.HasPrefix(tableName, legacyL9TablePrefix) {
+	if strings.HasPrefix(tableName, l9TablePrefix) || strings.HasPrefix(tableName, l9MMTablePrefix) || strings.HasPrefix(tableName, weightedIndexTablePrefix) || strings.HasPrefix(tableName, legacyL9TablePrefix) {
 		variety := extractVarietyFromTableName(tableName)
 		if variety != "" {
 			expected := variety + "l9"
@@ -493,6 +519,8 @@ WHERE table_schema = DATABASE()
 	return false, nil
 }
 
+// chooseAdjustedTime 选择写入数据库时使用的 AdjustedTime。
+// 如果调用方未提供 AdjustedTime，则退回到 MinuteTime，保证时间键始终存在。
 func chooseAdjustedTime(bar minuteBar) time.Time {
 	if !bar.AdjustedTime.IsZero() {
 		return bar.AdjustedTime
@@ -549,6 +577,7 @@ func tableNameForVariety(variety string) (string, error) {
 	return instrumentTablePrefix + sanitizeSQLIdent(name), nil
 }
 
+// tableNameForL9Variety 生成某个品种的 L9 1m 表名。
 func tableNameForL9Variety(variety string) (string, error) {
 	name := normalizeVariety(variety)
 	if name == "" {
@@ -574,6 +603,12 @@ func extractVarietyFromTableName(tableName string) string {
 		return sanitizeSQLIdent(strings.TrimPrefix(tableName, instrumentTablePrefix))
 	case strings.HasPrefix(tableName, l9TablePrefix):
 		return sanitizeSQLIdent(strings.TrimPrefix(tableName, l9TablePrefix))
+	case strings.HasPrefix(tableName, instrumentMMTablePrefix):
+		return sanitizeSQLIdent(strings.TrimPrefix(tableName, instrumentMMTablePrefix))
+	case strings.HasPrefix(tableName, legacyInstrumentMMPrefix):
+		return sanitizeSQLIdent(strings.TrimPrefix(tableName, legacyInstrumentMMPrefix))
+	case strings.HasPrefix(tableName, l9MMTablePrefix):
+		return sanitizeSQLIdent(strings.TrimPrefix(tableName, l9MMTablePrefix))
 	case strings.HasPrefix(tableName, weightedIndexTablePrefix):
 		return sanitizeSQLIdent(strings.TrimPrefix(tableName, weightedIndexTablePrefix))
 	case strings.HasPrefix(tableName, legacyL9TablePrefix):

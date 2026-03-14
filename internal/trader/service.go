@@ -47,6 +47,11 @@ func NewService(cfg config.CTPConfig) *Service {
 	return &Service{cfg: cfg}
 }
 
+// Run 执行一次完整的实时链路：
+// 1. 查询可订阅合约
+// 2. 订阅行情并接收实时 tick
+// 3. 在 mdSpi 中聚合成 1m
+// 4. 继续触发 mm 与 L9 计算
 func (s *Service) Run() error {
 	logger.Info("service start")
 	if err := os.MkdirAll(s.cfg.FlowPath, 0o755); err != nil {
@@ -71,6 +76,7 @@ func (s *Service) Run() error {
 	return nil
 }
 
+// RunContinuous 与 Run 类似，但会把运行态指标持续暴露给 status。
 func (s *Service) RunContinuous(status *RuntimeStatusCenter) error {
 	logger.Info("service continuous start")
 	if err := os.MkdirAll(s.cfg.FlowPath, 0o755); err != nil {
@@ -191,11 +197,19 @@ func (s *Service) runMarketDataContinuous(queriedInstruments []instrumentInfo, s
 	select {}
 }
 
+// initMarketData 组装实时行情处理链路。
+//
+// 这里会把几条核心子链路接在一起：
+// 1. klineStore: 负责 1m/L9 落库
+// 2. l9AsyncCalculator: 负责异步生成 L9
+// 3. tickCSVRecorder: 负责把实时 tick 录成可回放 CSV
+// 4. busLog: 负责把 tick/bar 旁路写到事件总线
+// 5. mdSpi: 负责把实时 tick 聚合成 1m，并驱动后续 mm/L9
 func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *RuntimeStatusCenter) (*mdSpi, *klineStore, *mdSession, error) {
 	logger.Info("market data stage start")
-	dbPath := strings.TrimSpace(s.cfg.DBDSN)
-	if dbPath == "" {
-		dbPath = filepath.Join(s.cfg.FlowPath, "future_kline.db")
+	dbPath, err := resolveStoreDSN(s.cfg)
+	if err != nil {
+		return nil, nil, nil, err
 	}
 	store, err := newKlineStore(dbPath)
 	if err != nil {
@@ -223,6 +237,10 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks: s.cfg.DriftResumeTicks,
+		// onTick 是实时 tick 聚合前的旁路钩子。
+		// 它做两件事：
+		// 1. 记录 tick CSV，供历史回放使用
+		// 2. 把 tick 作为 bus 事件写出去，供其它消费者订阅
 		onTick: func(t tickEvent) {
 			if tickRecorder != nil {
 				if err := tickRecorder.Append(t); err != nil {
@@ -244,6 +262,8 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 				Payload:    payload,
 			})
 		},
+		// onBar 在某一分钟封口后触发。
+		// 这里不做写库，写库已经在 mdSpi 内完成；这里只负责把封口后的 bar 旁路发到 bus。
 		onBar: func(bar minuteBar) {
 			if busLog == nil {
 				return

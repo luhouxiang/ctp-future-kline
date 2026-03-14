@@ -1,0 +1,119 @@
+package trader
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"ctp-go-demo/internal/bus"
+	"ctp-go-demo/internal/config"
+	"ctp-go-demo/internal/logger"
+	"ctp-go-demo/internal/replay"
+)
+
+// ReplaySink 是 replay 事件到 trader 行情处理器之间的桥接层。
+//
+// replay service 只负责把事件分发给 consumer，并不知道如何把 tick 真正写成分钟线。
+// ReplaySink 的职责就是把 bus.BusEvent 还原成 tickEvent，再交给 mdSpi 复用实时链路逻辑。
+type ReplaySink struct {
+	mu    sync.Mutex
+	store *klineStore
+	spi   *mdSpi
+}
+
+// NewReplaySink 为回放模式创建独立的 store、L9 计算器和 mdSpi。
+func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySink, error) {
+	dbPath, err := resolveStoreDSN(cfg)
+	if err != nil {
+		return nil, err
+	}
+	store, err := newKlineStore(dbPath)
+	if err != nil {
+		return nil, err
+	}
+	l9Calc := newL9AsyncCalculator(store, cfg.IsL9AsyncEnabled(), 1, nil)
+	spi := newMdSpiWithStatusAndOptions(store, l9Calc, status, mdSpiOptions{
+		tickDedupWindow:  time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
+		driftThreshold:   time.Duration(cfg.DriftThresholdSeconds) * time.Second,
+		driftResumeTicks: cfg.DriftResumeTicks,
+	})
+	return &ReplaySink{store: store, spi: spi}, nil
+}
+
+// ConsumeBusEvent 接收 replay service 分发来的 tick 事件。
+// 处理顺序是：反序列化 payload -> 交给 mdSpi.ProcessReplayTick -> 复用完整聚合链路。
+func (s *ReplaySink) ConsumeBusEvent(_ context.Context, ev bus.BusEvent) error {
+	if s == nil || s.spi == nil || ev.Topic != bus.TopicTick {
+		return nil
+	}
+	var tick tickEvent
+	if err := json.Unmarshal(ev.Payload, &tick); err != nil {
+		return fmt.Errorf("decode replay tick failed: %w", err)
+	}
+	logger.Debug(
+		"replay sink received tick",
+		"task_id", ev.ReplayTaskID,
+		"event_id", ev.EventID,
+		"source", ev.Source,
+		"instrument_id", tick.InstrumentID,
+		"trading_day", tick.TradingDay,
+		"action_day", tick.ActionDay,
+		"update_time", tick.UpdateTime,
+		"update_millisec", tick.UpdateMillisec,
+		"adjusted_tick_time", tick.AdjustedTickTime.Format(time.RFC3339Nano),
+		"last_price", tick.LastPrice,
+		"volume", tick.Volume,
+	)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.spi.ProcessReplayTick(tick); err != nil {
+		logger.Error(
+			"replay sink process tick failed",
+			"task_id", ev.ReplayTaskID,
+			"event_id", ev.EventID,
+			"instrument_id", tick.InstrumentID,
+			"error", err,
+		)
+		return err
+	}
+	logger.Debug(
+		"replay sink processed tick",
+		"task_id", ev.ReplayTaskID,
+		"event_id", ev.EventID,
+		"instrument_id", tick.InstrumentID,
+	)
+	return nil
+}
+
+// OnTaskFinished 在回放结束时强制 Flush，补落最后一根尚未因分钟切换而封口的 bar。
+func (s *ReplaySink) OnTaskFinished(_ context.Context, snap replay.TaskSnapshot) error {
+	if s == nil || s.spi == nil {
+		return nil
+	}
+	if snap.Status != replay.StatusDone && snap.Status != replay.StatusStopped {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.spi.Flush()
+}
+
+// Close 关闭回放模式专用的底层 store。
+func (s *ReplaySink) Close() error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	return s.store.Close()
+}
+
+// resolveStoreDSN 解析回放使用的数据库连接信息。
+func resolveStoreDSN(cfg config.CTPConfig) (string, error) {
+	dsn := strings.TrimSpace(cfg.DBDSN)
+	if dsn == "" {
+		return "", fmt.Errorf("ctp.db dsn is required")
+	}
+	return dsn, nil
+}

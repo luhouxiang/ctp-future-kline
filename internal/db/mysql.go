@@ -42,6 +42,9 @@ func normalizeParams(raw string) string {
 	if values.Get("loc") == "" {
 		values.Set("loc", "Local")
 	}
+	if values.Get("sql_mode") == "" {
+		values.Set("sql_mode", "'ANSI_QUOTES'")
+	}
 	// Avoid protocol state issues from unconsumed multi result sets.
 	values.Set("multiStatements", "false")
 	return values.Encode()

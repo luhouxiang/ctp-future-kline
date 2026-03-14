@@ -3,10 +3,10 @@ package trader_test
 import (
 	"fmt"
 	"math"
-	"path/filepath"
 	"testing"
 	"time"
 
+	"ctp-go-demo/tests/internal/testmysql"
 	"ctp-go-demo/tests/internal/trader/testkit"
 )
 
@@ -19,7 +19,6 @@ func TestL9AsyncCalculatorComputesAndStores(t *testing.T) {
 	calc := testkit.NewL9AsyncCalculator(store, true, 1, map[string][]string{
 		"rb": {"rb2405", "rb2410"},
 	})
-	t.Cleanup(calc.Close)
 
 	calc.ObserveMinuteBar(testkit.MinuteBar{
 		Variety:         "rb",
@@ -51,10 +50,11 @@ func TestL9AsyncCalculatorComputesAndStores(t *testing.T) {
 	})
 
 	calc.Submit("rb", minute)
+	calc.Close()
 
 	bar := queryL9BarEventually(t, store, "rb", minute)
-	if bar.InstrumentID != "l9" {
-		t.Fatalf("l9 instrument_id = %q, want %q", bar.InstrumentID, "l9")
+	if bar.InstrumentID != "rbl9" {
+		t.Fatalf("l9 instrument_id = %q, want %q", bar.InstrumentID, "rbl9")
 	}
 	if bar.Exchange != "L9" {
 		t.Fatalf("l9 exchange = %q, want %q", bar.Exchange, "L9")
@@ -92,7 +92,6 @@ func TestL9AsyncCalculatorFallbacksToLatestWhenMissingCurrentMinute(t *testing.T
 	calc := testkit.NewL9AsyncCalculator(store, true, 1, map[string][]string{
 		"rb": {"rb2405", "rb2410"},
 	})
-	t.Cleanup(calc.Close)
 
 	calc.ObserveMinuteBar(testkit.MinuteBar{
 		Variety:         "rb",
@@ -124,6 +123,7 @@ func TestL9AsyncCalculatorFallbacksToLatestWhenMissingCurrentMinute(t *testing.T
 	})
 
 	calc.Submit("rb", minute)
+	calc.Close()
 
 	bar := queryL9BarEventually(t, store, "rb", minute)
 	if bar.Volume != 10 {
@@ -223,10 +223,11 @@ func queryL9Bar(store *testkit.KlineStore, variety string, minute time.Time) (te
 
 func newTempStore(t *testing.T) *testkit.KlineStore {
 	t.Helper()
-	store, err := testkit.NewKlineStore(filepath.Join(t.TempDir(), "kline.db"))
+	store, err := testkit.NewKlineStore(testmysql.NewDatabase(t))
 	if err != nil {
 		t.Fatalf("newKlineStore() error = %v", err)
 	}
+	seedTradingSessions(t, store.DB(), "rb")
 	t.Cleanup(func() { _ = store.Close() })
 	return store
 }

@@ -4,24 +4,24 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"ctp-go-demo/internal/klinequery"
+	"ctp-go-demo/internal/mmkline"
 	"ctp-go-demo/internal/searchindex"
-	_ "modernc.org/sqlite"
+	"ctp-go-demo/tests/internal/testmysql"
 )
 
 func TestBarsAndSearch(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	prepareDB(t, dbPath)
+	dsn := testmysql.NewDatabase(t)
+	prepareDB(t, dsn)
 
-	idx := searchindex.NewManager(dbPath, 0)
-	svc := klinequery.NewService(dbPath, idx)
+	idx := searchindex.NewManager(dsn, 0)
+	svc := klinequery.NewService(dsn, idx)
 
 	start := mustTime("2026-01-19 09:00:00")
 	end := mustTime("2026-01-19 09:30:00")
@@ -38,8 +38,8 @@ func TestBarsAndSearch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Bars() error = %v", err)
 	}
-	if barsResp.Meta.Symbol != "SR2701" {
-		t.Fatalf("Meta.Symbol = %q, want SR2701", barsResp.Meta.Symbol)
+	if barsResp.Meta.Symbol != "sr2701" {
+		t.Fatalf("Meta.Symbol = %q, want sr2701", barsResp.Meta.Symbol)
 	}
 	if len(barsResp.Bars) != 2 {
 		t.Fatalf("len(Bars) = %d, want 2", len(barsResp.Bars))
@@ -55,28 +55,26 @@ func TestBarsAndSearch(t *testing.T) {
 func TestBarsByEndUsesAdjustedTime(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	dsn := testmysql.NewDatabase(t)
+	db := testmysql.Open(t, dsn)
 	defer db.Close()
+
 	stmts := []string{
 		`CREATE TABLE "future_kline_instrument_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('2701','CZCE','2026-01-20 21:01:00','2026-01-19 21:01:00','1m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-20 21:01:00','2026-01-19 21:01:00','1m',1,2,1,2,10,100,0)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -84,8 +82,8 @@ func TestBarsByEndUsesAdjustedTime(t *testing.T) {
 		}
 	}
 
-	idx := searchindex.NewManager(dbPath, 0)
-	svc := klinequery.NewService(dbPath, idx)
+	idx := searchindex.NewManager(dsn, 0)
+	svc := klinequery.NewService(dsn, idx)
 	end := mustTime("2026-01-19 23:00:00")
 
 	resp, err := svc.BarsByEnd("SR2701", "contract", "sr", "1m", end, 2000)
@@ -108,11 +106,11 @@ func TestBarsByEndUsesAdjustedTime(t *testing.T) {
 func TestListContractsOnlyReturnsContractKind(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	prepareDB(t, dbPath)
+	dsn := testmysql.NewDatabase(t)
+	prepareDB(t, dsn)
 
-	idx := searchindex.NewManager(dbPath, 0)
-	svc := klinequery.NewService(dbPath, idx)
+	idx := searchindex.NewManager(dsn, 0)
+	svc := klinequery.NewService(dsn, idx)
 
 	resp, err := svc.ListContracts(1, 100)
 	if err != nil {
@@ -127,34 +125,31 @@ func TestListContractsOnlyReturnsContractKind(t *testing.T) {
 	if resp.Items[0].Type != "contract" {
 		t.Fatalf("item type = %q, want contract", resp.Items[0].Type)
 	}
-	if resp.Items[0].Symbol != "SR2701" {
-		t.Fatalf("item symbol = %q, want SR2701", resp.Items[0].Symbol)
+	if resp.Items[0].Symbol != "sr2701" {
+		t.Fatalf("item symbol = %q, want sr2701", resp.Items[0].Symbol)
 	}
 }
 
 func TestBarsByEndAggregatesByHourWithCompletedSession(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	dsn := testmysql.NewDatabase(t)
+	db := testmysql.Open(t, dsn)
 	defer db.Close()
 
 	mustExec(t, db, `CREATE TABLE "future_kline_instrument_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`)
 	ensureTradingSessionsTable(t, db)
 	mustExec(t, db, `INSERT INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
@@ -162,15 +157,22 @@ VALUES('sr','21:00-23:00,09:00-10:15,10:30-11:30,13:30-15:00',
 '[{"start":"21:00","end":"23:00"},{"start":"09:00","end":"10:15"},{"start":"10:30","end":"11:30"},{"start":"13:30","end":"15:00"}]',
 1,'2026-01-19','2026-01-20',1.0,'2026-01-20 15:01:00')`)
 
-	insertSessionBars(t, db, "2701", "2026-01-20", "2026-01-19", [][2]string{
+	insertSessionBars(t, db, "sr2701", "2026-01-20", "2026-01-19", [][2]string{
 		{"21:00", "23:00"},
 		{"09:00", "10:15"},
 		{"10:30", "11:30"},
 		{"13:30", "15:00"},
 	})
+	if _, _, err := mmkline.RebuildAndUpsert(db, mmkline.RebuildRequest{
+		Variety:      "sr",
+		InstrumentID: "sr2701",
+		IsL9:         false,
+	}); err != nil {
+		t.Fatalf("RebuildAndUpsert() error = %v", err)
+	}
 
-	idx := searchindex.NewManager(dbPath, 0)
-	svc := klinequery.NewService(dbPath, idx)
+	idx := searchindex.NewManager(dsn, 0)
+	svc := klinequery.NewService(dsn, idx)
 	end := mustTime("2026-01-20 23:59:00")
 	resp, err := svc.BarsByEnd("SR2701", "contract", "sr", "1h", end, 5000)
 	if err != nil {
@@ -182,12 +184,12 @@ VALUES('sr','21:00-23:00,09:00-10:15,10:30-11:30,13:30-15:00',
 		got = append(got, time.Unix(b.AdjustedTime, 0).Format("2006-01-02 15:04"))
 	}
 	want := []string{
-		"2026-01-19 22:00",
-		"2026-01-19 23:00",
-		"2026-01-20 10:00",
-		"2026-01-20 11:15",
-		"2026-01-20 14:15",
+		"2026-01-20 09:59",
+		"2026-01-20 11:13",
+		"2026-01-20 14:12",
 		"2026-01-20 15:00",
+		"2026-01-20 22:00",
+		"2026-01-20 23:00",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("len(bars)=%d, want %d, got=%v", len(got), len(want), got)
@@ -202,11 +204,11 @@ VALUES('sr','21:00-23:00,09:00-10:15,10:30-11:30,13:30-15:00',
 func TestBarsByEndSessionMissingReturnsTypedError(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	prepareDB(t, dbPath)
+	dsn := testmysql.NewDatabase(t)
+	prepareDB(t, dsn)
 
-	idx := searchindex.NewManager(dbPath, 0)
-	svc := klinequery.NewService(dbPath, idx)
+	idx := searchindex.NewManager(dsn, 0)
+	svc := klinequery.NewService(dsn, idx)
 	end := mustTime("2026-01-19 09:30:00")
 
 	_, err := svc.BarsByEnd("SR2701", "contract", "sr", "1h", end, 2000)
@@ -221,37 +223,40 @@ func TestBarsByEndSessionMissingReturnsTypedError(t *testing.T) {
 func TestBarsByEndL9InferTradingSession(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	dsn := testmysql.NewDatabase(t)
+	db := testmysql.Open(t, dsn)
 	defer db.Close()
 
 	mustExec(t, db, `CREATE TABLE "future_kline_l9_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`)
-	ensureTradingSessionsTable(t, db)
-
+	insertL9DayBars(t, db, "2026-01-19", []string{"21:00", "21:05", "21:10", "09:00", "15:00"})
 	insertL9DayBars(t, db, "2026-01-20", []string{"21:00", "21:05", "21:10", "09:00", "15:01"})
 	insertL9DayBars(t, db, "2026-01-21", []string{"21:00", "21:05", "21:10", "09:00", "15:00"})
+	if _, _, err := mmkline.RebuildAndUpsert(db, mmkline.RebuildRequest{
+		Variety:      "sr",
+		InstrumentID: "srl9",
+		IsL9:         true,
+	}); err != nil {
+		t.Fatalf("RebuildAndUpsert() error = %v", err)
+	}
 
-	idx := searchindex.NewManager(dbPath, 0)
-	svc := klinequery.NewService(dbPath, idx)
+	idx := searchindex.NewManager(dsn, 0)
+	svc := klinequery.NewService(dsn, idx)
 	end := mustTime("2026-01-21 23:59:00")
 
-	resp, err := svc.BarsByEnd("srl9", "l9", "sr", "1m", end, 5000)
+	resp, err := svc.BarsByEnd("srl9", "l9", "sr", "1h", end, 5000)
 	if err != nil {
 		t.Fatalf("BarsByEnd() error = %v", err)
 	}
@@ -278,46 +283,43 @@ func TestBarsByEndL9InferTradingSession(t *testing.T) {
 	}
 }
 
-func prepareDB(t *testing.T, dbPath string) {
+func prepareDB(t *testing.T, dsn string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	db := testmysql.Open(t, dsn)
 	defer db.Close()
 
 	stmts := []string{
 		`CREATE TABLE "future_kline_instrument_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`,
 		`CREATE TABLE "future_kline_l9_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('2701','CZCE','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('2701','CZCE','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
-		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('l9','L9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
+		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('srl9','L9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -329,14 +331,14 @@ func prepareDB(t *testing.T, dbPath string) {
 func ensureTradingSessionsTable(t *testing.T, db *sql.DB) {
 	t.Helper()
 	mustExec(t, db, `CREATE TABLE IF NOT EXISTS trading_sessions(
-  variety TEXT PRIMARY KEY,
-  session_text TEXT NOT NULL,
-  session_json TEXT NOT NULL,
-  is_completed INTEGER NOT NULL DEFAULT 0,
-  sample_trade_date TEXT NULL,
-  validated_trade_date TEXT NULL,
-  match_ratio REAL NOT NULL DEFAULT 0,
-  updated_at TEXT NOT NULL
+  variety VARCHAR(32) PRIMARY KEY,
+  session_text VARCHAR(255) NOT NULL,
+  session_json JSON NOT NULL,
+  is_completed TINYINT NOT NULL DEFAULT 0,
+  sample_trade_date DATE NULL,
+  validated_trade_date DATE NULL,
+  match_ratio DOUBLE NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL
 )`)
 }
 
@@ -373,7 +375,7 @@ func insertL9DayBars(t *testing.T, db *sql.DB, tradeDate string, hhmm []string) 
 		ts := mustTime(fmt.Sprintf("%s %s:00", tradeDate, hm))
 		stmt := `INSERT INTO "future_kline_l9_1m_sr" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
 		mustExecArgs(t, db, stmt,
-			"l9", "L9",
+			"srl9", "L9",
 			ts.Format("2006-01-02 15:04:05"),
 			ts.Format("2006-01-02 15:04:05"),
 			"1m",

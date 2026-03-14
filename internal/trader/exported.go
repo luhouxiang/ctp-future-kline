@@ -13,6 +13,7 @@ type KlineStore = klineStore
 type MdSpi = mdSpi
 type L9AsyncCalculator = l9AsyncCalculator
 type InstrumentInfo = instrumentInfo
+type TickEvent = tickEvent
 
 const (
 	ColInstrumentID = colInstrumentID

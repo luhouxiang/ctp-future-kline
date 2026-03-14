@@ -6,14 +6,13 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"ctp-go-demo/internal/calendar"
+	"ctp-go-demo/tests/internal/testmysql"
 	"golang.org/x/text/encoding/simplifiedchinese"
-	_ "modernc.org/sqlite"
 )
 
 type mockSource struct {
@@ -27,7 +26,7 @@ func (m mockSource) FetchLatest(context.Context) (calendar.Announcement, error) 
 
 func TestNeedRefreshByHorizon(t *testing.T) {
 	t.Parallel()
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	m := calendar.NewManagerWithSource(dbPath, mockSource{})
 
 	need, _, err := m.NeedRefreshByHorizon(60)
@@ -41,7 +40,7 @@ func TestNeedRefreshByHorizon(t *testing.T) {
 
 func TestHorizonBoundary(t *testing.T) {
 	t.Parallel()
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	m := calendar.NewManagerWithSource(dbPath, mockSource{})
 	today := time.Date(time.Now().Year(), time.Now().Month(), time.Now().Day(), 0, 0, 0, 0, time.Local)
 
@@ -66,7 +65,7 @@ func TestHorizonBoundary(t *testing.T) {
 
 func TestRefreshIfNeededByHorizon(t *testing.T) {
 	t.Parallel()
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	year := time.Now().Year()
 	closed := []time.Time{time.Date(year, 1, 1, 0, 0, 0, 0, time.Local)}
 	m := calendar.NewManagerWithSource(dbPath, mockSource{ann: calendar.Announcement{Year: year, ClosedDays: closed, Meta: calendar.AnnouncementMeta{Title: "2026年休市安排", URL: "mock://shfe"}}})
@@ -158,7 +157,7 @@ func TestSHFESourceWAF(t *testing.T) {
 func TestImportTDXDailyBytesValidDailyReplaceRange(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	m := calendar.NewManagerWithSource(dbPath, mockSource{})
 	if err := m.ImportCSVBytes([]byte(
 		"trade_date,is_open\n2017-11-30,1\n2017-12-01,0\n2017-12-02,0\n2017-12-03,0\n2017-12-04,1\n",
@@ -197,7 +196,7 @@ func TestImportTDXDailyBytesValidDailyReplaceRange(t *testing.T) {
 func TestImportTDXDailyBytesNotDailyShouldFail(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	m := calendar.NewManagerWithSource(dbPath, mockSource{})
 	input := "T001 通达信商品 1分钟线 不复权\n" +
 		"      日期\t时间\t开盘\t最高\t最低\t收盘\t成交量\t持仓量\t结算价\n" +
@@ -210,7 +209,7 @@ func TestImportTDXDailyBytesNotDailyShouldFail(t *testing.T) {
 func TestImportTDXDailyBytesDuplicateDatesDedup(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	m := calendar.NewManagerWithSource(dbPath, mockSource{})
 	input := "T001 通达信商品 日线 不复权\n" +
 		"      日期\t开盘\t最高\t最低\t收盘\t成交量\t持仓量\t结算价\n" +
@@ -239,7 +238,7 @@ func TestImportTDXDailyBytesDuplicateDatesDedup(t *testing.T) {
 func TestImportTDXDailyBytesNoValidRowsShouldFail(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	m := calendar.NewManagerWithSource(dbPath, mockSource{})
 	input := "T001 通达信商品 日线 不复权\n" +
 		"      日期\t开盘\t最高\t最低\t收盘\t成交量\t持仓量\t结算价\n" +
@@ -270,11 +269,7 @@ func mustGBK(t *testing.T, s string) []byte {
 
 func mustOpenDB(t *testing.T, dbPath string) *sql.DB {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
-	return db
+	return testmysql.Open(t, dbPath)
 }
 
 func mustAssertIsOpen(t *testing.T, db *sql.DB, day string, isOpen int) {

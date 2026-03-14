@@ -4,7 +4,11 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,6 +75,149 @@ func TestReplayServicePauseResumeStop(t *testing.T) {
 	waitTaskFinished(t, svc, task.TaskID, 3*time.Second)
 }
 
+func TestReplayServiceTickDirRealtimeDispatchAndCursor(t *testing.T) {
+	t.Parallel()
+
+	svc := newReplayService(t)
+	tickDir := filepath.Join(t.TempDir(), "ticks")
+	if err := os.MkdirAll(tickDir, 0o755); err != nil {
+		t.Fatalf("mkdir tick dir failed: %v", err)
+	}
+	writeTickCSV(t, filepath.Join(tickDir, "au2506.csv"), []string{
+		"2026-03-01 09:00:00.000,au2506,SHFE,20260303,20260301,09:00:00,2026-03-01 09:00:00,100.1,1,10,99,100,100.2,0",
+		"2026-03-01 09:00:02.000,au2506,SHFE,20260303,20260301,09:00:02,2026-03-01 09:00:02,100.3,2,11,99,100.2,100.4,0",
+	})
+	writeTickCSV(t, filepath.Join(tickDir, "ag2506.csv"), []string{
+		"2026-03-01 09:00:01.000,ag2506,SHFE,20260303,20260301,09:00:01,2026-03-01 09:00:01,80.1,3,12,79,80,80.2,0",
+	})
+
+	var mu sync.Mutex
+	got := make([]string, 0, 3)
+	svc.RegisterConsumer("tick_consumer", func(_ context.Context, ev bus.BusEvent) error {
+		if ev.Topic != bus.TopicTick {
+			return nil
+		}
+		var payload map[string]any
+		if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+			return err
+		}
+		mu.Lock()
+		got = append(got, strings.ToLower(payload["InstrumentID"].(string)))
+		mu.Unlock()
+		return nil
+	})
+
+	task, err := svc.Start(replay.StartRequest{
+		Mode:    "realtime",
+		Speed:   1000,
+		TickDir: tickDir,
+	})
+	if err != nil {
+		t.Fatalf("start tick dir replay failed: %v", err)
+	}
+	waitTaskDone(t, svc, task.TaskID, 3*time.Second)
+	mu.Lock()
+	if !reflect.DeepEqual(got, []string{"au2506", "ag2506", "au2506"}) {
+		mu.Unlock()
+		t.Fatalf("tick replay order = %v, want [au2506 ag2506 au2506]", got)
+	}
+	mu.Unlock()
+	snap := svc.Status()
+	if snap.TickDir != tickDir {
+		t.Fatalf("TickDir = %q, want %q", snap.TickDir, tickDir)
+	}
+	if snap.TickFiles != 2 {
+		t.Fatalf("TickFiles = %d, want 2", snap.TickFiles)
+	}
+	if snap.Instruments != 2 {
+		t.Fatalf("Instruments = %d, want 2", snap.Instruments)
+	}
+	if snap.TotalTicks != 3 {
+		t.Fatalf("TotalTicks = %d, want 3", snap.TotalTicks)
+	}
+	if snap.ProcessedTicks != 3 {
+		t.Fatalf("ProcessedTicks = %d, want 3", snap.ProcessedTicks)
+	}
+	if snap.CurrentInstrumentID != "au2506" {
+		t.Fatalf("CurrentInstrumentID = %q, want au2506", snap.CurrentInstrumentID)
+	}
+	if snap.CurrentSimTime == nil || snap.CurrentSimTime.Format("2006-01-02 15:04:05") != "2026-03-01 09:00:02" {
+		t.Fatalf("CurrentSimTime = %v, want 2026-03-01 09:00:02", snap.CurrentSimTime)
+	}
+	if snap.FirstSimTime == nil || snap.FirstSimTime.Format("2006-01-02 15:04:05") != "2026-03-01 09:00:00" {
+		t.Fatalf("FirstSimTime = %v, want 2026-03-01 09:00:00", snap.FirstSimTime)
+	}
+	if snap.LastSimTime == nil || snap.LastSimTime.Format("2006-01-02 15:04:05") != "2026-03-01 09:00:02" {
+		t.Fatalf("LastSimTime = %v, want 2026-03-01 09:00:02", snap.LastSimTime)
+	}
+	if snap.LastCursor == nil || snap.LastCursor.File != "au2506.csv" || snap.LastCursor.Offset != 3 {
+		t.Fatalf("LastCursor = %+v, want au2506.csv@3", snap.LastCursor)
+	}
+
+	mu.Lock()
+	got = got[:0]
+	mu.Unlock()
+	task, err = svc.Start(replay.StartRequest{
+		Mode:    "fast",
+		TickDir: tickDir,
+		FromCursor: &bus.FileCursor{
+			File:   "au2506.csv",
+			Offset: 3,
+		},
+	})
+	if err != nil {
+		t.Fatalf("start tick dir replay with cursor failed: %v", err)
+	}
+	waitTaskDone(t, svc, task.TaskID, 3*time.Second)
+	mu.Lock()
+	if len(got) != 0 {
+		mu.Unlock()
+		t.Fatalf("dispatch count after second replay = %d, want 0 due dedup", len(got))
+	}
+	mu.Unlock()
+	snap = svc.Status()
+	if snap.Skipped != 1 {
+		t.Fatalf("Skipped = %d, want 1", snap.Skipped)
+	}
+}
+
+func TestReplayServiceTickDirIgnoresWrongSourcesByAutoIncludingTickCSV(t *testing.T) {
+	t.Parallel()
+
+	svc := newReplayService(t)
+	tickDir := filepath.Join(t.TempDir(), "ticks")
+	if err := os.MkdirAll(tickDir, 0o755); err != nil {
+		t.Fatalf("mkdir tick dir failed: %v", err)
+	}
+	writeTickCSV(t, filepath.Join(tickDir, "rb2505.csv"), []string{
+		"2026-03-01 09:00:00.000,rb2505,SHFE,20260303,20260301,09:00:00,2026-03-01 09:00:00,100.1,1,10,99,100,100.2,0",
+	})
+
+	var hits atomic.Int64
+	svc.RegisterConsumer("tick_consumer", func(_ context.Context, ev bus.BusEvent) error {
+		if ev.Topic == bus.TopicTick {
+			hits.Add(1)
+		}
+		return nil
+	})
+
+	task, err := svc.Start(replay.StartRequest{
+		Mode:    "fast",
+		TickDir: tickDir,
+		Sources: []string{"trader.md"},
+	})
+	if err != nil {
+		t.Fatalf("start tick dir replay failed: %v", err)
+	}
+	waitTaskDone(t, svc, task.TaskID, 3*time.Second)
+	if got := hits.Load(); got != 1 {
+		t.Fatalf("dispatch count = %d, want 1", got)
+	}
+	if snap := svc.Status(); len(snap.Sources) == 0 || snap.Sources[len(snap.Sources)-1] != "replay.tickcsv" {
+		t.Fatalf("Sources = %v, want replay.tickcsv included", snap.Sources)
+	}
+}
+
 func newReplayService(t *testing.T) *replay.Service {
 	t.Helper()
 
@@ -132,4 +279,12 @@ func mustJSON(t *testing.T, v any) []byte {
 		t.Fatal(err)
 	}
 	return b
+}
+
+func writeTickCSV(t *testing.T, path string, lines []string) {
+	t.Helper()
+	content := "received_at,instrument_id,exchange_id,trading_day,action_day,update_time,adjusted_tick_time,last_price,volume,open_interest,settlement_price,bid_price1,ask_price1,update_millisec\n" + strings.Join(lines, "\n") + "\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("write tick csv failed: %v", err)
+	}
 }

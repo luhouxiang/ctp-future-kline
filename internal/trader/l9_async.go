@@ -12,11 +12,17 @@ import (
 	"ctp-go-demo/internal/mmkline"
 )
 
+// l9Task 表示“某个品种在某一分钟尝试生成 L9”的异步任务。
 type l9Task struct {
 	variety    string
 	minuteTime time.Time
 }
 
+// l9AsyncCalculator 负责异步维护 L9 主连分钟线。
+//
+// 它的输入不是原始 tick，而是已经封口并落库的普通合约 1m bar。
+// 当某一分钟的多个合约 bar 被陆续观察到后，计算器会尝试拼出该分钟的 L9 bar，
+// 然后把结果写入 L9 1m 表，并继续触发 L9 的 mm 聚合。
 type l9AsyncCalculator struct {
 	store *klineStore
 	clock *klineclock.CalendarResolver
@@ -32,6 +38,7 @@ type l9AsyncCalculator struct {
 	instrumentVariety map[string]string
 }
 
+// newL9AsyncCalculator 初始化 L9 异步计算器和后台 worker。
 func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
 	if workers <= 0 {
 		workers = 1
@@ -73,14 +80,18 @@ func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expected
 	return c
 }
 
+// Enable 打开 L9 计算开关。
 func (c *l9AsyncCalculator) Enable() {
 	c.enabled.Store(true)
 }
 
+// Disable 关闭 L9 计算开关。
 func (c *l9AsyncCalculator) Disable() {
 	c.enabled.Store(false)
 }
 
+// ObserveMinuteBar 把一个普通合约的 1m bar 放入内存快照。
+// Submit 时会以这些快照为输入，计算同一分钟的 L9。
 func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 	if bar.InstrumentID == "" || bar.MinuteTime.IsZero() {
 		return
@@ -119,6 +130,7 @@ func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 	c.pruneOldMinutesLocked(bar.Variety, minuteKey)
 }
 
+// Submit 把某个品种某一分钟的 L9 计算请求入队。
 func (c *l9AsyncCalculator) Submit(variety string, minuteTime time.Time) {
 	if !c.enabled.Load() {
 		return
@@ -134,11 +146,13 @@ func (c *l9AsyncCalculator) Submit(variety string, minuteTime time.Time) {
 	}
 }
 
+// Close 停止 worker 并等待所有后台任务退出。
 func (c *l9AsyncCalculator) Close() {
 	close(c.tasks)
 	c.wg.Wait()
 }
 
+// worker 消费任务队列并调用 computeAndStore 完成实际计算。
 func (c *l9AsyncCalculator) worker() {
 	defer c.wg.Done()
 	for task := range c.tasks {
@@ -148,6 +162,8 @@ func (c *l9AsyncCalculator) worker() {
 	}
 }
 
+// computeAndStore 根据同品种该分钟的普通合约 bar 计算一根 L9 bar，
+// 然后写入 L9 1m 表，并重建对应品种的 L9 mm 数据。
 func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time) error {
 	bars := c.snapshotBarsForMinute(variety, minuteTime)
 	if len(bars) == 0 {
@@ -208,6 +224,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 	return nil
 }
 
+// snapshotBarsForMinute 提取某个品种某一分钟当前可用的全部合约 bar 快照。
 func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime time.Time) []minuteBar {
 	variety = normalizeVariety(variety)
 	if variety == "" {
@@ -261,6 +278,7 @@ func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime tim
 	return bars
 }
 
+// expectedInstrumentsLocked 返回某个品种理论上应参与 L9 计算的合约集合。
 func (c *l9AsyncCalculator) expectedInstrumentsLocked(variety string) []string {
 	set := c.expected[variety]
 	if len(set) == 0 {
@@ -274,6 +292,7 @@ func (c *l9AsyncCalculator) expectedInstrumentsLocked(variety string) []string {
 	return out
 }
 
+// minuteBarLocked 读取内存中缓存的“某品种-某分钟-某合约”的 bar。
 func (c *l9AsyncCalculator) minuteBarLocked(variety string, minuteKey int64, instrumentID string) (minuteBar, bool) {
 	byMinute := c.minuteBars[variety]
 	if byMinute == nil {
@@ -287,6 +306,7 @@ func (c *l9AsyncCalculator) minuteBarLocked(variety string, minuteKey int64, ins
 	return bar, ok
 }
 
+// pruneOldMinutesLocked 清理旧分钟缓存，避免内存随运行时间持续增长。
 func (c *l9AsyncCalculator) pruneOldMinutesLocked(variety string, currentMinuteKey int64) {
 	byMinute := c.minuteBars[variety]
 	if byMinute == nil {
@@ -300,6 +320,7 @@ func (c *l9AsyncCalculator) pruneOldMinutesLocked(variety string, currentMinuteK
 	}
 }
 
+// adjustedMinuteTime 为 L9 分钟线补交易日历修正后的时间键。
 func (c *l9AsyncCalculator) adjustedMinuteTime(minuteTime time.Time) time.Time {
 	day := time.Date(minuteTime.Year(), minuteTime.Month(), minuteTime.Day(), 0, 0, 0, 0, time.Local)
 	_, adjusted, err := klineclock.BuildBarTimes(day, klineclock.HHMMFromTime(minuteTime), c.clock)

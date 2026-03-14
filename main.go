@@ -50,9 +50,12 @@ func main() {
 	defer func() {
 		_ = logger.Close()
 	}()
+	if err := logger.SetLevel(cfg.Log.Level); err != nil {
+		logger.Error("set log level failed", "level", cfg.Log.Level, "error", err)
+	}
 	// Ensure the first line in file logs is the backend version.
-	logger.Info("config loaded", "config_path", resolvedConfigPath)
-	logger.Info("log file enabled", "log_path", logPath)
+	logger.Debug("config loaded", "config_path", resolvedConfigPath)
+	logger.Info("log files enabled", "base_log_path", logPath, "level", cfg.Log.Level)
 	if err := dbx.EnsureDatabase(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
 	}

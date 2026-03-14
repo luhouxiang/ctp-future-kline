@@ -27,12 +27,15 @@ const (
 	colSettlement   = "SettlementPrice"
 )
 
+// RebuildRequest 描述一次 mm 重建任务。
+// 它既可以针对普通合约，也可以针对某个品种的 L9。
 type RebuildRequest struct {
 	Variety      string
 	InstrumentID string
 	IsL9         bool
 }
 
+// SessionRangeJSON 是交易时段配置落到 JSON 时使用的结构。
 type SessionRangeJSON struct {
 	Start string `json:"start"`
 	End   string `json:"end"`
@@ -40,6 +43,16 @@ type SessionRangeJSON struct {
 
 var ErrTradingSessionNotReady = fmt.Errorf("trading session not completed")
 
+// RebuildAndUpsert 根据 1m 源表重建多周期 mm 数据并写回目标表。
+//
+// 处理步骤概括如下：
+// 1. 依据 IsL9 选择普通合约源表或 L9 源表
+// 2. 加载已完成的交易时段配置，必要时尝试推断并写回
+// 3. 读取该合约或 L9 的全部 1m bar
+// 4. 按交易时段与周期桶重新聚合
+// 5. 把生成结果回写到 mm 表
+//
+// 当前实现是“以目标合约/目标 L9 为单位进行重建”，不是只增量更新单个桶。
 func RebuildAndUpsert(db *sql.DB, req RebuildRequest) (map[string]int, []klineagg.BucketStat, error) {
 	if db == nil {
 		return nil, nil, fmt.Errorf("nil db")
@@ -594,6 +607,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	return nil
 }
 
+// sourceTableName 根据品种和是否为 L9 选择 1m 源表。
 func sourceTableName(variety string, isL9 bool) (string, error) {
 	if isL9 {
 		return "future_kline_l9_1m_" + sanitizeIdent(variety), nil
@@ -601,6 +615,7 @@ func sourceTableName(variety string, isL9 bool) (string, error) {
 	return "future_kline_instrument_1m_" + sanitizeIdent(variety), nil
 }
 
+// mmTableName 根据品种和是否为 L9 选择 mm 目标表。
 func mmTableName(variety string, isL9 bool) (string, error) {
 	v := sanitizeIdent(variety)
 	if v == "" {
@@ -609,7 +624,7 @@ func mmTableName(variety string, isL9 bool) (string, error) {
 	if isL9 {
 		return "future_kline_l9_mm_" + v, nil
 	}
-	return "future_kline_instrument_1m_mm_" + v, nil
+	return "future_kline_instrument_mm_" + v, nil
 }
 
 func TableNameForInstrumentMMVariety(variety string) (string, error) {

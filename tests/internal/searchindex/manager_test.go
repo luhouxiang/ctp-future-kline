@@ -1,22 +1,20 @@
-﻿package searchindex_test
+package searchindex_test
 
 import (
-	"database/sql"
-	"path/filepath"
 	"testing"
 	"time"
 
 	"ctp-go-demo/internal/searchindex"
-	_ "modernc.org/sqlite"
+	"ctp-go-demo/tests/internal/testmysql"
 )
 
 func TestSearchAndLookup(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "kline.db")
-	prepareDB(t, dbPath)
+	dsn := testmysql.NewDatabase(t)
+	prepareDB(t, dsn)
 
-	mgr := searchindex.NewManager(dbPath, 0)
+	mgr := searchindex.NewManager(dsn, 0)
 	start := mustTime("2026-01-19 00:00:00")
 	end := mustTime("2026-01-20 23:59:00")
 
@@ -34,10 +32,10 @@ func TestSearchAndLookup(t *testing.T) {
 	foundContract := false
 	foundL9 := false
 	for _, it := range items {
-		if it.Kind == "contract" && it.SymbolNorm == "2701" {
+		if it.Kind == "contract" && it.SymbolNorm == "sr2701" {
 			foundContract = true
 		}
-		if it.Kind == "l9" && it.SymbolNorm == "l9" {
+		if it.Kind == "l9" && it.SymbolNorm == "srl9" {
 			foundL9 = true
 		}
 	}
@@ -57,47 +55,74 @@ func TestSearchAndLookup(t *testing.T) {
 	}
 }
 
-func prepareDB(t *testing.T, dbPath string) {
+func prepareDB(t *testing.T, dsn string) {
 	t.Helper()
 
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	db := testmysql.Open(t, dsn)
 	defer db.Close()
 
 	stmts := []string{
 		`CREATE TABLE "future_kline_instrument_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`,
 		`CREATE TABLE "future_kline_l9_1m_sr" (
-  "InstrumentID" TEXT NOT NULL,
-  "Exchange" TEXT NOT NULL,
-  "DataTime" TEXT NOT NULL,
-  "AdjustedTime" TEXT NOT NULL,
-  "Period" TEXT NOT NULL,
-  "Open" REAL NOT NULL,
-  "High" REAL NOT NULL,
-  "Low" REAL NOT NULL,
-  "Close" REAL NOT NULL,
-  "Volume" INTEGER NOT NULL,
-  "OpenInterest" REAL NOT NULL,
-  "SettlementPrice" REAL NOT NULL
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
 )`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('2701','CZCE','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('2701','CZCE','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
-		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('l9','L9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
+		`CREATE TABLE "future_kline_instrument_mm_sr" (
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
+)`,
+		`CREATE TABLE "future_kline_l9_mm_sr" (
+  "InstrumentID" VARCHAR(32) NOT NULL,
+  "Exchange" VARCHAR(16) NOT NULL,
+  "DataTime" DATETIME NOT NULL,
+  "AdjustedTime" DATETIME NOT NULL,
+  "Period" VARCHAR(8) NOT NULL,
+  "Open" DOUBLE NOT NULL,
+  "High" DOUBLE NOT NULL,
+  "Low" DOUBLE NOT NULL,
+  "Close" DOUBLE NOT NULL,
+  "Volume" BIGINT NOT NULL,
+  "OpenInterest" DOUBLE NOT NULL,
+  "SettlementPrice" DOUBLE NOT NULL
+)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
+		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('srl9','L9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
+		`INSERT INTO "future_kline_instrument_mm_sr" VALUES ('sr2701','CZCE','2026-01-19 09:05:00','2026-01-19 09:05:00','5m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_l9_mm_sr" VALUES ('srl9','L9','2026-01-19 09:05:00','2026-01-19 09:05:00','5m',1,2,1,2,20,200,0)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -110,4 +135,3 @@ func mustTime(v string) time.Time {
 	out, _ := time.ParseInLocation("2006-01-02 15:04:05", v, time.Local)
 	return out
 }
-

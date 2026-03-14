@@ -113,8 +113,8 @@ func TestLoadSuccessAndDefaults(t *testing.T) {
 	if cfg.CTP.BusFlushMS != 200 {
 		t.Fatalf("BusFlushMS = %d, want 200", cfg.CTP.BusFlushMS)
 	}
-	if cfg.CTP.ReplayDefaultMode != "fast" {
-		t.Fatalf("ReplayDefaultMode = %q, want fast", cfg.CTP.ReplayDefaultMode)
+	if cfg.CTP.ReplayDefaultMode != "realtime" {
+		t.Fatalf("ReplayDefaultMode = %q, want realtime", cfg.CTP.ReplayDefaultMode)
 	}
 	if cfg.CTP.ReplayDefaultSpeed != 1.0 {
 		t.Fatalf("ReplayDefaultSpeed = %v, want 1.0", cfg.CTP.ReplayDefaultSpeed)

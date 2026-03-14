@@ -100,11 +100,32 @@ function normalizeDrawingForSave(d) {
 
 function getParams() {
   const p = new URLSearchParams(location.search)
-  scope.symbol = String(p.get('symbol') || '').trim().toLowerCase()
-  scope.type = p.get('type') || ''
-  scope.variety = p.get('variety') || ''
+  const symbol = String(p.get('symbol') || '').trim().toLowerCase()
+  const kind = String(p.get('type') || '').trim().toLowerCase()
+  const variety = String(p.get('variety') || '').trim().toLowerCase()
+  scope.symbol = symbol
+  scope.type = kind || inferKlineTypeBySymbol(symbol)
+  scope.variety = variety || inferVarietyBySymbol(symbol, scope.type)
   scope.timeframe = p.get('timeframe') || '1m'
   scope.end = p.get('end') || ''
+}
+
+function inferKlineTypeBySymbol(symbol) {
+  const s = String(symbol || '').trim().toLowerCase()
+  if (!s) return ''
+  if (s === 'l9' || s.endsWith('l9')) return 'l9'
+  return 'contract'
+}
+
+function inferVarietyBySymbol(symbol, kind) {
+  const s = String(symbol || '').trim().toLowerCase()
+  if (!s) return ''
+  if (kind === 'l9') {
+    if (s === 'l9') return ''
+    return s.endsWith('l9') ? s.slice(0, -2) : s
+  }
+  const m = s.match(/^[a-z]+/)
+  return m ? m[0] : ''
 }
 
 async function fetchWatchlist() {

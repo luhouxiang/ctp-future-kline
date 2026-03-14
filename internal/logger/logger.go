@@ -12,10 +12,24 @@ import (
 )
 
 var (
-	logMu     sync.Mutex
-	logFile   *os.File
-	logWriter io.Writer = os.Stdout
-	workDir             = mustGetwd()
+	logMu      sync.Mutex
+	levelFiles map[string]*os.File
+	baseFile   *os.File
+	logWriters = map[string]io.Writer{
+		"DEBUG": os.Stdout,
+		"INFO":  os.Stdout,
+		"WARN":  os.Stdout,
+		"ERROR": os.Stdout,
+	}
+	minLevel = levelInfo
+	workDir  = mustGetwd()
+)
+
+const (
+	levelDebug = iota
+	levelInfo
+	levelWarn
+	levelError
 )
 
 func InitFile(path string) error {
@@ -26,35 +40,92 @@ func InitFile(path string) error {
 		return err
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	paths := buildLevelLogPaths(path)
+	files := make(map[string]*os.File, len(paths))
+	base, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		return err
+	}
+	for level, p := range paths {
+		f, err := os.OpenFile(p, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if err != nil {
+			_ = base.Close()
+			for _, opened := range files {
+				_ = opened.Close()
+			}
+			return err
+		}
+		files[level] = f
 	}
 
 	logMu.Lock()
 	defer logMu.Unlock()
-	if logFile != nil {
-		_ = logFile.Close()
+	for _, f := range levelFiles {
+		_ = f.Close()
 	}
-	logFile = f
-	logWriter = io.MultiWriter(os.Stdout, f)
+	if baseFile != nil {
+		_ = baseFile.Close()
+	}
+	levelFiles = files
+	baseFile = base
+	logWriters = map[string]io.Writer{
+		"DEBUG": io.MultiWriter(os.Stdout, base, files["DEBUG"]),
+		"INFO":  io.MultiWriter(os.Stdout, base, files["INFO"]),
+		"WARN":  io.MultiWriter(os.Stdout, base, files["WARN"]),
+		"ERROR": io.MultiWriter(os.Stdout, base, files["ERROR"]),
+	}
+	return nil
+}
+
+func SetLevel(level string) error {
+	parsed, err := parseLevel(level)
+	if err != nil {
+		return err
+	}
+	logMu.Lock()
+	defer logMu.Unlock()
+	minLevel = parsed
 	return nil
 }
 
 func Close() error {
 	logMu.Lock()
 	defer logMu.Unlock()
-	if logFile == nil {
+	if len(levelFiles) == 0 {
 		return nil
 	}
-	err := logFile.Close()
-	logFile = nil
-	logWriter = os.Stdout
-	return err
+	var firstErr error
+	for _, f := range levelFiles {
+		if err := f.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	if baseFile != nil {
+		if err := baseFile.Close(); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	levelFiles = nil
+	baseFile = nil
+	logWriters = map[string]io.Writer{
+		"DEBUG": os.Stdout,
+		"INFO":  os.Stdout,
+		"WARN":  os.Stdout,
+		"ERROR": os.Stdout,
+	}
+	return firstErr
+}
+
+func Debug(msg string, args ...any) {
+	logWithCaller("DEBUG", msg, args...)
 }
 
 func Info(msg string, args ...any) {
 	logWithCaller("INFO", msg, args...)
+}
+
+func Warn(msg string, args ...any) {
+	logWithCaller("WARN", msg, args...)
 }
 
 func Error(msg string, args ...any) {
@@ -62,6 +133,9 @@ func Error(msg string, args ...any) {
 }
 
 func logWithCaller(level string, msg string, args ...any) {
+	if !shouldLog(level) {
+		return
+	}
 	// Stack: caller -> logger.Info/Error -> logWithCaller
 	source := "unknown:0"
 	if _, file, line, ok := runtime.Caller(2); ok {
@@ -84,7 +158,54 @@ func logWithCaller(level string, msg string, args ...any) {
 
 	logMu.Lock()
 	defer logMu.Unlock()
-	_, _ = io.WriteString(logWriter, b.String())
+	w := logWriters[level]
+	if w == nil {
+		w = os.Stdout
+	}
+	_, _ = io.WriteString(w, b.String())
+}
+
+func shouldLog(level string) bool {
+	logMu.Lock()
+	defer logMu.Unlock()
+	current, err := parseLevel(level)
+	if err != nil {
+		return false
+	}
+	return current >= minLevel
+}
+
+func parseLevel(level string) (int, error) {
+	switch strings.ToUpper(strings.TrimSpace(level)) {
+	case "DEBUG":
+		return levelDebug, nil
+	case "", "INFO":
+		return levelInfo, nil
+	case "WARN":
+		return levelWarn, nil
+	case "ERROR":
+		return levelError, nil
+	default:
+		return 0, fmt.Errorf("invalid log level: %s", level)
+	}
+}
+
+func buildLevelLogPaths(path string) map[string]string {
+	ext := filepath.Ext(path)
+	base := strings.TrimSuffix(filepath.Base(path), ext)
+	dir := filepath.Dir(path)
+	if base == "" {
+		base = "server"
+	}
+	if ext == "" {
+		ext = ".log"
+	}
+	return map[string]string{
+		"DEBUG": filepath.Join(dir, base+".debug"+ext),
+		"INFO":  filepath.Join(dir, base+".info"+ext),
+		"WARN":  filepath.Join(dir, base+".warn"+ext),
+		"ERROR": filepath.Join(dir, base+".error"+ext),
+	}
 }
 
 func shortPath(path string) string {

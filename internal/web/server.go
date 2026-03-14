@@ -91,6 +91,13 @@ func NewServer(cfg config.AppConfig) *Server {
 				logger.Error("init replay dedup store failed", "error", err)
 			} else {
 				s.replay = replay.NewService(busLog, store, cfg.CTP.IsReplayAllowOrderCommandDispatch())
+				replaySink, sinkErr := trader.NewReplaySink(cfg.CTP, status)
+				if sinkErr != nil {
+					logger.Error("init replay trader sink failed", "error", sinkErr)
+				} else {
+					s.replay.RegisterConsumer("trader.replay_sink", replaySink.ConsumeBusEvent)
+					s.replay.RegisterTaskLifecycle("trader.replay_sink", replaySink)
+				}
 			}
 		}
 	}
@@ -382,13 +389,16 @@ func (s *Server) handleKlineBars(w http.ResponseWriter, r *http.Request) {
 	}
 	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
 	kind := strings.TrimSpace(r.URL.Query().Get("type"))
+	if kind == "" {
+		kind = inferKlineTypeBySymbol(symbol)
+	}
 	variety := strings.TrimSpace(r.URL.Query().Get("variety"))
 	timeframe := strings.TrimSpace(r.URL.Query().Get("timeframe"))
 	if timeframe == "" {
 		timeframe = "1m"
 	}
-	if symbol == "" || kind == "" {
-		http.Error(w, "symbol and type are required", http.StatusBadRequest)
+	if symbol == "" {
+		http.Error(w, "symbol is required", http.StatusBadRequest)
 		return
 	}
 	end, err := parseOptionalEndTime(r.URL.Query().Get("end"))
@@ -661,6 +671,12 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Speed == 0 {
 		req.Speed = s.cfg.CTP.ReplayDefaultSpeed
+	}
+	if strings.TrimSpace(req.TickDir) == "" {
+		req.TickDir = filepath.Join(s.cfg.CTP.FlowPath, "ticks")
+	}
+	if !req.FullReplay {
+		logger.Info("replay start requested without full replay", "tick_dir", req.TickDir)
 	}
 	task, err := s.replay.Start(req)
 	if err != nil {
@@ -1088,4 +1104,12 @@ func parseOptionalEndTime(endRaw string) (time.Time, error) {
 		return time.Now().Truncate(time.Minute), nil
 	}
 	return parseMinuteTime(endRaw)
+}
+
+func inferKlineTypeBySymbol(symbol string) string {
+	s := strings.ToLower(strings.TrimSpace(symbol))
+	if s == "l9" || strings.HasSuffix(s, "l9") {
+		return "l9"
+	}
+	return "contract"
 }

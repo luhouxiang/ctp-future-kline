@@ -155,8 +155,10 @@ go run . -config ../ctp-future-resources/config/config.json -no-open
 ## 数据存储
 
 - 数据库：MySQL（`db.database`，默认 `future_kline`）
-- 合约分钟线表：`future_kline_instrument_1m_<variety>`
-- L9 表：`future_kline_l9_1m_<variety>`
+- 合约 1 分钟线表：`future_kline_instrument_1m_<variety>`
+- 合约多周期（非 1 分钟）表：`future_kline_instrument_mm_<variety>`
+- L9 1 分钟线表：`future_kline_l9_1m_<variety>`
+- L9 多周期（非 1 分钟）表：`future_kline_l9_mm_<variety>`
 - 图表布局表：`chart_layouts`
 - 绘图对象表：`chart_drawings`
 
@@ -182,6 +184,29 @@ go run ./cmd/migrate_sqlite_to_mysql \
   --mysql-password your_mysql_password \
   --mysql-db future_kline \
   --truncate
+```
+
+## 一次性重命名 MM 表
+
+将历史命名 `future_kline_instrument_1m_mm_<variety>` 重命名为新命名 `future_kline_instrument_mm_<variety>`：
+
+```bash
+# 先预览
+go run ./cmd/rename_mm_tables \
+  --mysql-host localhost \
+  --mysql-port 3306 \
+  --mysql-user root \
+  --mysql-password your_mysql_password \
+  --mysql-db future_kline
+
+# 确认后执行
+go run ./cmd/rename_mm_tables \
+  --mysql-host localhost \
+  --mysql-port 3306 \
+  --mysql-user root \
+  --mysql-password your_mysql_password \
+  --mysql-db future_kline \
+  --execute
 ```
 
 ## API
@@ -270,4 +295,3 @@ go test ./tests/internal/config ./tests/internal/importer ./tests/internal/searc
 - WebSocket: `github.com/gorilla/websocket`
 - 编码处理: `golang.org/x/text`
 - 图表库: `lightweight-charts`
-

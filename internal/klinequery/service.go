@@ -177,7 +177,7 @@ LIMIT ? OFFSET ?`, pageSize, offset)
 }
 
 func (s *Service) BarsByEnd(symbol string, kind string, variety string, timeframe string, end time.Time, limit int) (BarsResponse, error) {
-	kind = strings.ToLower(strings.TrimSpace(kind))
+	kind = normalizeKlineKind(kind, symbol)
 	if kind != "contract" && kind != "l9" {
 		return BarsResponse{}, fmt.Errorf("invalid type: %s", kind)
 	}
@@ -334,6 +334,7 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 		return BarsResponse{}, sql.ErrNoRows
 	}
 	reverseBars(bars)
+	logDuplicateAdjustedTimes(bars, symbol, kind, item.Variety, queryTable, queryPeriod)
 	logger.Info("kline pipeline", "stage", "load_done", "symbol", symbol, "kind", kind, "variety", item.Variety, "timeframe", tf, "period", queryPeriod, "table", queryTable, "rows", len(bars), "first_time", time.Unix(bars[0].AdjustedTime, 0).Format("2006-01-02 15:04:05"), "last_time", time.Unix(bars[len(bars)-1].AdjustedTime, 0).Format("2006-01-02 15:04:05"))
 
 	var closes []float64
@@ -426,6 +427,35 @@ func reverseBars(items []KlineBar) {
 	}
 }
 
+func logDuplicateAdjustedTimes(bars []KlineBar, symbol, kind, variety, table, period string) {
+	if len(bars) < 2 {
+		return
+	}
+	dupCount := 0
+	samples := make([]string, 0, 5)
+	for i := 1; i < len(bars); i++ {
+		if bars[i].AdjustedTime != bars[i-1].AdjustedTime {
+			continue
+		}
+		dupCount++
+		if len(samples) < 5 {
+			samples = append(samples, time.Unix(bars[i].AdjustedTime, 0).Format("2006-01-02 15:04:05"))
+		}
+	}
+	if dupCount == 0 {
+		return
+	}
+	logger.Error("kline duplicate adjusted_time detected",
+		"symbol", symbol,
+		"kind", kind,
+		"variety", variety,
+		"table", table,
+		"period", period,
+		"duplicate_pairs", dupCount,
+		"sample_times", strings.Join(samples, ","),
+	)
+}
+
 func calcMACD(closes []float64, shortPeriod, longPeriod, signalPeriod int) ([]*float64, []*float64, []*float64) {
 	n := len(closes)
 	dif := make([]*float64, n)
@@ -470,6 +500,18 @@ func calcMACD(closes []float64, shortPeriod, longPeriod, signalPeriod int) ([]*f
 func displaySymbol(symbol string, kind string) string {
 	_ = kind
 	return strings.ToLower(strings.TrimSpace(symbol))
+}
+
+func normalizeKlineKind(kind string, symbol string) string {
+	k := strings.ToLower(strings.TrimSpace(kind))
+	if k != "" {
+		return k
+	}
+	s := strings.ToLower(strings.TrimSpace(symbol))
+	if s == "l9" || strings.HasSuffix(s, "l9") {
+		return "l9"
+	}
+	return "contract"
 }
 
 func instrumentIDCandidates(symbol string, variety string, kind string) []string {

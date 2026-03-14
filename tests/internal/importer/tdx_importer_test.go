@@ -1,23 +1,22 @@
 package importer_test
 
 import (
-	"database/sql"
 	"fmt"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"ctp-go-demo/internal/importer"
 	"ctp-go-demo/internal/trader"
+	"ctp-go-demo/tests/internal/testmysql"
 	"golang.org/x/text/encoding/simplifiedchinese"
-	_ "modernc.org/sqlite"
 )
 
 func TestTDXImportSessionImportsContractAndL9(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "future_kline.db")
+	dbPath := testmysql.NewDatabase(t)
+	mustPrepareTradingSessions(t, dbPath, "sr")
 	files := []importer.UploadFile{
 		{Name: "28#SR2701.txt", Data: mustGBK(t, sampleTdxContent("SR2701", []string{
 			"2026/01/19,2101,5321,5322,5321,5322,3,3,0",
@@ -66,7 +65,8 @@ func TestTDXImportSessionImportsContractAndL9(t *testing.T) {
 func TestTDXImportSessionImportsWhenHeaderMarkerMissing(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "future_kline.db")
+	dbPath := testmysql.NewDatabase(t)
+	mustPrepareTradingSessions(t, dbPath, "sp")
 	files := []importer.UploadFile{
 		{Name: "30#SPL9.txt", Data: mustGBK(t, sampleTdxContentNoMarker("SPL9", []string{
 			"2026/01/19,2101,5000,5001,5000,5001,1,1,0",
@@ -101,7 +101,8 @@ func TestTDXImportSessionImportsWhenHeaderMarkerMissing(t *testing.T) {
 func TestTDXImportSessionConflictAndOverwriteAll(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "future_kline.db")
+	dbPath := testmysql.NewDatabase(t)
+	mustPrepareTradingSessions(t, dbPath, "sr")
 	baseFile := importer.UploadFile{Name: "28#SR2701.txt", Data: mustGBK(t, sampleTdxContent("SR2701", []string{
 		"2026/01/19,2101,5321,5322,5321,5322,3,3,0",
 		"2026/01/19,2102,5322,5323,5322,5323,3,3,0",
@@ -161,8 +162,9 @@ func TestTDXImportSessionConflictAndOverwriteAll(t *testing.T) {
 func TestAdjustedTimePrefersPreviousTradingDayFromCurrentFile(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "future_kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	mustPrepareTradingCalendar(t, dbPath, []string{"2026-01-17"})
+	mustPrepareTradingSessions(t, dbPath, "sr")
 
 	file := importer.UploadFile{Name: "28#SR2701.txt", Data: mustGBK(t, sampleTdxContent("SR2701", []string{
 		"2026/01/19,0901,5000,5001,5000,5001,1,1,0",
@@ -183,8 +185,9 @@ func TestAdjustedTimePrefersPreviousTradingDayFromCurrentFile(t *testing.T) {
 func TestAdjustedTimeFallsBackToCalendarWhenNoPreviousDayInFile(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "future_kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	mustPrepareTradingCalendar(t, dbPath, []string{"2026-01-19"})
+	mustPrepareTradingSessions(t, dbPath, "sr")
 
 	file := importer.UploadFile{Name: "28#SR2701.txt", Data: mustGBK(t, sampleTdxContent("SR2701", []string{
 		"2026/01/20,2101,6000,6001,6000,6001,1,1,0",
@@ -204,8 +207,9 @@ func TestAdjustedTimeFallsBackToCalendarWhenNoPreviousDayInFile(t *testing.T) {
 func TestAdjustedTimeRulesForEarlyAndBoundaryTimes(t *testing.T) {
 	t.Parallel()
 
-	dbPath := filepath.Join(t.TempDir(), "future_kline.db")
+	dbPath := testmysql.NewDatabase(t)
 	mustPrepareTradingCalendar(t, dbPath, []string{"2026-01-19"})
+	mustPrepareTradingSessions(t, dbPath, "sr")
 
 	file := importer.UploadFile{Name: "28#SR2701.txt", Data: mustGBK(t, sampleTdxContent("SR2701", []string{
 		"2026/01/20,0030,100,101,99,100,1,1,0",
@@ -271,18 +275,40 @@ func mustGBK(t *testing.T, s string) []byte {
 
 func mustPrepareTradingCalendar(t *testing.T, dbPath string, openDays []string) {
 	t.Helper()
-	db, err := sql.Open("sqlite", dbPath)
-	if err != nil {
-		t.Fatalf("open sqlite failed: %v", err)
-	}
+	db := testmysql.Open(t, dbPath)
 	defer db.Close()
-	if _, err := db.Exec(`CREATE TABLE IF NOT EXISTS trading_calendar (trade_date TEXT PRIMARY KEY, is_open INTEGER NOT NULL)`); err != nil {
-		t.Fatalf("create trading_calendar failed: %v", err)
-	}
 	for _, day := range openDays {
-		if _, err := db.Exec(`INSERT OR REPLACE INTO trading_calendar(trade_date, is_open) VALUES(?,1)`, day); err != nil {
+		if _, err := db.Exec(`INSERT INTO trading_calendar(trade_date, is_open, updated_at) VALUES(?,1,NOW()) ON DUPLICATE KEY UPDATE is_open=VALUES(is_open), updated_at=VALUES(updated_at)`, day); err != nil {
 			t.Fatalf("insert trading day failed: %v", err)
 		}
+	}
+}
+
+func mustPrepareTradingSessions(t *testing.T, dbPath string, variety string) {
+	t.Helper()
+	db := testmysql.Open(t, dbPath)
+	defer db.Close()
+	if _, err := db.Exec(`
+INSERT INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
+VALUES(?,?,?,?,?,?,?,?)
+ON DUPLICATE KEY UPDATE
+  session_text=VALUES(session_text),
+  session_json=VALUES(session_json),
+  is_completed=VALUES(is_completed),
+  sample_trade_date=VALUES(sample_trade_date),
+  validated_trade_date=VALUES(validated_trade_date),
+  match_ratio=VALUES(match_ratio),
+  updated_at=VALUES(updated_at)`,
+		variety,
+		"21:00-23:59,09:00-15:00",
+		`[{"start":"21:00","end":"23:59"},{"start":"09:00","end":"15:00"}]`,
+		true,
+		"2026-01-20",
+		"2026-01-20",
+		1.0,
+		"2026-01-20 15:00:00",
+	); err != nil {
+		t.Fatalf("insert trading session failed: %v", err)
 	}
 }
 
@@ -294,7 +320,7 @@ func queryAdjustedTimeByDataTime(t *testing.T, dbPath string, dataTime string) s
 	}
 	defer store.Close()
 
-	var adjusted string
+	var adjusted time.Time
 	err = store.DB().QueryRow(
 		`SELECT "AdjustedTime" FROM "future_kline_instrument_1m_sr" WHERE "DataTime"=? AND "InstrumentID"=? AND "Exchange"=? AND "Period"=?`,
 		dataTime, "sr2701", "CZCE", "1m",
@@ -302,7 +328,7 @@ func queryAdjustedTimeByDataTime(t *testing.T, dbPath string, dataTime string) s
 	if err != nil {
 		t.Fatalf("query adjusted row failed: %v", err)
 	}
-	return adjusted
+	return adjusted.Format("2006-01-02 15:04:05")
 }
 
 type captureHandler struct {
@@ -335,7 +361,7 @@ func (h *captureHandler) waitDone(t *testing.T) importer.Progress {
 	select {
 	case p := <-h.doneCh:
 		return p
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("wait done timeout")
 		return importer.Progress{}
 	}
@@ -346,7 +372,7 @@ func (h *captureHandler) waitConflict(t *testing.T) importer.ConflictRecord {
 	select {
 	case c := <-h.conflictCh:
 		return c
-	case <-time.After(5 * time.Second):
+	case <-time.After(30 * time.Second):
 		t.Fatal("wait conflict timeout")
 		return importer.ConflictRecord{}
 	}

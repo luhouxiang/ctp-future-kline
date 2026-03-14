@@ -5,21 +5,25 @@ import (
 	"testing"
 
 	"ctp-go-demo/tests/internal/trader/testkit"
-	ctp "github.com/kkqy/ctp-go"
+)
+
+const (
+	productClassFutures = byte('1')
+	productClassOptions = byte('2')
 )
 
 func TestSelectSubscribeTargetsAllDomesticFuturesWhenConfigEmpty(t *testing.T) {
 	t.Parallel()
 
 	queried := []testkit.InstrumentInfo{
-		{ID: "rb2405", ExchangeID: "SHFE", ProductID: "rb", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "m2409", ExchangeID: "DCE", ProductID: "m", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "sc2406", ExchangeID: "INE", ProductID: "sc", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "IF2403", ExchangeID: "CFFEX", ProductID: "IF", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "rb2405", ExchangeID: "SHFE", ProductID: "rb", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "au2406C400", ExchangeID: "SHFE", ProductID: "au", ProductClass: ctp.THOST_FTDC_PC_Options},
-		{ID: "CL2405", ExchangeID: "NYMEX", ProductID: "CL", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "", ExchangeID: "SHFE", ProductID: "rb", ProductClass: ctp.THOST_FTDC_PC_Futures},
+		{ID: "rb2405", ExchangeID: "SHFE", ProductID: "rb", ProductClass: productClassFutures},
+		{ID: "m2409", ExchangeID: "DCE", ProductID: "m", ProductClass: productClassFutures},
+		{ID: "sc2406", ExchangeID: "INE", ProductID: "sc", ProductClass: productClassFutures},
+		{ID: "IF2403", ExchangeID: "CFFEX", ProductID: "IF", ProductClass: productClassFutures},
+		{ID: "rb2405", ExchangeID: "SHFE", ProductID: "rb", ProductClass: productClassFutures},
+		{ID: "au2406C400", ExchangeID: "SHFE", ProductID: "au", ProductClass: productClassOptions},
+		{ID: "CL2405", ExchangeID: "NYMEX", ProductID: "CL", ProductClass: productClassFutures},
+		{ID: "", ExchangeID: "SHFE", ProductID: "rb", ProductClass: productClassFutures},
 	}
 
 	got := testkit.SelectSubscribeTargets(queried, nil)
@@ -33,11 +37,11 @@ func TestSelectSubscribeTargetsFilterByConfiguredVariety(t *testing.T) {
 	t.Parallel()
 
 	queried := []testkit.InstrumentInfo{
-		{ID: "rb2405", ExchangeID: "SHFE", ProductID: "rb", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "rb2410", ExchangeID: "SHFE", ProductID: "rb", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "m2409", ExchangeID: "DCE", ProductID: "m", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "IF2403", ExchangeID: "CFFEX", ProductID: "IF", ProductClass: ctp.THOST_FTDC_PC_Futures},
-		{ID: "au2406", ExchangeID: "SHFE", ProductID: "au", ProductClass: ctp.THOST_FTDC_PC_Futures},
+		{ID: "rb2405", ExchangeID: "SHFE", ProductID: "rb", ProductClass: productClassFutures},
+		{ID: "rb2410", ExchangeID: "SHFE", ProductID: "rb", ProductClass: productClassFutures},
+		{ID: "m2409", ExchangeID: "DCE", ProductID: "m", ProductClass: productClassFutures},
+		{ID: "IF2403", ExchangeID: "CFFEX", ProductID: "IF", ProductClass: productClassFutures},
+		{ID: "au2406", ExchangeID: "SHFE", ProductID: "au", ProductClass: productClassFutures},
 	}
 
 	got := testkit.SelectSubscribeTargets(queried, []string{" RB", "m2401", "if", "  "})
