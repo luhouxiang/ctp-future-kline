@@ -52,6 +52,8 @@ type mdSpi struct {
 	// CTP 在网络抖动或重连阶段可能重复推送完全相同的行情，这里做近时间窗口去重。
 	tickDedupWindow      time.Duration
 	lastTickFingerprints map[string]tickFingerprintState
+	replayProcessSeen    map[string]struct{}
+	replayPipelineSeen   map[string]struct{}
 	// driftThreshold 用于记录“本机接收时间”和“tick 自身时间”之间的偏差阈值。
 	// 当前实现只打日志和指标，不阻止写入，避免在时钟漂移时丢失行情。
 	driftThreshold   time.Duration
@@ -66,7 +68,8 @@ type mdSpi struct {
 // instrumentMinuteState 保存某个合约当前分钟仍在累计中的 bar。
 type instrumentMinuteState struct {
 	// bar 表示当前分钟尚未封口的聚合结果。
-	bar minuteBar
+	bar      minuteBar
+	lastTick minuteTickSnapshot
 }
 
 // tickFingerprintState 记录最近一次 tick 指纹和进入时间，用于短窗口去重。
@@ -76,6 +79,17 @@ type tickFingerprintState struct {
 	fingerprint string
 	// at 是该指纹被最近一次接收的本地时间。
 	at time.Time
+}
+
+type minuteTickSnapshot struct {
+	TickTime       time.Time
+	ReceivedAt     time.Time
+	UpdateTime     string
+	UpdateMillisec int
+	Price          float64
+	CurrentVolume  int
+	VolumeDelta    int64
+	OpenInterest   float64
 }
 
 func newMdSpi(store *klineStore, l9Async *l9AsyncCalculator) *mdSpi {
@@ -170,6 +184,8 @@ func newMdSpiWithOptions(store *klineStore, l9Async *l9AsyncCalculator, opts mdS
 		onDisconnected:       opts.onDisconnected,
 		tickDedupWindow:      tickDedupWindow,
 		lastTickFingerprints: make(map[string]tickFingerprintState),
+		replayProcessSeen:    make(map[string]struct{}),
+		replayPipelineSeen:   make(map[string]struct{}),
 		driftThreshold:       driftThreshold,
 		driftResumeTicks:     driftResumeTicks,
 		onTick:               opts.onTick,
@@ -334,7 +350,7 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 		SettlementPrice:  pDepthMarketData.GetSettlementPrice(),
 		BidPrice1:        pDepthMarketData.GetBidPrice1(),
 		AskPrice1:        pDepthMarketData.GetAskPrice1(),
-	}, true)
+	}, true, false)
 }
 
 // ProcessReplayTick 是历史回放入口。
@@ -350,6 +366,7 @@ func (p *mdSpi) ProcessReplayTick(ev tickEvent) error {
 	}
 	// ProcessReplayTick 供历史回放使用。
 	// 回放数据通常已经提前算好了 AdjustedTickTime，因此不需要再依赖当前时间兜底。
+	p.logFirstReplayProcess(ev)
 	return p.processTick(tickInputData{
 		InstrumentID:     strings.TrimSpace(ev.InstrumentID),
 		ExchangeID:       strings.TrimSpace(ev.ExchangeID),
@@ -366,7 +383,7 @@ func (p *mdSpi) ProcessReplayTick(ev tickEvent) error {
 		SettlementPrice:  ev.SettlementPrice,
 		BidPrice1:        ev.BidPrice1,
 		AskPrice1:        ev.AskPrice1,
-	}, false)
+	}, false, true)
 
 }
 
@@ -379,7 +396,7 @@ func (p *mdSpi) ProcessReplayTick(ev tickEvent) error {
 // 4. 增量成交量推导
 // 5. 1 分钟 bar 聚合与封口
 // 6. 1m 落库、mm 重建、L9 更新
-func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool) error {
+func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool) error {
 	// processTick 是整个行情链路的核心：
 	// 1. 校验与修正时间
 	// 2. 过滤非法价格
@@ -389,6 +406,9 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool) error {
 	instrumentID := strings.TrimSpace(in.InstrumentID)
 	if instrumentID == "" {
 		return nil
+	}
+	if replay {
+		p.logFirstReplayPipeline(in)
 	}
 
 	exchangeID := strings.TrimSpace(in.ExchangeID)
@@ -518,6 +538,16 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool) error {
 		}
 	}
 	p.lastVols[instrumentID] = currentVol
+	lastTick := minuteTickSnapshot{
+		TickTime:       adjustedTickTime,
+		ReceivedAt:     now,
+		UpdateTime:     strings.TrimSpace(in.UpdateTime),
+		UpdateMillisec: in.UpdateMillisec,
+		Price:          price,
+		CurrentVolume:  currentVol,
+		VolumeDelta:    volumeDelta,
+		OpenInterest:   openInterest,
+	}
 
 	state := p.states[instrumentID]
 	if state == nil {
@@ -537,33 +567,18 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool) error {
 			OpenInterest:    openInterest,
 			SettlementPrice: settlement,
 		}
-		p.states[instrumentID] = &instrumentMinuteState{bar: startedBar}
+		p.states[instrumentID] = &instrumentMinuteState{bar: startedBar, lastTick: lastTick}
 		p.logMinuteFirstTick(startedBar, adjustedTickTime, price, currentVol, volumeDelta)
 	} else {
 		if !state.bar.MinuteTime.Equal(minuteTime) {
 			// 分钟切换：
 			// 先将上一分钟 bar 封口落库，再以当前 tick 初始化新一分钟 bar。
 			endedBar := state.bar
+			p.logMinuteLastTickConfirmed(endedBar, state.lastTick, "minute_rollover")
 			if err := p.flushEndedBar(endedBar, adjustedTickTime, "minute_rollover"); err != nil {
 				logger.Error("flush minute bar failed", "instrument_id", instrumentID, "error", err)
 			} else {
-				logger.Info(
-					"minute last tick persisted",
-					"marker", "last_tick",
-					"reason", "minute_rollover",
-					"instrument_id", endedBar.InstrumentID,
-					"exchange_id", endedBar.Exchange,
-					"minute_time", endedBar.MinuteTime.Format("2006-01-02 15:04:00"),
-					"adjusted_time", endedBar.AdjustedTime.Format("2006-01-02 15:04:00"),
-					"open", endedBar.Open,
-					"high", endedBar.High,
-					"low", endedBar.Low,
-					"close", endedBar.Close,
-					"volume", endedBar.Volume,
-					"open_interest", endedBar.OpenInterest,
-					"settlement_price", endedBar.SettlementPrice,
-					"next_tick_time", adjustedTickTime.Format("2006-01-02 15:04:05"),
-				)
+				p.logMinuteBarPersisted(endedBar, state.lastTick, adjustedTickTime, "minute_rollover")
 			}
 			if p.onBar != nil {
 				p.onBar(endedBar)
@@ -584,6 +599,7 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool) error {
 				SettlementPrice: settlement,
 			}
 			state.bar = startedBar
+			state.lastTick = lastTick
 			p.logMinuteFirstTick(startedBar, adjustedTickTime, price, currentVol, volumeDelta)
 		} else {
 			// 同一分钟内持续更新 OHLC、增量成交量和最新持仓。
@@ -601,17 +617,18 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool) error {
 			state.bar.OpenInterest = openInterest
 			state.bar.SettlementPrice = settlement
 			state.bar.AdjustedTime = adjustedTime
+			state.lastTick = lastTick
 		}
 	}
 
-	logger.Debug(
-		"market data push",
-		"instrument_id", instrumentID,
-		"exchange_id", exchangeID,
-		"last_price", price,
-		"bid1", in.BidPrice1,
-		"ask1", in.AskPrice1,
-	)
+	// logger.Debug(
+	// 	"market data push",
+	// 	"instrument_id", instrumentID,
+	// 	"exchange_id", exchangeID,
+	// 	"last_price", price,
+	// 	"bid1", in.BidPrice1,
+	// 	"ask1", in.AskPrice1,
+	// )
 	return nil
 }
 
@@ -666,6 +683,55 @@ func buildTickDedupFingerprint(in tickInputData, price float64, currentVol int, 
 	)
 }
 
+func (p *mdSpi) logFirstReplayProcess(ev tickEvent) {
+	instrumentID := strings.TrimSpace(ev.InstrumentID)
+	if instrumentID == "" {
+		return
+	}
+	p.mu.Lock()
+	if _, ok := p.replayProcessSeen[instrumentID]; ok {
+		p.mu.Unlock()
+		return
+	}
+	p.replayProcessSeen[instrumentID] = struct{}{}
+	p.mu.Unlock()
+	logger.Info(
+		"replay tick first entered mdSpi.ProcessReplayTick",
+		"stage", "mdSpi.ProcessReplayTick",
+		"instrument_id", instrumentID,
+		"update_time", ev.UpdateTime,
+		"update_millisec", ev.UpdateMillisec,
+	)
+}
+
+func (p *mdSpi) logFirstReplayPipeline(in tickInputData) {
+	instrumentID := strings.TrimSpace(in.InstrumentID)
+	if instrumentID == "" {
+		return
+	}
+	p.mu.Lock()
+	if _, ok := p.replayPipelineSeen[instrumentID]; ok {
+		p.mu.Unlock()
+		return
+	}
+	p.replayPipelineSeen[instrumentID] = struct{}{}
+	p.mu.Unlock()
+	logger.Info(
+		"replay tick first entered processTick",
+		"stage", "mdSpi.processTick",
+		"instrument_id", instrumentID,
+		"update_time", strings.TrimSpace(in.UpdateTime),
+		"update_millisec", in.UpdateMillisec,
+	)
+}
+
+func (p *mdSpi) ResetReplayStageLogState() {
+	p.mu.Lock()
+	p.replayProcessSeen = make(map[string]struct{})
+	p.replayPipelineSeen = make(map[string]struct{})
+	p.mu.Unlock()
+}
+
 func shouldCheckTickDrift(now time.Time, adjustedTickTime time.Time) bool {
 	// 仅在日期接近时比较“接收时间”和“业务时间”，
 	// 否则跨日夜盘会天然产生大偏差，日志价值不高。
@@ -691,25 +757,11 @@ func (p *mdSpi) Flush() error {
 			continue
 		}
 		endedBar := state.bar
+		p.logMinuteLastTickConfirmed(endedBar, state.lastTick, "flush")
 		if err := p.flushEndedBar(endedBar, time.Time{}, "flush"); err != nil {
 			return fmt.Errorf("flush minute bar for %s failed: %w", instrumentID, err)
 		}
-		logger.Info(
-			"minute last tick persisted",
-			"marker", "last_tick",
-			"reason", "flush",
-			"instrument_id", endedBar.InstrumentID,
-			"exchange_id", endedBar.Exchange,
-			"minute_time", endedBar.MinuteTime.Format("2006-01-02 15:04:00"),
-			"adjusted_time", endedBar.AdjustedTime.Format("2006-01-02 15:04:00"),
-			"open", endedBar.Open,
-			"high", endedBar.High,
-			"low", endedBar.Low,
-			"close", endedBar.Close,
-			"volume", endedBar.Volume,
-			"open_interest", endedBar.OpenInterest,
-			"settlement_price", endedBar.SettlementPrice,
-		)
+		p.logMinuteBarPersisted(endedBar, state.lastTick, time.Time{}, "flush")
 		if p.onBar != nil {
 			p.onBar(endedBar)
 		}
@@ -756,6 +808,52 @@ func (p *mdSpi) logMinuteFirstTick(bar minuteBar, tickTime time.Time, price floa
 		"volume_delta", volumeDelta,
 		"open_interest", bar.OpenInterest,
 		"settlement_price", bar.SettlementPrice,
+	)
+}
+
+func (p *mdSpi) logMinuteLastTickConfirmed(bar minuteBar, tick minuteTickSnapshot, reason string) {
+	logger.Info(
+		"minute last tick confirmed",
+		"marker", "last_tick_confirmed",
+		"reason", reason,
+		"instrument_id", bar.InstrumentID,
+		"exchange_id", bar.Exchange,
+		"minute_time", bar.MinuteTime.Format("2006-01-02 15:04:00"),
+		"adjusted_time", bar.AdjustedTime.Format("2006-01-02 15:04:00"),
+		"tick_time", tick.TickTime.Format("2006-01-02 15:04:05.000"),
+		"received_at", tick.ReceivedAt.Format("2006-01-02 15:04:05.000"),
+		"update_time", tick.UpdateTime,
+		"update_millisec", tick.UpdateMillisec,
+		"price", tick.Price,
+		"current_volume", tick.CurrentVolume,
+		"volume_delta", tick.VolumeDelta,
+		"open_interest", tick.OpenInterest,
+	)
+}
+
+func (p *mdSpi) logMinuteBarPersisted(bar minuteBar, tick minuteTickSnapshot, nextTickTime time.Time, reason string) {
+	logger.Info(
+		"minute bar persisted",
+		"marker", "last_tick_persisted",
+		"reason", reason,
+		"instrument_id", bar.InstrumentID,
+		"exchange_id", bar.Exchange,
+		"minute_time", bar.MinuteTime.Format("2006-01-02 15:04:00"),
+		"adjusted_time", bar.AdjustedTime.Format("2006-01-02 15:04:00"),
+		"tick_time", tick.TickTime.Format("2006-01-02 15:04:05.000"),
+		"update_time", tick.UpdateTime,
+		"update_millisec", tick.UpdateMillisec,
+		"price", tick.Price,
+		"current_volume", tick.CurrentVolume,
+		"volume_delta", tick.VolumeDelta,
+		"open_interest", tick.OpenInterest,
+		"open", bar.Open,
+		"high", bar.High,
+		"low", bar.Low,
+		"close", bar.Close,
+		"volume", bar.Volume,
+		"settlement_price", bar.SettlementPrice,
+		"next_tick_time", nextTickTime.Format("2006-01-02 15:04:05.000"),
 	)
 }
 

@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"ctp-go-demo/internal/bus"
+	"ctp-go-demo/internal/logger"
 )
 
 const (
@@ -257,6 +258,9 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 	}
 
 	out := make([]tickCSVEvent, 0, 256)
+	firstReadLogged := false
+	firstParsedLogged := false
+	firstBusEventLogged := false
 	lineNo := int64(1)
 	for {
 		record, err := reader.Read()
@@ -278,6 +282,28 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 		if err != nil {
 			return nil, fmt.Errorf("parse tick csv record failed: %s:%d: %w", name, lineNo, err)
 		}
+		if !firstReadLogged {
+			logger.Info(
+				"replay tick csv first record loaded",
+				"stage", "tick_csv",
+				"file", name,
+				"instrument_id", payload.InstrumentID,
+				"line_no", lineNo,
+			)
+			firstReadLogged = true
+		}
+		if !firstParsedLogged {
+			logger.Info(
+				"replay tick csv first record parsed",
+				"stage", "parseTickCSVRecord",
+				"file", name,
+				"instrument_id", payload.InstrumentID,
+				"line_no", lineNo,
+				"update_time", payload.UpdateTime,
+				"update_millisec", payload.UpdateMillisec,
+			)
+			firstParsedLogged = true
+		}
 		if req.StartTime != nil && occurredAt.Before(*req.StartTime) {
 			continue
 		}
@@ -288,6 +314,17 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 		raw, err := json.Marshal(payload)
 		if err != nil {
 			return nil, fmt.Errorf("marshal tick payload failed: %s:%d: %w", name, lineNo, err)
+		}
+		if !firstBusEventLogged {
+			logger.Info(
+				"replay bus event created for instrument",
+				"stage", "BusEvent",
+				"file", name,
+				"instrument_id", payload.InstrumentID,
+				"line_no", lineNo,
+				"event_id", fmt.Sprintf("tickcsv:%s:%d", name, lineNo),
+			)
+			firstBusEventLogged = true
 		}
 		out = append(out, tickCSVEvent{
 			Event: bus.BusEvent{

@@ -2,6 +2,7 @@ package replay
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -83,12 +84,13 @@ type Service struct {
 	dedup                   *bus.ConsumerStore
 	replayAllowOrderCommand bool
 
-	mu        sync.Mutex
-	activeID  string
-	cancel    context.CancelFunc
-	snapshot  TaskSnapshot
-	consumers map[string]ConsumerFunc
-	hooks     map[string]TaskLifecycle
+	mu                sync.Mutex
+	activeID          string
+	cancel            context.CancelFunc
+	snapshot          TaskSnapshot
+	consumers         map[string]ConsumerFunc
+	hooks             map[string]TaskLifecycle
+	seenFirstDispatch map[string]struct{}
 }
 
 // NewService 初始化 replay service。
@@ -99,6 +101,7 @@ func NewService(reader *bus.FileLog, dedup *bus.ConsumerStore, replayAllowOrderC
 		replayAllowOrderCommand: replayAllowOrderCommand,
 		consumers:               make(map[string]ConsumerFunc),
 		hooks:                   make(map[string]TaskLifecycle),
+		seenFirstDispatch:       make(map[string]struct{}),
 		snapshot:                TaskSnapshot{Status: StatusIdle},
 	}
 	return s
@@ -146,10 +149,12 @@ func (s *Service) Start(req StartRequest) (TaskSnapshot, error) {
 	if s.activeID != "" && (s.snapshot.Status == StatusRunning || s.snapshot.Status == StatusPaused) {
 		return TaskSnapshot{}, fmt.Errorf("replay task already running")
 	}
+	s.seenFirstDispatch = make(map[string]struct{})
 	if req.FullReplay && s.dedup != nil {
 		if err := s.dedup.ClearAll(); err != nil {
 			return TaskSnapshot{}, err
 		}
+		// 系统在执行“全量重放”（Full Replay）操作之前，主动清空了用于“去重”（Deduplication）的记录
 		logger.Info("replay dedup records cleared before full replay")
 	}
 	taskID := bus.NewEventID()
@@ -385,13 +390,13 @@ func (s *Service) dispatch(ctx context.Context, ev bus.BusEvent) (int64, int64, 
 	// 当配置禁止 replay 发送订单命令时，直接把该事件视为一次“跳过”，
 	// 既不投递给任何 consumer，也不报错。
 	if ev.Topic == bus.TopicOrderCommand && !s.replayAllowOrderCommand {
-		logger.Debug(
-			"replay dispatch skipped by order command guard",
-			"task_id", ev.ReplayTaskID,
-			"event_id", ev.EventID,
-			"topic", ev.Topic,
-			"source", ev.Source,
-		)
+		// logger.Debug(
+		// 	"replay dispatch skipped by order command guard",
+		// 	"task_id", ev.ReplayTaskID,
+		// 	"event_id", ev.EventID,
+		// 	"topic", ev.Topic,
+		// 	"source", ev.Source,
+		// )
 		return 0, 1, nil
 	}
 
@@ -418,19 +423,23 @@ func (s *Service) dispatch(ctx context.Context, ev bus.BusEvent) (int64, int64, 
 
 	var dispatched int64
 	var skipped int64
+	instrumentID := replayDispatchInstrumentID(ev)
+	if instrumentID != "" {
+		s.logFirstReplayDispatch(ev.ReplayTaskID, instrumentID, ev)
+	}
 	for consumerID, fn := range consumers {
 		// 逐个 consumer 投递，并在 debug 日志里保留完整定位信息，
 		// 方便排查“事件有没有发出去、发给了谁、在哪一层被跳过或失败”。
-		logger.Debug(
-			"replay dispatch begin",
-			"task_id", ev.ReplayTaskID,
-			"event_id", ev.EventID,
-			"topic", ev.Topic,
-			"source", ev.Source,
-			"consumer_id", consumerID,
-			"occurred_at", ev.OccurredAt.Format(time.RFC3339Nano),
-			"produced_at", ev.ProducedAt.Format(time.RFC3339Nano),
-		)
+		// logger.Debug(
+		// 	"replay dispatch begin",
+		// 	"task_id", ev.ReplayTaskID,
+		// 	"event_id", ev.EventID,
+		// 	"topic", ev.Topic,
+		// 	"source", ev.Source,
+		// 	"consumer_id", consumerID,
+		// 	"occurred_at", ev.OccurredAt.Format(time.RFC3339Nano),
+		// 	"produced_at", ev.ProducedAt.Format(time.RFC3339Nano),
+		// )
 		if s.dedup != nil {
 			// 去重粒度是“consumerID + eventID”。
 			// 也就是说：
@@ -452,13 +461,13 @@ func (s *Service) dispatch(ctx context.Context, ev bus.BusEvent) (int64, int64, 
 			}
 			if !first {
 				// 已经投递过的 consumer 不再重复执行，记入 skipped。
-				logger.Debug(
-					"replay dispatch skipped by consumer dedup",
-					"task_id", ev.ReplayTaskID,
-					"event_id", ev.EventID,
-					"topic", ev.Topic,
-					"consumer_id", consumerID,
-				)
+				// logger.Debug(
+				// 	"replay dispatch skipped by consumer dedup",
+				// 	"task_id", ev.ReplayTaskID,
+				// 	"event_id", ev.EventID,
+				// 	"topic", ev.Topic,
+				// 	"consumer_id", consumerID,
+				// )
 				skipped++
 				continue
 			}
@@ -480,14 +489,50 @@ func (s *Service) dispatch(ctx context.Context, ev bus.BusEvent) (int64, int64, 
 		}
 
 		// 只有 consumer 实际执行成功，才计入 dispatched。
-		logger.Debug(
-			"replay dispatch delivered",
-			"task_id", ev.ReplayTaskID,
-			"event_id", ev.EventID,
-			"topic", ev.Topic,
-			"consumer_id", consumerID,
-		)
+		// logger.Debug(
+		// 	"replay dispatch delivered",
+		// 	"task_id", ev.ReplayTaskID,
+		// 	"event_id", ev.EventID,
+		// 	"topic", ev.Topic,
+		// 	"consumer_id", consumerID,
+		// )
 		dispatched++
 	}
 	return dispatched, skipped, nil
+}
+
+func (s *Service) logFirstReplayDispatch(taskID string, instrumentID string, ev bus.BusEvent) {
+	if taskID == "" || instrumentID == "" {
+		return
+	}
+	key := taskID + "|" + strings.ToLower(strings.TrimSpace(instrumentID))
+	s.mu.Lock()
+	if _, ok := s.seenFirstDispatch[key]; ok {
+		s.mu.Unlock()
+		return
+	}
+	s.seenFirstDispatch[key] = struct{}{}
+	s.mu.Unlock()
+	logger.Info(
+		"replay dispatch first event for instrument",
+		"stage", "replay.dispatch",
+		"task_id", taskID,
+		"instrument_id", instrumentID,
+		"event_id", ev.EventID,
+		"topic", ev.Topic,
+		"source", ev.Source,
+	)
+}
+
+func replayDispatchInstrumentID(ev bus.BusEvent) string {
+	if ev.Topic != bus.TopicTick || len(ev.Payload) == 0 {
+		return ""
+	}
+	var payload struct {
+		InstrumentID string `json:"InstrumentID"`
+	}
+	if err := json.Unmarshal(ev.Payload, &payload); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(payload.InstrumentID)
 }
