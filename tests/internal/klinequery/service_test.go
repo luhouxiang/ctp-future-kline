@@ -180,16 +180,26 @@ VALUES('sr','21:00-23:00,09:00-10:15,10:30-11:30,13:30-15:00',
 	}
 
 	got := make([]string, 0, len(resp.Bars))
+	gotData := make([]string, 0, len(resp.Bars))
 	for _, b := range resp.Bars {
 		got = append(got, time.Unix(b.AdjustedTime, 0).Format("2006-01-02 15:04"))
+		gotData = append(gotData, time.Unix(b.DataTime, 0).Format("2006-01-02 15:04"))
 	}
 	want := []string{
-		"2026-01-20 09:59",
-		"2026-01-20 11:13",
-		"2026-01-20 14:12",
+		"2026-01-19 22:00",
+		"2026-01-19 23:00",
+		"2026-01-20 10:00",
+		"2026-01-20 11:15",
+		"2026-01-20 14:15",
 		"2026-01-20 15:00",
+	}
+	wantData := []string{
 		"2026-01-20 22:00",
 		"2026-01-20 23:00",
+		"2026-01-20 10:00",
+		"2026-01-20 11:15",
+		"2026-01-20 14:15",
+		"2026-01-20 15:00",
 	}
 	if len(got) != len(want) {
 		t.Fatalf("len(bars)=%d, want %d, got=%v", len(got), len(want), got)
@@ -197,6 +207,9 @@ VALUES('sr','21:00-23:00,09:00-10:15,10:30-11:30,13:30-15:00',
 	for i := range want {
 		if got[i] != want[i] {
 			t.Fatalf("bars[%d]=%s, want %s; all=%v", i, got[i], want[i], got)
+		}
+		if gotData[i] != wantData[i] {
+			t.Fatalf("bars[%d].data_time=%s, want %s; all=%v", i, gotData[i], wantData[i], gotData)
 		}
 	}
 }

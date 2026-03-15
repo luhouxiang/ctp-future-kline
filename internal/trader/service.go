@@ -12,6 +12,7 @@ import (
 	"ctp-go-demo/internal/bus"
 	"ctp-go-demo/internal/config"
 	"ctp-go-demo/internal/logger"
+	"ctp-go-demo/internal/strategy"
 
 	ctp "github.com/kkqy/ctp-go"
 )
@@ -247,6 +248,21 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 					logger.Error("append tick csv failed", "instrument_id", t.InstrumentID, "error", err)
 				}
 			}
+			strategy.PublishRealtimeTick(strategy.TickEvent{
+				InstrumentID:    t.InstrumentID,
+				ExchangeID:      t.ExchangeID,
+				ActionDay:       t.ActionDay,
+				TradingDay:      t.TradingDay,
+				UpdateTime:      t.UpdateTime,
+				UpdateMillisec:  t.UpdateMillisec,
+				ReceivedAt:      t.ReceivedAt,
+				LastPrice:       t.LastPrice,
+				Volume:          t.Volume,
+				OpenInterest:    t.OpenInterest,
+				SettlementPrice: t.SettlementPrice,
+				BidPrice1:       t.BidPrice1,
+				AskPrice1:       t.AskPrice1,
+			})
 			if busLog == nil {
 				return
 			}
@@ -265,6 +281,21 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		// onBar 在某一分钟封口后触发。
 		// 这里不做写库，写库已经在 mdSpi 内完成；这里只负责把封口后的 bar 旁路发到 bus。
 		onBar: func(bar minuteBar) {
+			strategy.PublishRealtimeBar(strategy.BarEvent{
+				Variety:         bar.Variety,
+				InstrumentID:    bar.InstrumentID,
+				Exchange:        bar.Exchange,
+				DataTime:        bar.MinuteTime,
+				AdjustedTime:    bar.AdjustedTime,
+				Period:          bar.Period,
+				Open:            bar.Open,
+				High:            bar.High,
+				Low:             bar.Low,
+				Close:           bar.Close,
+				Volume:          bar.Volume,
+				OpenInterest:    bar.OpenInterest,
+				SettlementPrice: bar.SettlementPrice,
+			})
 			if busLog == nil {
 				return
 			}

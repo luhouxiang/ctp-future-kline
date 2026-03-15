@@ -12,6 +12,7 @@ import (
 	"ctp-go-demo/internal/config"
 	"ctp-go-demo/internal/logger"
 	"ctp-go-demo/internal/replay"
+	"ctp-go-demo/internal/strategy"
 )
 
 // ReplaySink 是 replay 事件到 trader 行情处理器之间的桥接层。
@@ -40,6 +41,40 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		tickDedupWindow:  time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:   time.Duration(cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks: cfg.DriftResumeTicks,
+		onTick: func(t tickEvent) {
+			strategy.PublishReplayTick(strategy.TickEvent{
+				InstrumentID:    t.InstrumentID,
+				ExchangeID:      t.ExchangeID,
+				ActionDay:       t.ActionDay,
+				TradingDay:      t.TradingDay,
+				UpdateTime:      t.UpdateTime,
+				UpdateMillisec:  t.UpdateMillisec,
+				ReceivedAt:      t.ReceivedAt,
+				LastPrice:       t.LastPrice,
+				Volume:          t.Volume,
+				OpenInterest:    t.OpenInterest,
+				SettlementPrice: t.SettlementPrice,
+				BidPrice1:       t.BidPrice1,
+				AskPrice1:       t.AskPrice1,
+			})
+		},
+		onBar: func(bar minuteBar) {
+			strategy.PublishReplayBar(strategy.BarEvent{
+				Variety:         bar.Variety,
+				InstrumentID:    bar.InstrumentID,
+				Exchange:        bar.Exchange,
+				DataTime:        bar.MinuteTime,
+				AdjustedTime:    bar.AdjustedTime,
+				Period:          bar.Period,
+				Open:            bar.Open,
+				High:            bar.High,
+				Low:             bar.Low,
+				Close:           bar.Close,
+				Volume:          bar.Volume,
+				OpenInterest:    bar.OpenInterest,
+				SettlementPrice: bar.SettlementPrice,
+			})
+		},
 	})
 	return &ReplaySink{
 		store:            store,

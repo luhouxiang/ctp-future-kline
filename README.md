@@ -10,11 +10,13 @@
 - 交易日历导入、刷新与启动自动维护
 - K 线检索与图表展示（前端）
 - 运行状态实时推送（HTTP + WebSocket）
+- Python gRPC 策略服务、策略实例管理、模拟执行与回测入口
 
 ## 目录结构
 
 - `main.go`: 程序入口
 - `internal/trader`: CTP 连接、行情聚合、L9 计算、状态管理
+- `internal/strategy`: Python 策略服务管理、gRPC 调用、策略实例、模拟执行与审计
 - `internal/web`: HTTP API、WebSocket、静态资源服务
 - `internal/importer`: 通达信历史数据导入
 - `internal/klinequery`: K 线查询与指标计算
@@ -26,6 +28,7 @@
 
 - Go `1.25.7+`
 - Node.js `18+`（前端构建）
+- Python `3.10+`（启用策略服务时）
 - Windows 运行 CTP 需确保以下 DLL 可访问：
   - `wrap.dll`
   - `thosttraderapi_se.dll`
@@ -61,7 +64,7 @@ go run . -config ../ctp-future-resources/config/config.json -no-open
 
 ## 配置说明
 
-配置结构包含 4 部分：`ctp`、`db`、`web`、`calendar`。
+配置结构包含 5 部分：`ctp`、`db`、`web`、`calendar`、`strategy`。
 
 ### 示例 `config.json`
 
@@ -121,6 +124,16 @@ go run . -config ../ctp-future-resources/config/config.json -no-open
     "browser_fallback": true,
     "browser_path": "",
     "browser_headless": true
+  },
+  "strategy": {
+    "enabled": false,
+    "grpc_addr": "127.0.0.1:50051",
+    "auto_start": true,
+    "python_entry": "python/strategy_service.py",
+    "python_workdir": ".",
+    "healthcheck_interval_ms": 2000,
+    "request_timeout_ms": 3000,
+    "backtest_output_dir": "flow/strategy_backtests"
   }
 }
 ```
@@ -235,16 +248,39 @@ go run ./cmd/rename_mm_tables \
   - 上传通达信日线文件导入交易日
 - `POST /api/calendar/refresh`
   - 按配置刷新交易日历
+- `GET /api/strategy/status`
+- `GET /api/strategy/definitions`
+- `GET /api/strategy/instances`
+- `POST /api/strategy/instances`
+- `POST /api/strategy/instances/{id}/start`
+- `POST /api/strategy/instances/{id}/stop`
+- `GET /api/strategy/signals`
+- `POST /api/strategy/backtests`
+- `GET /api/strategy/backtests`
+- `GET /api/orders/status`
+- `GET /api/orders/audit`
 
 ### WebSocket
 
 - `GET /ws`
 - 事件类型：
   - `status_update`
+  - `strategy_status_update`
+  - `strategy_signal`
+  - `strategy_backtest_done`
+  - `order_audit_update`
   - `import_progress`
   - `import_conflict`
   - `import_done`
   - `import_error`
+
+## 策略服务
+
+- Go 主进程会按 `strategy.python_entry` 托管拉起 Python gRPC 服务
+- Python 只输出目标仓位，不直接下单
+- Go 侧当前提供的是模拟执行骨架与审计日志，回放模式默认阻断真实执行
+- 示例 Python 服务见 [python/strategy_service.py](python/strategy_service.py)
+- 运行示例服务前需安装 `grpcio`
 
 ## 运行状态字段（核心）
 

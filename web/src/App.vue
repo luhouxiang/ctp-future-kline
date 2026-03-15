@@ -91,6 +91,50 @@ const replayLoading = reactive({
   fetchingStatus: false,
 })
 
+const strategyStatus = reactive({
+  enabled: false,
+  process_running: false,
+  connected: false,
+  grpc_addr: '',
+  python_entry: '',
+  last_error: '',
+  last_health_at: '',
+  definitions: 0,
+  instances: 0,
+  running_count: 0,
+  signal_count: 0,
+  audit_count: 0,
+  backtest_run_count: 0,
+})
+
+const strategyState = reactive({
+  definitions: [],
+  instances: [],
+  signals: [],
+  backtests: [],
+  orderAudits: [],
+  ordersStatus: { mode: 'simulated', positions: {}, updated_at: '' },
+})
+
+const strategyForm = reactive({
+  instance_id: '',
+  strategy_id: '',
+  display_name: '',
+  mode: 'realtime',
+  account_id: 'paper',
+  symbols_text: '',
+  timeframe: '1m',
+  params_text: '{}',
+})
+
+const backtestForm = reactive({
+  instance_id: '',
+  symbol: '',
+  timeframe: '1m',
+  start_time: '',
+  end_time: '',
+})
+
 const searchForm = reactive({
   keyword: '',
   start: '',
@@ -136,6 +180,7 @@ const totalPages = computed(() => {
 })
 const replayStatus = computed(() => String(replayState.status || '').trim())
 const replayEnabled = computed(() => replaySupported.value)
+const strategyEnabled = computed(() => !!strategyStatus.enabled)
 const canStartReplay = computed(() => replayEnabled.value && ['idle', 'done', 'error', 'stopped', ''].includes(replayStatus.value) && !replayLoading.starting)
 const canPauseReplay = computed(() => replayEnabled.value && replayStatus.value === 'running' && !replayLoading.pausing)
 const canResumeReplay = computed(() => replayEnabled.value && replayStatus.value === 'paused' && !replayLoading.resuming)
@@ -227,6 +272,11 @@ function applyReplayState(snapshot) {
   Object.assign(replayState, snapshot)
 }
 
+function applyStrategyStatus(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return
+  Object.assign(strategyStatus, snapshot)
+}
+
 async function fetchStatus() {
   const resp = await fetch('/api/status')
   if (!resp.ok) {
@@ -239,6 +289,9 @@ async function fetchStatus() {
     applyReplayState(data.replay)
   } else {
     replaySupported.value = false
+  }
+  if (data.strategy) {
+    applyStrategyStatus(data.strategy)
   }
 }
 
@@ -256,6 +309,106 @@ async function fetchReplayStatus() {
   } finally {
     replayLoading.fetchingStatus = false
   }
+}
+
+async function fetchStrategyBundle() {
+  const endpoints = [
+    ['/api/strategy/status', (data) => applyStrategyStatus(data.status || {})],
+    ['/api/strategy/definitions', (data) => { strategyState.definitions = data.items || [] }],
+    ['/api/strategy/instances', (data) => { strategyState.instances = data.items || [] }],
+    ['/api/strategy/signals?limit=20', (data) => { strategyState.signals = data.items || [] }],
+    ['/api/strategy/backtests?limit=20', (data) => { strategyState.backtests = data.items || [] }],
+    ['/api/orders/status', (data) => { strategyState.ordersStatus = data || { mode: 'simulated', positions: {} } }],
+    ['/api/orders/audit?limit=20', (data) => { strategyState.orderAudits = data.items || [] }],
+  ]
+  for (const [url, apply] of endpoints) {
+    try {
+      const resp = await fetch(url)
+      if (!resp.ok) continue
+      apply(await resp.json())
+    } catch {
+      // ignore strategy endpoints when service is disabled
+    }
+  }
+}
+
+async function saveStrategyInstance() {
+  let params = {}
+  try {
+    params = JSON.parse(strategyForm.params_text || '{}')
+  } catch {
+    addLog('策略实例保存失败: 参数 JSON 无效')
+    return
+  }
+  const payload = {
+    instance_id: strategyForm.instance_id || undefined,
+    strategy_id: strategyForm.strategy_id,
+    display_name: strategyForm.display_name,
+    mode: strategyForm.mode,
+    account_id: strategyForm.account_id,
+    symbols: parseCSVInput(strategyForm.symbols_text),
+    timeframe: strategyForm.timeframe,
+    params,
+  }
+  const resp = await fetch('/api/strategy/instances', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!resp.ok) {
+    addLog(`策略实例保存失败: ${await resp.text()}`)
+    return
+  }
+  addLog('策略实例已保存')
+  strategyForm.instance_id = ''
+  await fetchStrategyBundle()
+}
+
+async function startStrategyInstance(instanceId) {
+  const resp = await fetch(`/api/strategy/instances/${instanceId}/start`, { method: 'POST' })
+  if (!resp.ok) {
+    addLog(`策略实例启动失败: ${await resp.text()}`)
+    return
+  }
+  addLog(`策略实例已启动: ${instanceId}`)
+  await fetchStrategyBundle()
+}
+
+async function stopStrategyInstance(instanceId) {
+  const resp = await fetch(`/api/strategy/instances/${instanceId}/stop`, { method: 'POST' })
+  if (!resp.ok) {
+    addLog(`策略实例停止失败: ${await resp.text()}`)
+    return
+  }
+  addLog(`策略实例已停止: ${instanceId}`)
+  await fetchStrategyBundle()
+}
+
+async function runBacktest() {
+  const selected = strategyState.instances.find((item) => item.instance_id === backtestForm.instance_id)
+  if (!selected) {
+    addLog('回测启动失败: 请选择策略实例')
+    return
+  }
+  const payload = {
+    instance: selected,
+    symbol: backtestForm.symbol,
+    timeframe: backtestForm.timeframe,
+    start_time: backtestForm.start_time ? new Date(backtestForm.start_time).toISOString() : '',
+    end_time: backtestForm.end_time ? new Date(backtestForm.end_time).toISOString() : '',
+    parameters: selected.params || {},
+  }
+  const resp = await fetch('/api/strategy/backtests', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!resp.ok) {
+    addLog(`回测启动失败: ${await resp.text()}`)
+    return
+  }
+  addLog('回测任务已提交')
+  await fetchStrategyBundle()
 }
 
 async function startReplay() {
@@ -589,6 +742,26 @@ function connectWS() {
       }
       return
     }
+    if (msg.type === 'strategy_status_update' && msg.data) {
+      applyStrategyStatus(msg.data)
+      fetchStrategyBundle()
+      return
+    }
+    if (msg.type === 'strategy_signal' && msg.data) {
+      strategyState.signals = [msg.data, ...(strategyState.signals || [])].slice(0, 20)
+      return
+    }
+    if (msg.type === 'strategy_backtest_done' && msg.data) {
+      strategyState.backtests = [msg.data, ...(strategyState.backtests || [])].slice(0, 20)
+      return
+    }
+    if (msg.type === 'order_audit_update' && msg.data) {
+      strategyState.orderAudits = [msg.data, ...(strategyState.orderAudits || [])].slice(0, 20)
+      fetch('/api/orders/status').then((resp) => resp.ok ? resp.json() : null).then((data) => {
+        if (data) strategyState.ordersStatus = data
+      }).catch(() => {})
+      return
+    }
     if (msg.type === 'import_progress' && msg.data?.progress) {
       if (msg.data.session_id === importState.session_id || !importState.session_id) {
         Object.assign(importState, msg.data.progress)
@@ -628,6 +801,7 @@ onMounted(async () => {
     addLog(`状态获取失败: ${error.message}`)
   }
   await fetchReplayStatus()
+  await fetchStrategyBundle()
   await runSearch(true)
   connectWS()
 })
@@ -754,6 +928,141 @@ onUnmounted(() => {
         <div class="status-item">创建时间: {{ replayState.created_at || '--' }}</div>
         <div class="status-item">开始执行: {{ replayState.started_at || '--' }}</div>
         <div class="status-item">完成时间: {{ replayState.finished_at || '--' }}</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>策略管理</h3>
+      <p v-if="!strategyEnabled" class="error-text">策略子系统未启用</p>
+      <div class="status-grid">
+        <div class="status-item">启用: {{ strategyStatus.enabled ? '是' : '否' }}</div>
+        <div class="status-item">Python 进程: {{ strategyStatus.process_running ? '运行中' : '未运行' }}</div>
+        <div class="status-item">gRPC 连接: {{ strategyStatus.connected ? '已连接' : '未连接' }}</div>
+        <div class="status-item">gRPC 地址: {{ strategyStatus.grpc_addr || '--' }}</div>
+        <div class="status-item">Python 入口: {{ strategyStatus.python_entry || '--' }}</div>
+        <div class="status-item">策略定义数: {{ strategyStatus.definitions || 0 }}</div>
+        <div class="status-item">实例数: {{ strategyStatus.instances || 0 }}</div>
+        <div class="status-item">运行中实例: {{ strategyStatus.running_count || 0 }}</div>
+        <div class="status-item">信号数: {{ strategyStatus.signal_count || 0 }}</div>
+        <div class="status-item">审计数: {{ strategyStatus.audit_count || 0 }}</div>
+        <div class="status-item">回测数: {{ strategyStatus.backtest_run_count || 0 }}</div>
+        <div class="status-item">最近健康检查: {{ strategyStatus.last_health_at || '--' }}</div>
+      </div>
+      <p v-if="strategyStatus.last_error" class="error-text">策略错误: {{ strategyStatus.last_error }}</p>
+
+      <div class="replay-form-grid">
+        <label>策略定义</label>
+        <select v-model="strategyForm.strategy_id">
+          <option value="">请选择</option>
+          <option v-for="item in strategyState.definitions" :key="item.strategy_id" :value="item.strategy_id">
+            {{ item.display_name }} ({{ item.strategy_id }})
+          </option>
+        </select>
+        <label>实例名称</label>
+        <input v-model="strategyForm.display_name" placeholder="my-strategy-instance" />
+        <label>运行模式</label>
+        <select v-model="strategyForm.mode">
+          <option value="realtime">realtime</option>
+          <option value="replay">replay</option>
+          <option value="paper">paper</option>
+        </select>
+        <label>账户</label>
+        <input v-model="strategyForm.account_id" placeholder="paper" />
+        <label>合约(逗号分隔)</label>
+        <input v-model="strategyForm.symbols_text" placeholder="rb2505,ag2605" />
+        <label>周期</label>
+        <input v-model="strategyForm.timeframe" placeholder="1m" />
+        <label>参数 JSON</label>
+        <textarea v-model="strategyForm.params_text" rows="4" placeholder='{"threshold": 0.2}' />
+      </div>
+      <div class="row">
+        <button @click="saveStrategyInstance">保存实例</button>
+      </div>
+
+      <table class="table query-table">
+        <thead>
+          <tr>
+            <th>实例</th>
+            <th>策略</th>
+            <th>模式</th>
+            <th>状态</th>
+            <th>合约</th>
+            <th>周期</th>
+            <th>目标仓位</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in strategyState.instances" :key="item.instance_id">
+            <td>{{ item.display_name || item.instance_id }}</td>
+            <td>{{ item.strategy_id }}</td>
+            <td>{{ item.mode }}</td>
+            <td>{{ item.status }}</td>
+            <td>{{ (item.symbols || []).join(', ') || '--' }}</td>
+            <td>{{ item.timeframe || '--' }}</td>
+            <td>{{ item.last_target_position ?? '--' }}</td>
+            <td>
+              <button class="secondary" @click="startStrategyInstance(item.instance_id)">启动</button>
+              <button class="secondary" @click="stopStrategyInstance(item.instance_id)">停止</button>
+            </td>
+          </tr>
+          <tr v-if="strategyState.instances.length === 0">
+            <td colspan="8">无策略实例</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4>回测</h4>
+      <div class="replay-form-grid">
+        <label>实例</label>
+        <select v-model="backtestForm.instance_id">
+          <option value="">请选择</option>
+          <option v-for="item in strategyState.instances" :key="item.instance_id" :value="item.instance_id">
+            {{ item.display_name || item.instance_id }}
+          </option>
+        </select>
+        <label>合约</label>
+        <input v-model="backtestForm.symbol" placeholder="rb2505" />
+        <label>周期</label>
+        <input v-model="backtestForm.timeframe" placeholder="1m" />
+        <label>开始时间</label>
+        <input v-model="backtestForm.start_time" type="datetime-local" />
+        <label>结束时间</label>
+        <input v-model="backtestForm.end_time" type="datetime-local" />
+      </div>
+      <div class="row">
+        <button @click="runBacktest">提交回测</button>
+      </div>
+
+      <div class="status-grid">
+        <div class="status-item">执行模式: {{ strategyState.ordersStatus.mode || '--' }}</div>
+        <div class="status-item">持仓: {{ JSON.stringify(strategyState.ordersStatus.positions || {}) }}</div>
+      </div>
+
+      <div class="row">
+        <div style="flex: 1">
+          <h4>最近信号</h4>
+          <div class="log-box">
+            <div v-for="item in strategyState.signals" :key="`sig-${item.id || item.event_time}`">
+              {{ item.event_time }} | {{ item.instance_id }} | {{ item.symbol }} | 目标={{ item.target_position }} | {{ item.reason }}
+            </div>
+          </div>
+        </div>
+        <div style="flex: 1">
+          <h4>最近审计</h4>
+          <div class="log-box">
+            <div v-for="item in strategyState.orderAudits" :key="`audit-${item.id || item.event_time}`">
+              {{ item.event_time }} | {{ item.instance_id }} | Δ={{ item.planned_delta }} | 风控={{ item.risk_status }} | 订单={{ item.order_status }}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <h4>最近回测</h4>
+      <div class="log-box">
+        <div v-for="item in strategyState.backtests" :key="item.run_id">
+          {{ item.started_at || '--' }} | {{ item.run_id }} | {{ item.symbol }} | {{ item.status }} | {{ item.output_path || '--' }}
+        </div>
       </div>
     </div>
 

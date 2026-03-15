@@ -26,6 +26,7 @@ import (
 	"ctp-go-demo/internal/logger"
 	"ctp-go-demo/internal/replay"
 	"ctp-go-demo/internal/searchindex"
+	"ctp-go-demo/internal/strategy"
 	"ctp-go-demo/internal/trader"
 
 	"github.com/gorilla/websocket"
@@ -40,6 +41,7 @@ type Server struct {
 	calendar *calendar.Manager
 	replay   *replay.Service
 	chart    *chartlayout.Service
+	strategy *strategy.Manager
 
 	mu        sync.Mutex
 	wsWriteMu sync.Mutex
@@ -111,6 +113,14 @@ func NewServer(cfg config.AppConfig) *Server {
 			s.chart = chartlayout.NewService(store)
 		}
 	}
+	if cfg.Strategy.IsEnabled() {
+		manager, err := strategy.NewManager(cfg.Strategy, dsn)
+		if err != nil {
+			logger.Error("init strategy manager failed", "error", err)
+		} else {
+			s.strategy = manager
+		}
+	}
 	return s
 }
 
@@ -121,6 +131,12 @@ func (s *Server) ListenAddr() string {
 func (s *Server) Run() error {
 	mux := s.Handler()
 	go s.broadcastStatusTicker()
+	if s.strategy != nil {
+		if err := s.strategy.Start(); err != nil {
+			logger.Error("start strategy manager failed", "error", err)
+		}
+		go s.forwardStrategyEvents()
+	}
 	logger.Info("web server listening", "addr", s.cfg.Web.ListenAddr)
 	return http.ListenAndServe(s.cfg.Web.ListenAddr, mux)
 }
@@ -146,6 +162,16 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/chart/layout", s.handleChartLayout)
 	mux.HandleFunc("/api/chart/drawings", s.handleChartDrawings)
 	mux.HandleFunc("/api/chart/drawings/", s.handleChartDrawingsByID)
+	mux.HandleFunc("/api/strategy/status", s.handleStrategyStatus)
+	mux.HandleFunc("/api/strategy/definitions", s.handleStrategyDefinitions)
+	mux.HandleFunc("/api/strategy/instances", s.handleStrategyInstances)
+	mux.HandleFunc("/api/strategy/instances/", s.handleStrategyInstanceAction)
+	mux.HandleFunc("/api/strategy/signals", s.handleStrategySignals)
+	mux.HandleFunc("/api/strategy/backtests", s.handleStrategyBacktests)
+	mux.HandleFunc("/api/strategy/backtests/", s.handleStrategyBacktestByID)
+	mux.HandleFunc("/api/strategy/optimize", s.handleStrategyOptimize)
+	mux.HandleFunc("/api/orders/status", s.handleOrdersStatus)
+	mux.HandleFunc("/api/orders/audit", s.handleOrdersAudit)
 	mux.HandleFunc("/api/client-log", s.handleClientLog)
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.Handle("/", s.handleFrontend())
@@ -210,6 +236,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp := map[string]any{"status": s.status.Snapshot(time.Now())}
 	if s.replay != nil {
 		resp["replay"] = s.replay.Status()
+	}
+	if s.strategy != nil {
+		resp["strategy"] = s.strategy.Status()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -908,6 +937,239 @@ func (s *Server) handleChartDrawingsByID(w http.ResponseWriter, r *http.Request)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+func (s *Server) requireStrategy(w http.ResponseWriter) *strategy.Manager {
+	if s.strategy == nil {
+		http.Error(w, "strategy service unavailable", http.StatusNotFound)
+		return nil
+	}
+	return s.strategy
+}
+
+func (s *Server) handleStrategyStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": manager.Status()})
+}
+
+func (s *Server) handleStrategyDefinitions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	items, err := manager.ListDefinitions()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleStrategyInstances(w http.ResponseWriter, r *http.Request) {
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		items, err := manager.ListInstances()
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodPost, http.MethodPut:
+		var req strategy.StrategyInstance
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.StrategyID) == "" {
+			http.Error(w, "strategy_id is required", http.StatusBadRequest)
+			return
+		}
+		if err := manager.SaveInstance(req); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "instance_id": req.InstanceID})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleStrategyInstanceAction(w http.ResponseWriter, r *http.Request) {
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/strategy/instances/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || parts[0] == "" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var err error
+	switch parts[1] {
+	case "start":
+		err = manager.StartInstance(parts[0])
+	case "stop":
+		err = manager.StopInstance(parts[0])
+	default:
+		http.Error(w, "invalid action", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleStrategySignals(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	items, err := manager.ListSignals(parseLimitArg(r.URL.Query().Get("limit"), 100, 200))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleStrategyBacktests(w http.ResponseWriter, r *http.Request) {
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		items, err := manager.ListRuns(parseLimitArg(r.URL.Query().Get("limit"), 50, 200))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodPost:
+		var req strategy.BacktestRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		run, err := manager.RunBacktest(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, http.StatusOK, run)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleStrategyBacktestByID(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	runID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/strategy/backtests/"))
+	if runID == "" {
+		http.Error(w, "run id is required", http.StatusBadRequest)
+		return
+	}
+	run, err := manager.GetRun(runID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) handleStrategyOptimize(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	var req strategy.ParameterSweepRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	run, err := manager.RunParameterSweep(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, run)
+}
+
+func (s *Server) handleOrdersStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, manager.OrdersStatus())
+}
+
+func (s *Server) handleOrdersAudit(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	items, err := manager.ListOrderAudits(parseLimitArg(r.URL.Query().Get("limit"), 100, 200))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) forwardStrategyEvents() {
+	if s.strategy == nil {
+		return
+	}
+	ch, cancel := s.strategy.Subscribe()
+	defer cancel()
+	for ev := range ch {
+		s.broadcastEvent(ev.Type, ev.Data)
+	}
+}
+
 func (s *Server) broadcastStatusTicker() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -922,6 +1184,9 @@ func (s *Server) statusPayload() map[string]any {
 	}
 	if s.replay != nil {
 		out["replay"] = s.replay.Status()
+	}
+	if s.strategy != nil {
+		out["strategy"] = s.strategy.Status()
 	}
 	return out
 }

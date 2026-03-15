@@ -14,6 +14,7 @@ type AppConfig struct {
 	Web      WebConfig      `json:"web"`
 	Calendar CalendarConfig `json:"calendar"`
 	Log      LogConfig      `json:"log"`
+	Strategy StrategyConfig `json:"strategy"`
 }
 
 type DBConfig struct {
@@ -83,6 +84,17 @@ type CalendarConfig struct {
 
 type LogConfig struct {
 	Level string `json:"level"`
+}
+
+type StrategyConfig struct {
+	Enabled               *bool  `json:"enabled"`
+	GRPCAddr              string `json:"grpc_addr"`
+	AutoStart             *bool  `json:"auto_start"`
+	PythonEntry           string `json:"python_entry"`
+	PythonWorkdir         string `json:"python_workdir"`
+	HealthcheckIntervalMS int    `json:"healthcheck_interval_ms"`
+	RequestTimeoutMS      int    `json:"request_timeout_ms"`
+	BacktestOutputDir     string `json:"backtest_output_dir"`
 }
 
 func Load(path string) (AppConfig, error) {
@@ -296,6 +308,32 @@ func (c *AppConfig) Validate() error {
 	default:
 		return errors.New("log.level must be one of: debug,info,warn,error")
 	}
+	if c.Strategy.Enabled == nil {
+		v := false
+		c.Strategy.Enabled = &v
+	}
+	if c.Strategy.AutoStart == nil {
+		v := true
+		c.Strategy.AutoStart = &v
+	}
+	if c.Strategy.GRPCAddr == "" {
+		c.Strategy.GRPCAddr = "127.0.0.1:50051"
+	}
+	if c.Strategy.HealthcheckIntervalMS <= 0 {
+		c.Strategy.HealthcheckIntervalMS = 2000
+	}
+	if c.Strategy.RequestTimeoutMS <= 0 {
+		c.Strategy.RequestTimeoutMS = 3000
+	}
+	if c.Strategy.BacktestOutputDir == "" {
+		c.Strategy.BacktestOutputDir = "flow/strategy_backtests"
+	}
+	if c.Strategy.HealthcheckIntervalMS <= 0 {
+		return errors.New("strategy.healthcheck_interval_ms must be > 0")
+	}
+	if c.Strategy.RequestTimeoutMS <= 0 {
+		return errors.New("strategy.request_timeout_ms must be > 0")
+	}
 
 	return nil
 }
@@ -362,4 +400,18 @@ func (c CalendarConfig) IsBrowserHeadless() bool {
 		return true
 	}
 	return *c.BrowserHeadless
+}
+
+func (c StrategyConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+func (c StrategyConfig) IsAutoStart() bool {
+	if c.AutoStart == nil {
+		return true
+	}
+	return *c.AutoStart
 }
