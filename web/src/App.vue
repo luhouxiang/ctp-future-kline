@@ -127,6 +127,38 @@ const strategyForm = reactive({
   params_text: '{}',
 })
 
+const tradeStatus = reactive({
+  enabled: false,
+  account_id: '',
+  trader_front: false,
+  trader_login: false,
+  settlement_confirmed: false,
+  trading_day: '',
+  front_id: 0,
+  session_id: 0,
+  last_error: '',
+  last_query_at: '',
+})
+
+const tradeState = reactive({
+  account: null,
+  positions: [],
+  orders: [],
+  trades: [],
+  audits: [],
+})
+
+const tradeForm = reactive({
+  account_id: 'default',
+  symbol: '',
+  exchange_id: '',
+  direction: 'buy',
+  offset_flag: 'open',
+  limit_price: '',
+  volume: 1,
+  client_tag: '',
+})
+
 const backtestForm = reactive({
   instance_id: '',
   symbol: '',
@@ -277,6 +309,14 @@ function applyStrategyStatus(snapshot) {
   Object.assign(strategyStatus, snapshot)
 }
 
+function applyTradeStatus(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return
+  Object.assign(tradeStatus, snapshot)
+  if (snapshot.account_id) {
+    tradeForm.account_id = snapshot.account_id
+  }
+}
+
 async function fetchStatus() {
   const resp = await fetch('/api/status')
   if (!resp.ok) {
@@ -292,6 +332,9 @@ async function fetchStatus() {
   }
   if (data.strategy) {
     applyStrategyStatus(data.strategy)
+  }
+  if (data.trade) {
+    applyTradeStatus(data.trade)
   }
 }
 
@@ -330,6 +373,84 @@ async function fetchStrategyBundle() {
       // ignore strategy endpoints when service is disabled
     }
   }
+}
+
+async function fetchTradeBundle() {
+  const endpoints = [
+    ['/api/trade/status', (data) => applyTradeStatus(data.status || {})],
+    ['/api/trade/account', (data) => { tradeState.account = data || null }],
+    ['/api/trade/positions', (data) => { tradeState.positions = data.items || [] }],
+    ['/api/trade/orders?limit=50', (data) => { tradeState.orders = data.items || [] }],
+    ['/api/trade/trades?limit=50', (data) => { tradeState.trades = data.items || [] }],
+  ]
+  for (const [url, apply] of endpoints) {
+    try {
+      const resp = await fetch(url)
+      if (!resp.ok) continue
+      apply(await resp.json())
+    } catch {
+      // ignore when trade disabled
+    }
+  }
+}
+
+async function refreshTradeData() {
+  const resp = await fetch('/api/trade/query/refresh', { method: 'POST' })
+  if (!resp.ok) {
+    addLog(`刷新交易查询失败: ${await resp.text()}`)
+    return
+  }
+  addLog('已刷新交易查询')
+  await fetchTradeBundle()
+}
+
+async function submitTradeOrder() {
+  const payload = {
+    account_id: tradeForm.account_id,
+    symbol: tradeForm.symbol,
+    exchange_id: tradeForm.exchange_id,
+    direction: tradeForm.direction,
+    offset_flag: tradeForm.offset_flag,
+    limit_price: Number(tradeForm.limit_price),
+    volume: Number(tradeForm.volume),
+    client_tag: tradeForm.client_tag,
+    reason: 'manual',
+  }
+  const resp = await fetch('/api/trade/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!resp.ok) {
+    addLog(`手工下单失败: ${await resp.text()}`)
+    return
+  }
+  const data = await resp.json()
+  addLog(`手工下单已提交: ${data.command_id || '--'} ${data.symbol || payload.symbol}`)
+  await fetchTradeBundle()
+}
+
+async function cancelTradeOrder(item) {
+  const payload = {
+    account_id: tradeForm.account_id || tradeStatus.account_id,
+    order_ref: item.order_ref,
+    exchange_id: item.exchange_id,
+    order_sys_id: item.order_sys_id,
+    front_id: item.front_id,
+    session_id: item.session_id,
+    reason: 'manual_cancel',
+  }
+  const resp = await fetch(`/api/trade/orders/${item.command_id}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!resp.ok) {
+    addLog(`撤单失败: ${await resp.text()}`)
+    return
+  }
+  addLog(`撤单请求已提交: ${item.command_id}`)
+  await fetchTradeBundle()
 }
 
 async function saveStrategyInstance() {
@@ -755,6 +876,30 @@ function connectWS() {
       strategyState.backtests = [msg.data, ...(strategyState.backtests || [])].slice(0, 20)
       return
     }
+    if (msg.type === 'trade_status_update' && msg.data) {
+      applyTradeStatus(msg.data)
+      return
+    }
+    if (msg.type === 'trade_account_update' && msg.data) {
+      tradeState.account = msg.data
+      return
+    }
+    if (msg.type === 'trade_position_update' && msg.data) {
+      tradeState.positions = msg.data.items || tradeState.positions
+      return
+    }
+    if (msg.type === 'trade_order_update' && msg.data) {
+      fetchTradeBundle()
+      return
+    }
+    if (msg.type === 'trade_trade_update' && msg.data) {
+      fetchTradeBundle()
+      return
+    }
+    if (msg.type === 'trade_command_audit' && msg.data) {
+      tradeState.audits = [msg.data, ...(tradeState.audits || [])].slice(0, 20)
+      return
+    }
     if (msg.type === 'order_audit_update' && msg.data) {
       strategyState.orderAudits = [msg.data, ...(strategyState.orderAudits || [])].slice(0, 20)
       fetch('/api/orders/status').then((resp) => resp.ok ? resp.json() : null).then((data) => {
@@ -802,6 +947,7 @@ onMounted(async () => {
   }
   await fetchReplayStatus()
   await fetchStrategyBundle()
+  await fetchTradeBundle()
   await runSearch(true)
   connectWS()
 })
@@ -1062,6 +1208,137 @@ onUnmounted(() => {
       <div class="log-box">
         <div v-for="item in strategyState.backtests" :key="item.run_id">
           {{ item.started_at || '--' }} | {{ item.run_id }} | {{ item.symbol }} | {{ item.status }} | {{ item.output_path || '--' }}
+        </div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <h3>实盘交易</h3>
+      <div class="row">
+        <button class="secondary" @click="refreshTradeData">刷新查询</button>
+      </div>
+      <div class="status-grid">
+        <div class="status-item">启用: {{ tradeStatus.enabled ? '是' : '否' }}</div>
+        <div class="status-item">账户: {{ tradeStatus.account_id || '--' }}</div>
+        <div class="status-item">Trader 前置: {{ tradeStatus.trader_front ? '已连接' : '未连接' }}</div>
+        <div class="status-item">Trader 登录: {{ tradeStatus.trader_login ? '已登录' : '未登录' }}</div>
+        <div class="status-item">结算确认: {{ tradeStatus.settlement_confirmed ? '已确认' : '未确认' }}</div>
+        <div class="status-item">交易日: {{ tradeStatus.trading_day || '--' }}</div>
+        <div class="status-item">FrontID: {{ tradeStatus.front_id || 0 }}</div>
+        <div class="status-item">SessionID: {{ tradeStatus.session_id || 0 }}</div>
+        <div class="status-item">最近查询: {{ tradeStatus.last_query_at || '--' }}</div>
+      </div>
+      <p v-if="tradeStatus.last_error" class="error-text">交易错误: {{ tradeStatus.last_error }}</p>
+
+      <div class="status-grid">
+        <div class="status-item">权益: {{ tradeState.account?.balance ?? '--' }}</div>
+        <div class="status-item">可用: {{ tradeState.account?.available ?? '--' }}</div>
+        <div class="status-item">保证金: {{ tradeState.account?.margin ?? '--' }}</div>
+        <div class="status-item">冻结现金: {{ tradeState.account?.frozen_cash ?? '--' }}</div>
+        <div class="status-item">手续费: {{ tradeState.account?.commission ?? '--' }}</div>
+        <div class="status-item">平仓盈亏: {{ tradeState.account?.close_profit ?? '--' }}</div>
+        <div class="status-item">持仓盈亏: {{ tradeState.account?.position_profit ?? '--' }}</div>
+        <div class="status-item">资金更新时间: {{ tradeState.account?.updated_at || '--' }}</div>
+      </div>
+
+      <div class="replay-form-grid">
+        <label>账户</label>
+        <input v-model="tradeForm.account_id" placeholder="default" />
+        <label>合约</label>
+        <input v-model="tradeForm.symbol" placeholder="ag2605" />
+        <label>交易所</label>
+        <input v-model="tradeForm.exchange_id" placeholder="SHFE" />
+        <label>方向</label>
+        <select v-model="tradeForm.direction">
+          <option value="buy">buy</option>
+          <option value="sell">sell</option>
+        </select>
+        <label>开平</label>
+        <select v-model="tradeForm.offset_flag">
+          <option value="open">open</option>
+          <option value="close">close</option>
+          <option value="close_today">close_today</option>
+          <option value="close_yesterday">close_yesterday</option>
+        </select>
+        <label>限价</label>
+        <input v-model="tradeForm.limit_price" type="number" min="0" step="0.01" />
+        <label>手数</label>
+        <input v-model.number="tradeForm.volume" type="number" min="1" step="1" />
+        <label>标签</label>
+        <input v-model="tradeForm.client_tag" placeholder="manual-ui" />
+      </div>
+      <div class="row">
+        <button @click="submitTradeOrder">提交限价单</button>
+      </div>
+
+      <h4>持仓</h4>
+      <table class="table query-table">
+        <thead>
+          <tr>
+            <th>合约</th>
+            <th>方向</th>
+            <th>总仓</th>
+            <th>今仓</th>
+            <th>昨仓</th>
+            <th>保证金</th>
+            <th>更新时间</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in tradeState.positions" :key="`${item.symbol}-${item.direction}-${item.hedge_flag}`">
+            <td>{{ item.symbol }}</td>
+            <td>{{ item.direction }}</td>
+            <td>{{ item.position }}</td>
+            <td>{{ item.today_position }}</td>
+            <td>{{ item.yd_position }}</td>
+            <td>{{ item.use_margin }}</td>
+            <td>{{ item.updated_at }}</td>
+          </tr>
+          <tr v-if="tradeState.positions.length === 0">
+            <td colspan="7">无持仓</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4>订单</h4>
+      <table class="table query-table">
+        <thead>
+          <tr>
+            <th>命令</th>
+            <th>合约</th>
+            <th>方向</th>
+            <th>开平</th>
+            <th>价格</th>
+            <th>原始手数</th>
+            <th>已成</th>
+            <th>状态</th>
+            <th>提交</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in tradeState.orders" :key="item.command_id">
+            <td>{{ item.command_id }}</td>
+            <td>{{ item.symbol }}</td>
+            <td>{{ item.direction }}</td>
+            <td>{{ item.offset_flag }}</td>
+            <td>{{ item.limit_price }}</td>
+            <td>{{ item.volume_total_original }}</td>
+            <td>{{ item.volume_traded }}</td>
+            <td>{{ item.order_status }}</td>
+            <td>{{ item.submit_status }}</td>
+            <td><button class="secondary" @click="cancelTradeOrder(item)">撤单</button></td>
+          </tr>
+          <tr v-if="tradeState.orders.length === 0">
+            <td colspan="10">无订单</td>
+          </tr>
+        </tbody>
+      </table>
+
+      <h4>成交</h4>
+      <div class="log-box">
+        <div v-for="item in tradeState.trades" :key="`${item.trade_id}-${item.received_at}`">
+          {{ item.trade_time }} | {{ item.symbol }} | {{ item.direction }} | {{ item.offset_flag }} | {{ item.price }} x {{ item.volume }}
         </div>
       </div>
     </div>

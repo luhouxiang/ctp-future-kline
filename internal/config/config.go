@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 )
 
 type AppConfig struct {
@@ -15,6 +16,7 @@ type AppConfig struct {
 	Calendar CalendarConfig `json:"calendar"`
 	Log      LogConfig      `json:"log"`
 	Strategy StrategyConfig `json:"strategy"`
+	Trade    TradeConfig    `json:"trade"`
 }
 
 type DBConfig struct {
@@ -95,6 +97,17 @@ type StrategyConfig struct {
 	HealthcheckIntervalMS int    `json:"healthcheck_interval_ms"`
 	RequestTimeoutMS      int    `json:"request_timeout_ms"`
 	BacktestOutputDir     string `json:"backtest_output_dir"`
+}
+
+type TradeConfig struct {
+	Enabled                *bool    `json:"enabled"`
+	AccountID              string   `json:"account_id"`
+	AutoConfirmSettlement  *bool    `json:"auto_confirm_settlement"`
+	MaxOrderVolume         int      `json:"max_order_volume"`
+	AllowedSymbols         []string `json:"allowed_symbols"`
+	BlockStrategyLiveOrder *bool    `json:"block_strategy_live_order"`
+	QueryPollIntervalMS    int      `json:"query_poll_interval_ms"`
+	PositionSyncIntervalMS int      `json:"position_sync_interval_ms"`
 }
 
 func Load(path string) (AppConfig, error) {
@@ -334,6 +347,39 @@ func (c *AppConfig) Validate() error {
 	if c.Strategy.RequestTimeoutMS <= 0 {
 		return errors.New("strategy.request_timeout_ms must be > 0")
 	}
+	if c.Trade.Enabled == nil {
+		v := false
+		c.Trade.Enabled = &v
+	}
+	if stringsTrim(c.Trade.AccountID) == "" {
+		c.Trade.AccountID = "default"
+	}
+	if c.Trade.AutoConfirmSettlement == nil {
+		v := true
+		c.Trade.AutoConfirmSettlement = &v
+	}
+	if c.Trade.MaxOrderVolume <= 0 {
+		c.Trade.MaxOrderVolume = 10
+	}
+	if c.Trade.BlockStrategyLiveOrder == nil {
+		v := true
+		c.Trade.BlockStrategyLiveOrder = &v
+	}
+	if c.Trade.QueryPollIntervalMS <= 0 {
+		c.Trade.QueryPollIntervalMS = 5000
+	}
+	if c.Trade.PositionSyncIntervalMS <= 0 {
+		c.Trade.PositionSyncIntervalMS = 3000
+	}
+	if c.Trade.MaxOrderVolume <= 0 {
+		return errors.New("trade.max_order_volume must be > 0")
+	}
+	if c.Trade.QueryPollIntervalMS <= 0 {
+		return errors.New("trade.query_poll_interval_ms must be > 0")
+	}
+	if c.Trade.PositionSyncIntervalMS <= 0 {
+		return errors.New("trade.position_sync_interval_ms must be > 0")
+	}
 
 	return nil
 }
@@ -414,4 +460,29 @@ func (c StrategyConfig) IsAutoStart() bool {
 		return true
 	}
 	return *c.AutoStart
+}
+
+func (c TradeConfig) IsEnabled() bool {
+	if c.Enabled == nil {
+		return false
+	}
+	return *c.Enabled
+}
+
+func (c TradeConfig) IsAutoConfirmSettlement() bool {
+	if c.AutoConfirmSettlement == nil {
+		return true
+	}
+	return *c.AutoConfirmSettlement
+}
+
+func (c TradeConfig) IsBlockStrategyLiveOrder() bool {
+	if c.BlockStrategyLiveOrder == nil {
+		return true
+	}
+	return *c.BlockStrategyLiveOrder
+}
+
+func stringsTrim(v string) string {
+	return strings.TrimSpace(v)
 }

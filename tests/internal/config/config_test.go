@@ -137,6 +137,27 @@ func TestLoadSuccessAndDefaults(t *testing.T) {
 	if cfg.DB.Database != "future_kline" {
 		t.Fatalf("DB.Database = %q, want future_kline", cfg.DB.Database)
 	}
+	if cfg.Trade.IsEnabled() {
+		t.Fatal("Trade.IsEnabled() = true, want false by default")
+	}
+	if cfg.Trade.AccountID != "default" {
+		t.Fatalf("Trade.AccountID = %q, want default", cfg.Trade.AccountID)
+	}
+	if !cfg.Trade.IsAutoConfirmSettlement() {
+		t.Fatal("Trade.IsAutoConfirmSettlement() = false, want true")
+	}
+	if !cfg.Trade.IsBlockStrategyLiveOrder() {
+		t.Fatal("Trade.IsBlockStrategyLiveOrder() = false, want true")
+	}
+	if cfg.Trade.MaxOrderVolume != 10 {
+		t.Fatalf("Trade.MaxOrderVolume = %d, want 10", cfg.Trade.MaxOrderVolume)
+	}
+	if cfg.Trade.QueryPollIntervalMS != 5000 {
+		t.Fatalf("Trade.QueryPollIntervalMS = %d, want 5000", cfg.Trade.QueryPollIntervalMS)
+	}
+	if cfg.Trade.PositionSyncIntervalMS != 3000 {
+		t.Fatalf("Trade.PositionSyncIntervalMS = %d, want 3000", cfg.Trade.PositionSyncIntervalMS)
+	}
 }
 
 func TestLoadInvalidJSON(t *testing.T) {

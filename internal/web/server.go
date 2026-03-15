@@ -27,6 +27,7 @@ import (
 	"ctp-go-demo/internal/replay"
 	"ctp-go-demo/internal/searchindex"
 	"ctp-go-demo/internal/strategy"
+	"ctp-go-demo/internal/trade"
 	"ctp-go-demo/internal/trader"
 
 	"github.com/gorilla/websocket"
@@ -42,6 +43,7 @@ type Server struct {
 	replay   *replay.Service
 	chart    *chartlayout.Service
 	strategy *strategy.Manager
+	trade    *trade.Service
 
 	mu        sync.Mutex
 	wsWriteMu sync.Mutex
@@ -121,6 +123,14 @@ func NewServer(cfg config.AppConfig) *Server {
 			s.strategy = manager
 		}
 	}
+	if cfg.Trade.IsEnabled() {
+		svc, err := trade.NewService(cfg.Trade, cfg.CTP, dsn)
+		if err != nil {
+			logger.Error("init trade service failed", "error", err)
+		} else {
+			s.trade = svc
+		}
+	}
 	return s
 }
 
@@ -136,6 +146,13 @@ func (s *Server) Run() error {
 			logger.Error("start strategy manager failed", "error", err)
 		}
 		go s.forwardStrategyEvents()
+	}
+	if s.trade != nil {
+		if err := s.trade.Start(); err != nil {
+			logger.Error("start trade service failed", "error", err)
+		} else {
+			go s.forwardTradeEvents()
+		}
 	}
 	logger.Info("web server listening", "addr", s.cfg.Web.ListenAddr)
 	return http.ListenAndServe(s.cfg.Web.ListenAddr, mux)
@@ -172,6 +189,13 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/strategy/optimize", s.handleStrategyOptimize)
 	mux.HandleFunc("/api/orders/status", s.handleOrdersStatus)
 	mux.HandleFunc("/api/orders/audit", s.handleOrdersAudit)
+	mux.HandleFunc("/api/trade/status", s.handleTradeStatus)
+	mux.HandleFunc("/api/trade/account", s.handleTradeAccount)
+	mux.HandleFunc("/api/trade/positions", s.handleTradePositions)
+	mux.HandleFunc("/api/trade/orders", s.handleTradeOrders)
+	mux.HandleFunc("/api/trade/orders/", s.handleTradeOrderAction)
+	mux.HandleFunc("/api/trade/trades", s.handleTradeTrades)
+	mux.HandleFunc("/api/trade/query/refresh", s.handleTradeRefresh)
 	mux.HandleFunc("/api/client-log", s.handleClientLog)
 	mux.HandleFunc("/ws", s.handleWS)
 	mux.Handle("/", s.handleFrontend())
@@ -239,6 +263,9 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	}
 	if s.strategy != nil {
 		resp["strategy"] = s.strategy.Status()
+	}
+	if s.trade != nil {
+		resp["trade"] = s.trade.Status()
 	}
 	writeJSON(w, http.StatusOK, resp)
 }
@@ -1159,11 +1186,184 @@ func (s *Server) handleOrdersAudit(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
 }
 
+func (s *Server) requireTrade(w http.ResponseWriter) *trade.Service {
+	if s.trade == nil {
+		http.Error(w, "trade service unavailable", http.StatusNotFound)
+		return nil
+	}
+	return s.trade
+}
+
+func (s *Server) handleTradeStatus(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": svc.Status()})
+}
+
+func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	item, err := svc.Account()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusNotFound)
+		return
+	}
+	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleTradePositions(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	items, err := svc.Positions()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleTradeOrders(w http.ResponseWriter, r *http.Request) {
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		items, err := svc.Orders(parseLimitArg(r.URL.Query().Get("limit"), 100, 500))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodPost:
+		var req trade.SubmitOrderRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.AccountID) == "" {
+			req.AccountID = s.cfg.Trade.AccountID
+		}
+		rec, err := svc.SubmitOrder(r.Context(), req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, rec)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTradeOrderAction(w http.ResponseWriter, r *http.Request) {
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/trade/orders/")
+	parts := strings.Split(path, "/")
+	if len(parts) < 1 || strings.TrimSpace(parts[0]) == "" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	commandID := strings.TrimSpace(parts[0])
+	if len(parts) == 1 && r.Method == http.MethodGet {
+		item, err := svc.Order(commandID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, item)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "cancel" && r.Method == http.MethodPost {
+		var req trade.CancelOrderRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && err != io.EOF {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		req.CommandID = commandID
+		if strings.TrimSpace(req.AccountID) == "" {
+			req.AccountID = s.cfg.Trade.AccountID
+		}
+		rec, err := svc.CancelOrder(r.Context(), req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		writeJSON(w, http.StatusOK, rec)
+		return
+	}
+	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+}
+
+func (s *Server) handleTradeTrades(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	items, err := svc.Trades(parseLimitArg(r.URL.Query().Get("limit"), 100, 500))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleTradeRefresh(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	if err := svc.RefreshAll(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
 func (s *Server) forwardStrategyEvents() {
 	if s.strategy == nil {
 		return
 	}
 	ch, cancel := s.strategy.Subscribe()
+	defer cancel()
+	for ev := range ch {
+		s.broadcastEvent(ev.Type, ev.Data)
+	}
+}
+
+func (s *Server) forwardTradeEvents() {
+	if s.trade == nil {
+		return
+	}
+	ch, cancel := s.trade.Subscribe()
 	defer cancel()
 	for ev := range ch {
 		s.broadcastEvent(ev.Type, ev.Data)
@@ -1187,6 +1387,9 @@ func (s *Server) statusPayload() map[string]any {
 	}
 	if s.strategy != nil {
 		out["strategy"] = s.strategy.Status()
+	}
+	if s.trade != nil {
+		out["trade"] = s.trade.Status()
 	}
 	return out
 }
