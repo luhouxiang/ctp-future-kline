@@ -35,13 +35,7 @@ func newTickCSVRecorder(baseDir string) (*tickCSVRecorder, error) {
 }
 
 // Append 把一笔实时 tick 追加到对应合约的 CSV 文件中。
-//
-// CSV 中会同时保存：
-// 1. ReceivedAt: 这次实时处理使用的接收时间
-// 2. LocalServiceTime: 服务当时真实收到该 tick 的本地服务器时间
-// 3. AdjustedTickTime: 修正后的业务时间
-//
-// 这样回放时既能恢复业务时间，也能恢复当时服务端感知到的本地时间偏移。
+// CSV 只保存原始行情字段与 ReceivedAt，业务时间在聚合时再计算。
 func (r *tickCSVRecorder) Append(ev tickEvent) error {
 	if r == nil {
 		return nil
@@ -64,14 +58,13 @@ func (r *tickCSVRecorder) Append(ev tickEvent) error {
 		r.writers[inst] = f
 	}
 
-	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%d\n",
+	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%d\n",
 		ev.ReceivedAt.Format("2006-01-02 15:04:05.000"),
 		ev.InstrumentID,
 		ev.ExchangeID,
 		ev.TradingDay,
 		ev.ActionDay,
 		ev.UpdateTime,
-		ev.AdjustedTickTime.Format("2006-01-02 15:04:05.000"),
 		ev.LastPrice,
 		ev.Volume,
 		ev.OpenInterest,
@@ -79,13 +72,6 @@ func (r *tickCSVRecorder) Append(ev tickEvent) error {
 		ev.BidPrice1,
 		ev.AskPrice1,
 		ev.UpdateMillisec,
-	)
-	localServiceTime := ev.LocalServiceTime
-	if localServiceTime.IsZero() {
-		localServiceTime = ev.ReceivedAt
-	}
-	line = strings.TrimRight(line, "\n") + fmt.Sprintf(",%s\n",
-		localServiceTime.Format("2006-01-02 15:04:05.000"),
 	)
 	if _, err := f.writer.WriteString(line); err != nil {
 		return fmt.Errorf("write tick csv failed: %w", err)
@@ -97,7 +83,7 @@ func (r *tickCSVRecorder) Append(ev tickEvent) error {
 }
 
 // openFileLocked 打开某个合约对应的 CSV 文件。
-// 如果文件是首次创建，会写入表头，定义回放解析所依赖的字段顺序。
+// 如果文件是首次创建，会写入新格式表头。
 func (r *tickCSVRecorder) openFileLocked(instrumentID string) (*tickCSVFile, error) {
 	name := sanitizeTickFileName(instrumentID) + ".csv"
 	path := filepath.Join(r.dir, name)
@@ -112,7 +98,7 @@ func (r *tickCSVRecorder) openFileLocked(instrumentID string) (*tickCSVFile, err
 	}
 	writer := bufio.NewWriter(file)
 	if stat.Size() == 0 {
-		header := "received_at,instrument_id,exchange_id,trading_day,action_day,update_time,adjusted_tick_time,last_price,volume,open_interest,settlement_price,bid_price1,ask_price1,update_millisec,local_service_time\n"
+		header := "received_at,instrument_id,exchange_id,trading_day,action_day,update_time,last_price,volume,open_interest,settlement_price,bid_price1,ask_price1,update_millisec\n"
 		if _, err := writer.WriteString(header); err != nil {
 			_ = file.Close()
 			return nil, fmt.Errorf("write tick csv header failed: %w", err)

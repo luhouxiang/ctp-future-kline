@@ -68,7 +68,7 @@ func (s *ReplaySink) ConsumeBusEvent(_ context.Context, ev bus.BusEvent) error {
 	// 	"action_day", tick.ActionDay,
 	// 	"update_time", tick.UpdateTime,
 	// 	"update_millisec", tick.UpdateMillisec,
-	// 	"adjusted_tick_time", tick.AdjustedTickTime.Format(time.RFC3339Nano),
+	// 	"received_at", tick.ReceivedAt.Format(time.RFC3339Nano),
 	// 	"last_price", tick.LastPrice,
 	// 	"volume", tick.Volume,
 	// )

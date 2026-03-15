@@ -3,6 +3,8 @@ package klineagg
 import (
 	"sort"
 	"time"
+
+	"ctp-go-demo/internal/sessiontime"
 )
 
 type SessionRange struct {
@@ -108,11 +110,14 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 			continue
 		}
 		labelDT := labelTime(b.DataTime, labelMinute)
+		labelAdjusted := labelTime(b.AdjustedTime, labelMinute)
 		if !cross && opts.ClampToSessionEnd {
 			if sessionEnd := sessionEndForMinute(m, sessions); sessionEnd >= 0 {
 				endDT := labelTime(b.DataTime, sessionEnd)
+				endAdjusted := labelTime(b.AdjustedTime, sessionEnd)
 				if labelDT.After(endDT) {
 					labelDT = endDT
+					labelAdjusted = endAdjusted
 				}
 			}
 		}
@@ -124,7 +129,7 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 				InstrumentID:    b.InstrumentID,
 				Exchange:        b.Exchange,
 				DataTime:        labelDT,
-				AdjustedTime:    labelDT,
+				AdjustedTime:    labelAdjusted,
 				Period:          period,
 				Open:            b.Open,
 				High:            b.High,
@@ -149,7 +154,7 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 		a.Volume += b.Volume
 		a.OpenInterest = b.OpenInterest
 		a.DataTime = labelDT
-		a.AdjustedTime = labelDT
+		a.AdjustedTime = labelAdjusted
 		a.ExpectedMinutes = expected
 		a.ActualMinutes = bucketActual[bk]
 		out[idx] = a
@@ -178,25 +183,21 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 }
 
 func buildSessionMinuteMaps(sessions []SessionRange) ([]int, map[int]minuteMeta, map[int]int) {
-	minuteOrder := make([]int, 0, 1024)
-	minuteMap := make(map[int]minuteMeta, 1024)
-	sessionMinutes := make(map[int]int, len(sessions))
-	global := 0
-	for sid, s := range sessions {
-		if s.End < s.Start {
-			continue
+	ranges := make([]sessiontime.Range, 0, len(sessions))
+	for _, s := range sessions {
+		ranges = append(ranges, sessiontime.Range{Start: s.Start, End: s.End})
+	}
+	labelOrder, labelMap, sessionMinutes := sessiontime.BuildLabelMinuteMaps(ranges)
+	minuteOrder := make([]int, 0, len(labelOrder))
+	minuteMap := make(map[int]minuteMeta, len(labelMap))
+	for _, m := range labelOrder {
+		meta := labelMap[m]
+		minuteOrder = append(minuteOrder, m)
+		minuteMap[m] = minuteMeta{
+			globalSeq:  meta.GlobalSeq,
+			sessionID:  meta.SessionID,
+			sessionSeq: meta.SessionSeq,
 		}
-		local := 0
-		for m := s.Start; m <= s.End; m += 1 {
-			if _, exists := minuteMap[m]; exists {
-				continue
-			}
-			minuteMap[m] = minuteMeta{globalSeq: global, sessionID: sid, sessionSeq: local}
-			minuteOrder = append(minuteOrder, m)
-			global += 1
-			local += 1
-		}
-		sessionMinutes[sid] = local
 	}
 	return minuteOrder, minuteMap, sessionMinutes
 }
@@ -235,8 +236,8 @@ func expectedMinutesForBucket(minutes int, key bucketKey, cross bool, minuteOrde
 func bucketLabelMinute(minutes int, key bucketKey, cross bool, sessions []SessionRange, minuteOrder []int) int {
 	if cross {
 		endExclusive := (key.bucketNo + 1) * minutes
-		if endExclusive < len(minuteOrder) {
-			return minuteOrder[endExclusive]
+		if endExclusive > 0 && endExclusive <= len(minuteOrder) {
+			return minuteOrder[endExclusive-1]
 		}
 		if len(minuteOrder) == 0 {
 			return -1
@@ -247,7 +248,7 @@ func bucketLabelMinute(minutes int, key bucketKey, cross bool, sessions []Sessio
 		return -1
 	}
 	s := sessions[key.session]
-	candidate := s.Start + (key.bucketNo+1)*minutes
+	candidate := sessiontime.SessionLabelStart(sessiontime.Range{Start: s.Start, End: s.End}) + (key.bucketNo+1)*minutes - 1
 	if candidate > s.End {
 		candidate = s.End
 	}

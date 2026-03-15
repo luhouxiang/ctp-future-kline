@@ -102,24 +102,73 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 		t.Fatalf("row count = %d, want 2", len(got))
 	}
 
-	if got[0].code != "rb2405" || got[0].exchange != "SHFE" || got[0].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:30:00" || got[0].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:30:00" || got[0].period != "1m" {
-		t.Fatalf("first row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:30:00, period 1m", got[0])
+	if got[0].code != "rb2405" || got[0].exchange != "SHFE" || got[0].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[0].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[0].period != "1m" {
+		t.Fatalf("first row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:31:00, period 1m", got[0])
 	}
 	if got[0].open != 100 || got[0].high != 102 || got[0].low != 100 || got[0].close != 102 {
 		t.Fatalf("first row ohlc = (%v,%v,%v,%v), want (100,102,100,102)", got[0].open, got[0].high, got[0].low, got[0].close)
 	}
-	if got[0].volume != 4 || got[0].openInt != 201 || got[0].settlement != 99.5 {
-		t.Fatalf("first row vol/oi/settlement = (%d,%v,%v), want (4,201,99.5)", got[0].volume, got[0].openInt, got[0].settlement)
+	if got[0].volume != 0 || got[0].openInt != 201 || got[0].settlement != 99.5 {
+		t.Fatalf("first row vol/oi/settlement = (%d,%v,%v), want (0,201,99.5)", got[0].volume, got[0].openInt, got[0].settlement)
 	}
 
-	if got[1].code != "rb2405" || got[1].exchange != "SHFE" || got[1].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[1].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[1].period != "1m" {
-		t.Fatalf("second row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:31:00, period 1m", got[1])
+	if got[1].code != "rb2405" || got[1].exchange != "SHFE" || got[1].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:32:00" || got[1].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:32:00" || got[1].period != "1m" {
+		t.Fatalf("second row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:32:00, period 1m", got[1])
 	}
 	if got[1].open != 101 || got[1].high != 101 || got[1].low != 101 || got[1].close != 101 {
 		t.Fatalf("second row ohlc = (%v,%v,%v,%v), want (101,101,101,101)", got[1].open, got[1].high, got[1].low, got[1].close)
 	}
 	if got[1].volume != 6 || got[1].openInt != 198 || got[1].settlement != 100.0 {
 		t.Fatalf("second row vol/oi/settlement = (%d,%v,%v), want (6,198,100)", got[1].volume, got[1].openInt, got[1].settlement)
+	}
+}
+
+func TestMdSpiReplayKeepsDataTimeOnTradingDayWhileAdjustedTimeUsesActualDate(t *testing.T) {
+	t.Parallel()
+
+	dbPath := testmysql.NewDatabase(t)
+	store, err := testkit.NewKlineStore(dbPath)
+	if err != nil {
+		t.Fatalf("newKlineStore() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = store.Close()
+	})
+	seedTradingSessions(t, store.DB(), "ag")
+
+	spi := testkit.NewMdSpi(store, nil)
+	if err := spi.ProcessReplayTick(testkit.TickEvent{
+		InstrumentID:   "ag2605",
+		ExchangeID:     "SHFE",
+		ActionDay:      "20260310",
+		TradingDay:     "20260311",
+		UpdateTime:     "21:13:46",
+		UpdateMillisec: 0,
+		ReceivedAt:     time.Now(),
+		LastPrice:      22835,
+		Volume:         1724,
+		OpenInterest:   23861,
+	}); err != nil {
+		t.Fatalf("ProcessReplayTick() error = %v", err)
+	}
+	if err := spi.Flush(); err != nil {
+		t.Fatalf("Flush() error = %v", err)
+	}
+
+	row := store.DB().QueryRow(
+		`SELECT "DataTime","AdjustedTime" FROM "future_kline_instrument_1m_ag" WHERE "InstrumentID"=? ORDER BY "AdjustedTime" DESC LIMIT 1`,
+		"ag2605",
+	)
+	var dataTime time.Time
+	var adjustedTime time.Time
+	if err := row.Scan(&dataTime, &adjustedTime); err != nil {
+		t.Fatalf("scan replay kline row failed: %v", err)
+	}
+	if got := dataTime.Format("2006-01-02 15:04:05"); got != "2026-03-11 21:14:00" {
+		t.Fatalf("DataTime = %s, want 2026-03-11 21:14:00", got)
+	}
+	if got := adjustedTime.Format("2006-01-02 15:04:05"); got != "2026-03-10 21:14:00" {
+		t.Fatalf("AdjustedTime = %s, want 2026-03-10 21:14:00", got)
 	}
 }
 
@@ -216,7 +265,7 @@ func TestMdSpiDedupDuplicateTickWithinWindow(t *testing.T) {
 		`SELECT "%s" FROM "future_kline_instrument_1m_rb" WHERE "%s" = ?`,
 		testkit.ColVolume, testkit.ColTime,
 	)
-	row := store.DB().QueryRow(query, "2026-02-10 09:30:00")
+	row := store.DB().QueryRow(query, "2026-02-10 09:31:00")
 
 	var gotVol int64
 	if err := row.Scan(&gotVol); err != nil {

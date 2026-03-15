@@ -22,7 +22,7 @@ function timeframeBucket(tf) {
 }
 
 function safeTime(bar) {
-  const t = Number(bar?.adjusted_time ?? bar?.time ?? 0)
+  const t = Number(bar?.data_time ?? bar?.adjusted_time ?? bar?.time ?? 0)
   return Number.isFinite(t) ? t : 0
 }
 

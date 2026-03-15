@@ -84,11 +84,11 @@ func TestReplayServiceTickDirRealtimeDispatchAndCursor(t *testing.T) {
 		t.Fatalf("mkdir tick dir failed: %v", err)
 	}
 	writeTickCSV(t, filepath.Join(tickDir, "au2506.csv"), []string{
-		"2026-03-01 09:00:00.000,au2506,SHFE,20260303,20260301,09:00:00,2026-03-01 09:00:00,100.1,1,10,99,100,100.2,0",
-		"2026-03-01 09:00:02.000,au2506,SHFE,20260303,20260301,09:00:02,2026-03-01 09:00:02,100.3,2,11,99,100.2,100.4,0",
+		"2026-03-01 09:00:00.000,au2506,SHFE,20260303,20260301,09:00:00,100.1,1,10,99,100,100.2,0",
+		"2026-03-01 09:00:02.000,au2506,SHFE,20260303,20260301,09:00:02,100.3,2,11,99,100.2,100.4,0",
 	})
 	writeTickCSV(t, filepath.Join(tickDir, "ag2506.csv"), []string{
-		"2026-03-01 09:00:01.000,ag2506,SHFE,20260303,20260301,09:00:01,2026-03-01 09:00:01,80.1,3,12,79,80,80.2,0",
+		"2026-03-01 09:00:01.000,ag2506,SHFE,20260303,20260301,09:00:01,80.1,3,12,79,80,80.2,0",
 	})
 
 	var mu sync.Mutex
@@ -190,7 +190,7 @@ func TestReplayServiceTickDirIgnoresWrongSourcesByAutoIncludingTickCSV(t *testin
 		t.Fatalf("mkdir tick dir failed: %v", err)
 	}
 	writeTickCSV(t, filepath.Join(tickDir, "rb2505.csv"), []string{
-		"2026-03-01 09:00:00.000,rb2505,SHFE,20260303,20260301,09:00:00,2026-03-01 09:00:00,100.1,1,10,99,100,100.2,0",
+		"2026-03-01 09:00:00.000,rb2505,SHFE,20260303,20260301,09:00:00,100.1,1,10,99,100,100.2,0",
 	})
 
 	var hits atomic.Int64
@@ -283,7 +283,7 @@ func mustJSON(t *testing.T, v any) []byte {
 
 func writeTickCSV(t *testing.T, path string, lines []string) {
 	t.Helper()
-	content := "received_at,instrument_id,exchange_id,trading_day,action_day,update_time,adjusted_tick_time,last_price,volume,open_interest,settlement_price,bid_price1,ask_price1,update_millisec\n" + strings.Join(lines, "\n") + "\n"
+	content := "received_at,instrument_id,exchange_id,trading_day,action_day,update_time,last_price,volume,open_interest,settlement_price,bid_price1,ask_price1,update_millisec\n" + strings.Join(lines, "\n") + "\n"
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write tick csv failed: %v", err)
 	}

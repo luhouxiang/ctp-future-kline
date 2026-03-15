@@ -40,23 +40,20 @@ type tickCSVLoadResult struct {
 }
 
 // tickPayload 是写入 CSV 后再回放时恢复出来的 payload 结构。
-// 其字段名与 tickEvent 保持兼容，便于直接反序列化给 replay sink。
 type tickPayload struct {
-	InstrumentID     string    `json:"InstrumentID"`
-	ExchangeID       string    `json:"ExchangeID"`
-	ActionDay        string    `json:"ActionDay"`
-	TradingDay       string    `json:"TradingDay"`
-	UpdateTime       string    `json:"UpdateTime"`
-	UpdateMillisec   int       `json:"UpdateMillisec"`
-	ReceivedAt       time.Time `json:"ReceivedAt"`
-	LocalServiceTime time.Time `json:"LocalServiceTime"`
-	AdjustedTickTime time.Time `json:"AdjustedTickTime"`
-	LastPrice        float64   `json:"LastPrice"`
-	Volume           int       `json:"Volume"`
-	OpenInterest     float64   `json:"OpenInterest"`
-	SettlementPrice  float64   `json:"SettlementPrice"`
-	BidPrice1        float64   `json:"BidPrice1"`
-	AskPrice1        float64   `json:"AskPrice1"`
+	InstrumentID    string    `json:"InstrumentID"`
+	ExchangeID      string    `json:"ExchangeID"`
+	ActionDay       string    `json:"ActionDay"`
+	TradingDay      string    `json:"TradingDay"`
+	UpdateTime      string    `json:"UpdateTime"`
+	UpdateMillisec  int       `json:"UpdateMillisec"`
+	ReceivedAt      time.Time `json:"ReceivedAt"`
+	LastPrice       float64   `json:"LastPrice"`
+	Volume          int       `json:"Volume"`
+	OpenInterest    float64   `json:"OpenInterest"`
+	SettlementPrice float64   `json:"SettlementPrice"`
+	BidPrice1       float64   `json:"BidPrice1"`
+	AskPrice1       float64   `json:"AskPrice1"`
 }
 
 // runTickDir 负责执行“从 tick CSV 目录回放”的主循环。
@@ -226,7 +223,7 @@ func loadTickCSVEvents(req StartRequest) (tickCSVLoadResult, error) {
 // 映射关系如下：
 // 1. CSV 字段 -> tickPayload
 // 2. tickPayload -> ev.Payload
-// 3. AdjustedTickTime / ReceivedAt -> ev.OccurredAt / ev.ProducedAt
+// 3. ReceivedAt -> ev.OccurredAt / ev.ProducedAt
 func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -271,7 +268,7 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 			return nil, fmt.Errorf("read tick csv record failed: %s:%d: %w", name, lineNo+1, err)
 		}
 		lineNo++
-		if len(record) < 14 {
+		if len(record) != 13 {
 			return nil, fmt.Errorf("tick csv record malformed: %s:%d", name, lineNo)
 		}
 		if shouldSkipTickCSVRecord(name, lineNo, req.FromCursor) {
@@ -364,11 +361,7 @@ func shouldSkipTickCSVRecord(name string, lineNo int64, cursor *bus.FileCursor) 
 	}
 }
 
-// parseTickCSVRecord 把一行 CSV 解析成 tickPayload，并返回该行用于排序和回放推进的时间。
-//
-// 兼容策略：
-// 1. 新格式 CSV 含 local_service_time，会优先读取
-// 2. 旧格式 CSV 没有 local_service_time 时，回退到 received_at
+// parseTickCSVRecord 把一行新格式 CSV 解析成 tickPayload，并返回该行用于排序和回放推进的时间。
 func parseTickCSVRecord(record []string) (tickPayload, time.Time, error) {
 	receivedAt, err := parseTickCSVTime(record[0], []string{
 		"2006-01-02 15:04:05.000",
@@ -378,76 +371,51 @@ func parseTickCSVRecord(record []string) (tickPayload, time.Time, error) {
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("received_at: %w", err)
 	}
-	adjustedTickTime, err := parseTickCSVTime(record[6], []string{
-		"2006-01-02 15:04:05.000",
-		"2006-01-02 15:04:05",
-		time.RFC3339Nano,
-	})
-	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("adjusted_tick_time: %w", err)
-	}
-	lastPrice, err := strconv.ParseFloat(strings.TrimSpace(record[7]), 64)
+	lastPrice, err := strconv.ParseFloat(strings.TrimSpace(record[6]), 64)
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("last_price: %w", err)
 	}
-	volume, err := strconv.Atoi(strings.TrimSpace(record[8]))
+	volume, err := strconv.Atoi(strings.TrimSpace(record[7]))
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("volume: %w", err)
 	}
-	openInterest, err := strconv.ParseFloat(strings.TrimSpace(record[9]), 64)
+	openInterest, err := strconv.ParseFloat(strings.TrimSpace(record[8]), 64)
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("open_interest: %w", err)
 	}
-	settlementPrice, err := strconv.ParseFloat(strings.TrimSpace(record[10]), 64)
+	settlementPrice, err := strconv.ParseFloat(strings.TrimSpace(record[9]), 64)
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("settlement_price: %w", err)
 	}
-	bidPrice1, err := strconv.ParseFloat(strings.TrimSpace(record[11]), 64)
+	bidPrice1, err := strconv.ParseFloat(strings.TrimSpace(record[10]), 64)
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("bid_price1: %w", err)
 	}
-	askPrice1, err := strconv.ParseFloat(strings.TrimSpace(record[12]), 64)
+	askPrice1, err := strconv.ParseFloat(strings.TrimSpace(record[11]), 64)
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("ask_price1: %w", err)
 	}
-	updateMillisec, err := strconv.Atoi(strings.TrimSpace(record[13]))
+	updateMillisec, err := strconv.Atoi(strings.TrimSpace(record[12]))
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("update_millisec: %w", err)
 	}
-	localServiceTime := receivedAt
-	if len(record) >= 15 && strings.TrimSpace(record[14]) != "" {
-		localServiceTime, err = parseTickCSVTime(record[14], []string{
-			"2006-01-02 15:04:05.000",
-			"2006-01-02 15:04:05",
-			time.RFC3339Nano,
-		})
-		if err != nil {
-			return tickPayload{}, time.Time{}, fmt.Errorf("local_service_time: %w", err)
-		}
-	}
 
 	payload := tickPayload{
-		InstrumentID:     strings.TrimSpace(record[1]),
-		ExchangeID:       strings.TrimSpace(record[2]),
-		TradingDay:       strings.TrimSpace(record[3]),
-		ActionDay:        strings.TrimSpace(record[4]),
-		UpdateTime:       strings.TrimSpace(record[5]),
-		AdjustedTickTime: adjustedTickTime,
-		ReceivedAt:       receivedAt,
-		LocalServiceTime: localServiceTime,
-		LastPrice:        lastPrice,
-		Volume:           volume,
-		OpenInterest:     openInterest,
-		SettlementPrice:  settlementPrice,
-		BidPrice1:        bidPrice1,
-		AskPrice1:        askPrice1,
-		UpdateMillisec:   updateMillisec,
+		InstrumentID:    strings.TrimSpace(record[1]),
+		ExchangeID:      strings.TrimSpace(record[2]),
+		TradingDay:      strings.TrimSpace(record[3]),
+		ActionDay:       strings.TrimSpace(record[4]),
+		UpdateTime:      strings.TrimSpace(record[5]),
+		ReceivedAt:      receivedAt,
+		LastPrice:       lastPrice,
+		Volume:          volume,
+		OpenInterest:    openInterest,
+		SettlementPrice: settlementPrice,
+		BidPrice1:       bidPrice1,
+		AskPrice1:       askPrice1,
+		UpdateMillisec:  updateMillisec,
 	}
-	occurredAt := adjustedTickTime
-	if occurredAt.IsZero() {
-		occurredAt = receivedAt
-	}
-	return payload, occurredAt, nil
+	return payload, receivedAt, nil
 }
 
 // parseTickCSVTime 兼容多种时间布局，便于同时读取历史老文件和新录制文件。

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"ctp-go-demo/internal/logger"
+	"ctp-go-demo/internal/sessiontime"
 )
 
 func aggregateBarsByTimeframe(bars []KlineBar, timeframe string, timeframeMinutes int, sessions []sessionMinuteRange) []KlineBar {
@@ -86,21 +87,11 @@ func aggregateBarsByTimeframe(bars []KlineBar, timeframe string, timeframeMinute
 }
 
 func buildSessionMinuteIndex(sessions []sessionMinuteRange) map[int]int {
-	out := make(map[int]int, 512)
-	seq := 0
+	ranges := make([]sessiontime.Range, 0, len(sessions))
 	for _, s := range sessions {
-		if s.End < s.Start {
-			continue
-		}
-		for m := s.Start; m <= s.End; m += 1 {
-			if _, ok := out[m]; ok {
-				continue
-			}
-			out[m] = seq
-			seq += 1
-		}
+		ranges = append(ranges, sessiontime.Range{Start: s.Start, End: s.End})
 	}
-	return out
+	return sessiontime.BuildLabelMinuteIndex(ranges)
 }
 
 func ensureCompletedTradingSession(db *sql.DB, variety string) ([]sessionMinuteRange, error) {

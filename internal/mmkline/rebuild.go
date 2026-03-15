@@ -155,13 +155,14 @@ func aggregateToDaily(bars []klineagg.MinuteBar, period string, sessions []kline
 		k := dayKey{day: b.DataTime.Format("2006-01-02")}
 		idx, ok := pos[k]
 		label := time.Date(b.DataTime.Year(), b.DataTime.Month(), b.DataTime.Day(), dayStart/60, dayStart%60, 0, 0, time.Local)
+		adjustedLabel := time.Date(b.AdjustedTime.Year(), b.AdjustedTime.Month(), b.AdjustedTime.Day(), dayStart/60, dayStart%60, 0, 0, time.Local)
 		if !ok {
 			pos[k] = len(out)
 			out = append(out, klineagg.AggBar{
 				InstrumentID: b.InstrumentID,
 				Exchange:     b.Exchange,
 				DataTime:     label,
-				AdjustedTime: label,
+				AdjustedTime: adjustedLabel,
 				Period:       period,
 				Open:         b.Open,
 				High:         b.High,

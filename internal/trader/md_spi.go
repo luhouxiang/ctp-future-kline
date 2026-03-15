@@ -10,6 +10,7 @@ import (
 	"ctp-go-demo/internal/klineclock"
 	"ctp-go-demo/internal/logger"
 	"ctp-go-demo/internal/mmkline"
+	"ctp-go-demo/internal/sessiontime"
 
 	ctp "github.com/kkqy/ctp-go"
 )
@@ -40,6 +41,8 @@ type mdSpi struct {
 	// clock 负责根据交易日历把交易所时间映射到实际归属的分钟。
 	// 夜盘跨日、节假日前后等场景都依赖它完成修正。
 	clock *klineclock.CalendarResolver
+	// sessionResolver 负责按品种加载交易时段，用于标签分钟映射。
+	sessionResolver *sessionResolver
 
 	mu sync.Mutex
 	// states 保存每个合约当前正在构建中的 1 分钟 bar。
@@ -68,8 +71,10 @@ type mdSpi struct {
 // instrumentMinuteState 保存某个合约当前分钟仍在累计中的 bar。
 type instrumentMinuteState struct {
 	// bar 表示当前分钟尚未封口的聚合结果。
-	bar      minuteBar
-	lastTick minuteTickSnapshot
+	bar                 minuteBar
+	lastTick            minuteTickSnapshot
+	prevBucketCloseVol  int
+	hasPrevBucketVolume bool
 }
 
 // tickFingerprintState 记录最近一次 tick 指纹和进入时间，用于短窗口去重。
@@ -109,59 +114,52 @@ type mdSpiOptions struct {
 // tickEvent 是系统内部统一使用的 tick 结构。
 //
 // 时间字段语义：
-// 1. ReceivedAt: 当前这次处理链路使用的“接收时间”
-// 2. LocalServiceTime: 实时服务最初收到该 tick 时记录的本地服务器时间
-// 3. AdjustedTickTime: 经过交易日历修正后的秒级业务时间
-//
-// 回放时会优先把 LocalServiceTime 恢复为 ReceivedAt，以便复现历史运行时的时间偏移。
+// 1. ReceivedAt: 当前这次处理链路使用的本地服务器接收时间
+// 2. 业务时间在聚合阶段内部计算，不由输入 tick 直接携带
 type tickEvent struct {
 	// tickEvent 是内部统一的 tick 事件结构。
 	// 它既可承接实时 CTP 回调，也可承接离线回放，因此同时保留原始字段和修正后的时间。
-	InstrumentID     string
-	ExchangeID       string
-	ActionDay        string
-	TradingDay       string
-	UpdateTime       string
-	UpdateMillisec   int
-	ReceivedAt       time.Time
-	LocalServiceTime time.Time
-	AdjustedTickTime time.Time
-	LastPrice        float64
-	Volume           int
-	OpenInterest     float64
-	SettlementPrice  float64
-	BidPrice1        float64
-	AskPrice1        float64
+	InstrumentID    string
+	ExchangeID      string
+	ActionDay       string
+	TradingDay      string
+	UpdateTime      string
+	UpdateMillisec  int
+	ReceivedAt      time.Time
+	LastPrice       float64
+	Volume          int
+	OpenInterest    float64
+	SettlementPrice float64
+	BidPrice1       float64
+	AskPrice1       float64
 }
 
 // tickInputData 是 processTick 的输入结构。
-// 相比 tickEvent，它更强调“处理入参”语义，允许调用方提前准备好部分字段。
+// 相比 tickEvent，它更强调“处理入参”语义。
 type tickInputData struct {
-	// tickInputData 是 processTick 的输入参数。
-	// 相比 tickEvent，它更偏向“处理输入”，允许调用方决定是否提供 AdjustedTickTime。
-	InstrumentID     string
-	ExchangeID       string
-	ActionDay        string
-	TradingDay       string
-	UpdateTime       string
-	UpdateMillisec   int
-	ReceivedAt       time.Time
-	LocalServiceTime time.Time
-	AdjustedTickTime time.Time
-	LastPrice        float64
-	Volume           int
-	OpenInterest     float64
-	SettlementPrice  float64
-	BidPrice1        float64
-	AskPrice1        float64
+	InstrumentID    string
+	ExchangeID      string
+	ActionDay       string
+	TradingDay      string
+	UpdateTime      string
+	UpdateMillisec  int
+	ReceivedAt      time.Time
+	LastPrice       float64
+	Volume          int
+	OpenInterest    float64
+	SettlementPrice float64
+	BidPrice1       float64
+	AskPrice1       float64
 }
 
 // newMdSpiWithOptions 初始化行情处理器，并为去重、漂移检测等参数补默认值。
 func newMdSpiWithOptions(store *klineStore, l9Async *l9AsyncCalculator, opts mdSpiOptions) *mdSpi {
 	var clock *klineclock.CalendarResolver
+	var sessions *sessionResolver
 	if store != nil {
 		// 时间归属修正依赖数据库中的交易日日历，因此只有在 store 可用时才初始化。
 		clock = klineclock.NewCalendarResolver(store.DB())
+		sessions = newSessionResolver(store.DB())
 	}
 	tickDedupWindow := opts.tickDedupWindow
 	if tickDedupWindow <= 0 {
@@ -181,6 +179,7 @@ func newMdSpiWithOptions(store *klineStore, l9Async *l9AsyncCalculator, opts mdS
 		states:               make(map[string]*instrumentMinuteState),
 		lastVols:             make(map[string]int),
 		clock:                clock,
+		sessionResolver:      sessions,
 		onDisconnected:       opts.onDisconnected,
 		tickDedupWindow:      tickDedupWindow,
 		lastTickFingerprints: make(map[string]tickFingerprintState),
@@ -325,10 +324,7 @@ func (p *mdSpi) OnRspUnSubMarketData(
 }
 
 // OnRtnDepthMarketData 是实时行情主入口。
-//
-// 这里会立即记录本地接收时间，并把它同时作为：
-// 1. ReceivedAt: 本次实时处理使用的接收时间
-// 2. LocalServiceTime: 之后写入 CSV，供回放时恢复“当时服务端本地时间”
+// 这里会立即记录本地接收时间并写入 ReceivedAt。
 func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketDataField) {
 	receivedAt := time.Now()
 	// 实时行情主入口：
@@ -336,53 +332,40 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 	// 2. 记录本地接收时间
 	// 3. 交给统一的 processTick 完成清洗、聚合和落库
 	_ = p.processTick(tickInputData{
-		InstrumentID:     strings.TrimSpace(pDepthMarketData.GetInstrumentID()),
-		ExchangeID:       strings.TrimSpace(pDepthMarketData.GetExchangeID()),
-		ActionDay:        strings.TrimSpace(pDepthMarketData.GetActionDay()),
-		TradingDay:       strings.TrimSpace(pDepthMarketData.GetTradingDay()),
-		UpdateTime:       strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
-		UpdateMillisec:   pDepthMarketData.GetUpdateMillisec(),
-		ReceivedAt:       receivedAt,
-		LocalServiceTime: receivedAt,
-		LastPrice:        pDepthMarketData.GetLastPrice(),
-		Volume:           pDepthMarketData.GetVolume(),
-		OpenInterest:     pDepthMarketData.GetOpenInterest(),
-		SettlementPrice:  pDepthMarketData.GetSettlementPrice(),
-		BidPrice1:        pDepthMarketData.GetBidPrice1(),
-		AskPrice1:        pDepthMarketData.GetAskPrice1(),
+		InstrumentID:    strings.TrimSpace(pDepthMarketData.GetInstrumentID()),
+		ExchangeID:      strings.TrimSpace(pDepthMarketData.GetExchangeID()),
+		ActionDay:       strings.TrimSpace(pDepthMarketData.GetActionDay()),
+		TradingDay:      strings.TrimSpace(pDepthMarketData.GetTradingDay()),
+		UpdateTime:      strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
+		UpdateMillisec:  pDepthMarketData.GetUpdateMillisec(),
+		ReceivedAt:      receivedAt,
+		LastPrice:       pDepthMarketData.GetLastPrice(),
+		Volume:          pDepthMarketData.GetVolume(),
+		OpenInterest:    pDepthMarketData.GetOpenInterest(),
+		SettlementPrice: pDepthMarketData.GetSettlementPrice(),
+		BidPrice1:       pDepthMarketData.GetBidPrice1(),
+		AskPrice1:       pDepthMarketData.GetAskPrice1(),
 	}, true, false)
 }
 
 // ProcessReplayTick 是历史回放入口。
-//
-// 回放时优先使用 LocalServiceTime 作为 ReceivedAt，原因是：
-// 1. ev.ReceivedAt 只是录制时保存下来的接收时间字段
-// 2. LocalServiceTime 明确表示“实时服务当时收到这笔 tick 的本地服务器时间”
-// 3. 用它恢复 ReceivedAt，才能在回放中更准确地复现实时链路的时间偏移
+// 回放时直接使用 tick 数据中的 ReceivedAt，语义与实时链路中的 time.Now() 一致。
 func (p *mdSpi) ProcessReplayTick(ev tickEvent) error {
-	receivedAt := ev.LocalServiceTime
-	if receivedAt.IsZero() {
-		receivedAt = ev.ReceivedAt
-	}
-	// ProcessReplayTick 供历史回放使用。
-	// 回放数据通常已经提前算好了 AdjustedTickTime，因此不需要再依赖当前时间兜底。
 	p.logFirstReplayProcess(ev)
 	return p.processTick(tickInputData{
-		InstrumentID:     strings.TrimSpace(ev.InstrumentID),
-		ExchangeID:       strings.TrimSpace(ev.ExchangeID),
-		ActionDay:        strings.TrimSpace(ev.ActionDay),
-		TradingDay:       strings.TrimSpace(ev.TradingDay),
-		UpdateTime:       strings.TrimSpace(ev.UpdateTime),
-		UpdateMillisec:   ev.UpdateMillisec,
-		ReceivedAt:       receivedAt,
-		LocalServiceTime: ev.LocalServiceTime,
-		AdjustedTickTime: ev.AdjustedTickTime,
-		LastPrice:        ev.LastPrice,
-		Volume:           ev.Volume,
-		OpenInterest:     ev.OpenInterest,
-		SettlementPrice:  ev.SettlementPrice,
-		BidPrice1:        ev.BidPrice1,
-		AskPrice1:        ev.AskPrice1,
+		InstrumentID:    strings.TrimSpace(ev.InstrumentID),
+		ExchangeID:      strings.TrimSpace(ev.ExchangeID),
+		ActionDay:       strings.TrimSpace(ev.ActionDay),
+		TradingDay:      strings.TrimSpace(ev.TradingDay),
+		UpdateTime:      strings.TrimSpace(ev.UpdateTime),
+		UpdateMillisec:  ev.UpdateMillisec,
+		ReceivedAt:      ev.ReceivedAt,
+		LastPrice:       ev.LastPrice,
+		Volume:          ev.Volume,
+		OpenInterest:    ev.OpenInterest,
+		SettlementPrice: ev.SettlementPrice,
+		BidPrice1:       ev.BidPrice1,
+		AskPrice1:       ev.AskPrice1,
 	}, false, true)
 
 }
@@ -412,7 +395,13 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 	}
 
 	exchangeID := strings.TrimSpace(in.ExchangeID)
-	minuteTime, adjustedTime, adjustedTickTime, err := p.resolveTickTimes(in)
+	variety := normalizeVariety(instrumentID)
+	if variety == "" {
+		// 没法从合约推导品种时，就无法维护品种聚合和主连数据。
+		logger.Error("invalid instrument variety", "instrument_id", instrumentID)
+		return nil
+	}
+	minuteTime, adjustedTime, adjustedTickTime, err := p.resolveTickTimes(variety, in)
 	if err != nil {
 		// 时间是分钟线归档的主键之一，无法解析时直接丢弃该 tick。
 		logger.Error("parse tick time failed", "instrument_id", instrumentID, "error", err)
@@ -456,13 +445,6 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 		settlement = 0
 	}
 
-	variety := normalizeVariety(instrumentID)
-	if variety == "" {
-		// 没法从合约推导品种时，就无法维护品种聚合和主连数据。
-		logger.Error("invalid instrument variety", "instrument_id", instrumentID)
-		return nil
-	}
-
 	currentVol := in.Volume
 	openInterest := in.OpenInterest
 	fingerprint := buildTickDedupFingerprint(in, price, currentVol, openInterest)
@@ -473,21 +455,19 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 	if p.onTick != nil {
 		// onTick 在去重前触发，方便外部完整观察原始输入流。
 		p.onTick(tickEvent{
-			InstrumentID:     instrumentID,
-			ExchangeID:       exchangeID,
-			ActionDay:        strings.TrimSpace(in.ActionDay),
-			TradingDay:       strings.TrimSpace(in.TradingDay),
-			UpdateTime:       strings.TrimSpace(in.UpdateTime),
-			UpdateMillisec:   in.UpdateMillisec,
-			ReceivedAt:       now,
-			LocalServiceTime: in.LocalServiceTime,
-			AdjustedTickTime: adjustedTickTime,
-			LastPrice:        price,
-			Volume:           currentVol,
-			OpenInterest:     openInterest,
-			SettlementPrice:  settlement,
-			BidPrice1:        in.BidPrice1,
-			AskPrice1:        in.AskPrice1,
+			InstrumentID:    instrumentID,
+			ExchangeID:      exchangeID,
+			ActionDay:       strings.TrimSpace(in.ActionDay),
+			TradingDay:      strings.TrimSpace(in.TradingDay),
+			UpdateTime:      strings.TrimSpace(in.UpdateTime),
+			UpdateMillisec:  in.UpdateMillisec,
+			ReceivedAt:      now,
+			LastPrice:       price,
+			Volume:          currentVol,
+			OpenInterest:    openInterest,
+			SettlementPrice: settlement,
+			BidPrice1:       in.BidPrice1,
+			AskPrice1:       in.AskPrice1,
 		})
 	}
 	if p.shouldDropDuplicateTick(instrumentID, fingerprint, now) {
@@ -528,14 +508,8 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 	}
 
 	volumeDelta := int64(0)
-	if last, ok := p.lastVols[instrumentID]; ok {
-		if currentVol >= last {
-			// CTP Volume 是累计量，正常情况下当前值减上一笔值即可得到增量。
-			volumeDelta = int64(currentVol - last)
-		} else {
-			// 若发生交易日切换或柜台重置导致累计量回退，则退化为把当前值视为本次增量。
-			volumeDelta = int64(currentVol)
-		}
+	if last, ok := p.lastVols[instrumentID]; ok && currentVol >= last {
+		volumeDelta = int64(currentVol - last)
 	}
 	p.lastVols[instrumentID] = currentVol
 	lastTick := minuteTickSnapshot{
@@ -563,7 +537,7 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 			High:            price,
 			Low:             price,
 			Close:           price,
-			Volume:          volumeDelta,
+			Volume:          0,
 			OpenInterest:    openInterest,
 			SettlementPrice: settlement,
 		}
@@ -594,10 +568,16 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 				High:            price,
 				Low:             price,
 				Close:           price,
-				Volume:          volumeDelta,
+				Volume:          computeBucketVolume(currentVol, state.lastTick.CurrentVolume, true),
 				OpenInterest:    openInterest,
 				SettlementPrice: settlement,
 			}
+			if startedBar.Volume < 0 {
+				logger.Warn("negative bucket volume detected, clamped", "instrument_id", instrumentID, "current_volume", currentVol, "prev_bucket_close_volume", state.lastTick.CurrentVolume)
+				startedBar.Volume = 0
+			}
+			state.prevBucketCloseVol = state.lastTick.CurrentVolume
+			state.hasPrevBucketVolume = true
 			state.bar = startedBar
 			state.lastTick = lastTick
 			p.logMinuteFirstTick(startedBar, adjustedTickTime, price, currentVol, volumeDelta)
@@ -613,7 +593,11 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 				state.bar.Exchange = exchangeID
 			}
 			state.bar.Close = price
-			state.bar.Volume += volumeDelta
+			state.bar.Volume = computeBucketVolume(currentVol, state.prevBucketCloseVol, state.hasPrevBucketVolume)
+			if state.bar.Volume < 0 {
+				logger.Warn("negative bucket volume detected, clamped", "instrument_id", instrumentID, "current_volume", currentVol, "prev_bucket_close_volume", state.prevBucketCloseVol)
+				state.bar.Volume = 0
+			}
 			state.bar.OpenInterest = openInterest
 			state.bar.SettlementPrice = settlement
 			state.bar.AdjustedTime = adjustedTime
@@ -633,16 +617,15 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 }
 
 // resolveTickTimes 统一解析当前 tick 的三个关键时间：
-// 1. minuteTime: 原始分钟归属时间
-// 2. adjustedTime: 修正后的分钟归属时间
+// 1. minuteTime: 标签分钟，最终写入 DataTime
+// 2. adjustedTime: 实际交易日期下的同标签分钟，最终写入 AdjustedTime
 // 3. adjustedTickTime: 修正后的秒级 tick 时间
-func (p *mdSpi) resolveTickTimes(in tickInputData) (time.Time, time.Time, time.Time, error) {
-	if !in.AdjustedTickTime.IsZero() {
-		// 回放或测试可以直接指定修正后的 tick 时间，跳过交易日历推导。
-		minute := in.AdjustedTickTime.Truncate(time.Minute)
-		return minute, minute, in.AdjustedTickTime, nil
+func (p *mdSpi) resolveTickTimes(variety string, in tickInputData) (time.Time, time.Time, time.Time, error) {
+	sessions, err := p.loadSessions(variety)
+	if err != nil {
+		return time.Time{}, time.Time{}, time.Time{}, err
 	}
-	return parseTickTimesWithMillis(in.ActionDay, in.TradingDay, in.UpdateTime, in.UpdateMillisec, p.clock)
+	return parseTickTimesWithMillis(in.ActionDay, in.TradingDay, in.UpdateTime, in.UpdateMillisec, sessions, p.clock)
 }
 
 // shouldDropDuplicateTick 判断是否丢弃短窗口内的重复 tick。
@@ -863,7 +846,7 @@ func (p *mdSpi) logMinuteBarPersisted(bar minuteBar, tick minuteTickSnapshot, ne
 // 1. 先确定交易日
 // 2. 再结合时分秒得到业务时刻
 // 3. 最后借助交易日历修正分钟归属，处理夜盘跨日问题
-func parseTickTimes(actionDay string, tradingDay string, updateTime string, updateMillisec int, clock *klineclock.CalendarResolver) (time.Time, time.Time, time.Time, error) {
+func parseTickTimes(actionDay string, tradingDay string, updateTime string, updateMillisec int, sessions []sessiontime.Range, clock *klineclock.CalendarResolver) (time.Time, time.Time, time.Time, error) {
 	// 时间解析规则：
 	// 1. 优先使用 TradingDay，缺失时回退到 ActionDay
 	// 2. 结合 UpdateTime 得到交易所报出的时分秒
@@ -888,19 +871,50 @@ func parseTickTimes(actionDay string, tradingDay string, updateTime string, upda
 		return time.Time{}, time.Time{}, time.Time{}, err
 	}
 	hhmm := klineclock.HHMMFromTime(clockTime)
-	base, adjusted, err := klineclock.BuildBarTimes(day, hhmm, clock)
+	_, adjusted, err := klineclock.BuildBarTimes(day, hhmm, clock)
 	if err != nil {
 		return time.Time{}, time.Time{}, time.Time{}, err
 	}
-	baseMinute := base.Truncate(time.Minute)
-	adjustedMinute := adjusted.Truncate(time.Minute)
+	labelMinute, ok := resolveLabelMinute(hhmm, sessions)
+	if !ok {
+		labelMinute = hhmm
+	}
+	baseMinute := labelMinuteOnDay(day, labelMinute)
+	adjustedMinute := labelMinuteOnDay(adjusted, labelMinute)
 	// adjustedTick 保留秒级精度，供漂移检测和回放排序使用。
 	adjustedTick := time.Date(adjusted.Year(), adjusted.Month(), adjusted.Day(), clockTime.Hour(), clockTime.Minute(), clockTime.Second(), 0, time.Local)
 	return baseMinute, adjustedMinute, adjustedTick, nil
 }
 
-func parseTickTimesWithMillis(actionDay string, tradingDay string, updateTime string, updateMillisec int, clock *klineclock.CalendarResolver) (time.Time, time.Time, time.Time, error) {
-	baseMinute, adjustedMinute, adjustedTick, err := parseTickTimes(actionDay, tradingDay, updateTime, updateMillisec, clock)
+func parseBaseMinute(actionDay string, tradingDay string, updateTime string, sessions []sessiontime.Range) (time.Time, error) {
+	dayText := strings.TrimSpace(tradingDay)
+	if len(dayText) != 8 {
+		dayText = strings.TrimSpace(actionDay)
+	}
+	if len(dayText) != 8 {
+		return time.Time{}, fmt.Errorf("invalid trading_day/action_day")
+	}
+	day, err := klineclock.ParseTradingDay(dayText)
+	if err != nil {
+		return time.Time{}, err
+	}
+	updateTime = strings.TrimSpace(updateTime)
+	if updateTime == "" {
+		return time.Time{}, fmt.Errorf("empty update_time")
+	}
+	clockTime, err := time.ParseInLocation("15:04:05", updateTime, time.Local)
+	if err != nil {
+		return time.Time{}, err
+	}
+	labelMinute, ok := resolveLabelMinute(klineclock.HHMMFromTime(clockTime), sessions)
+	if !ok {
+		labelMinute = klineclock.HHMMFromTime(clockTime)
+	}
+	return labelMinuteOnDay(day, labelMinute), nil
+}
+
+func parseTickTimesWithMillis(actionDay string, tradingDay string, updateTime string, updateMillisec int, sessions []sessiontime.Range, clock *klineclock.CalendarResolver) (time.Time, time.Time, time.Time, error) {
+	baseMinute, adjustedMinute, adjustedTick, err := parseTickTimes(actionDay, tradingDay, updateTime, updateMillisec, sessions, clock)
 	if err != nil {
 		return time.Time{}, time.Time{}, time.Time{}, err
 	}
@@ -924,6 +938,42 @@ func parseTickTimesWithMillis(actionDay string, tradingDay string, updateTime st
 		adjustedTick.Location(),
 	)
 	return baseMinute, adjustedMinute, adjustedTick, nil
+}
+
+func resolveLabelMinute(hhmm int, sessions []sessiontime.Range) (int, bool) {
+	hour := hhmm / 100
+	minute := hhmm % 100
+	if hour < 0 || hour > 23 || minute < 0 || minute > 59 {
+		return 0, false
+	}
+	if len(sessions) == 0 {
+		total := hour*60 + minute
+		if total < 23*60+59 {
+			return total + 1, true
+		}
+		return total, true
+	}
+	return sessiontime.LabelMinute(hour*60+minute, sessions)
+}
+
+func labelMinuteOnDay(day time.Time, minuteOfDay int) time.Time {
+	hour := (minuteOfDay / 60) % 24
+	minute := minuteOfDay % 60
+	return time.Date(day.Year(), day.Month(), day.Day(), hour, minute, 0, 0, time.Local)
+}
+
+func computeBucketVolume(currentVol int, prevBucketCloseVol int, hasPrevBucket bool) int64 {
+	if !hasPrevBucket {
+		return 0
+	}
+	return int64(currentVol - prevBucketCloseVol)
+}
+
+func (p *mdSpi) loadSessions(variety string) ([]sessiontime.Range, error) {
+	if p == nil || p.sessionResolver == nil {
+		return nil, nil
+	}
+	return p.sessionResolver.Sessions(variety)
 }
 
 func isFinitePositivePrice(price float64) bool {

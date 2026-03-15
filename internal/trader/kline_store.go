@@ -40,8 +40,8 @@ const (
 // minuteBar 是系统内部统一使用的分钟线结构。
 //
 // 其中：
-// 1. MinuteTime 表示原始分钟时间键
-// 2. AdjustedTime 表示经交易日历修正后的分钟时间键
+// 1. MinuteTime 表示标签分钟时间键，对应落库 DataTime
+// 2. AdjustedTime 表示实际交易日期下的同标签分钟时间键
 // 3. Period 对于实时聚合固定为 "1m"，在写入 mm 表时由聚合器另行生成
 type minuteBar struct {
 	Variety         string
