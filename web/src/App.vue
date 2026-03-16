@@ -191,6 +191,8 @@ const loadingTradingDayImport = ref(false)
 const conflict = ref(null)
 const replaySupported = ref(false)
 let ws
+let statusPollTimer = null
+let tradePollTimer = null
 
 const marketBadgeClass = computed(() => (status.is_market_open ? 'badge open' : 'badge closed'))
 const marketBadgeText = computed(() => (status.is_market_open ? '开市中' : '非开市'))
@@ -950,9 +952,23 @@ onMounted(async () => {
   await fetchTradeBundle()
   await runSearch(true)
   connectWS()
+  statusPollTimer = setInterval(() => {
+    fetchStatus().catch(() => {})
+  }, 5000)
+  tradePollTimer = setInterval(() => {
+    fetchTradeBundle().catch(() => {})
+  }, 5000)
 })
 
 onUnmounted(() => {
+  if (statusPollTimer) {
+    clearInterval(statusPollTimer)
+    statusPollTimer = null
+  }
+  if (tradePollTimer) {
+    clearInterval(tradePollTimer)
+    tradePollTimer = null
+  }
   if (ws) {
     ws.close()
   }

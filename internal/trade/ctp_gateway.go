@@ -159,7 +159,10 @@ func (g *CTPGateway) RefreshAccount() (TradingAccountSnapshot, error) {
 	if ret := g.api.ReqQryTradingAccount(field, resCh.reqID); ret != 0 {
 		return TradingAccountSnapshot{}, fmt.Errorf("ReqQryTradingAccount failed: %d", ret)
 	}
-	res := <-resCh.done
+	res, err := g.waitQueryResult(resCh, "account")
+	if err != nil {
+		return TradingAccountSnapshot{}, err
+	}
 	if res.err != nil {
 		return TradingAccountSnapshot{}, res.err
 	}
@@ -179,7 +182,10 @@ func (g *CTPGateway) RefreshPositions() ([]PositionSnapshot, error) {
 	if ret := g.api.ReqQryInvestorPosition(field, resCh.reqID); ret != 0 {
 		return nil, fmt.Errorf("ReqQryInvestorPosition failed: %d", ret)
 	}
-	res := <-resCh.done
+	res, err := g.waitQueryResult(resCh, "positions")
+	if err != nil {
+		return nil, err
+	}
 	if res.err != nil {
 		return nil, res.err
 	}
@@ -196,7 +202,10 @@ func (g *CTPGateway) RefreshOrders() ([]OrderRecord, error) {
 	if ret := g.api.ReqQryOrder(field, resCh.reqID); ret != 0 {
 		return nil, fmt.Errorf("ReqQryOrder failed: %d", ret)
 	}
-	res := <-resCh.done
+	res, err := g.waitQueryResult(resCh, "orders")
+	if err != nil {
+		return nil, err
+	}
 	if res.err != nil {
 		return nil, res.err
 	}
@@ -213,12 +222,31 @@ func (g *CTPGateway) RefreshTrades() ([]TradeRecord, error) {
 	if ret := g.api.ReqQryTrade(field, resCh.reqID); ret != 0 {
 		return nil, fmt.Errorf("ReqQryTrade failed: %d", ret)
 	}
-	res := <-resCh.done
+	res, err := g.waitQueryResult(resCh, "trades")
+	if err != nil {
+		return nil, err
+	}
 	if res.err != nil {
 		return nil, res.err
 	}
 	g.touchQuery()
 	return res.trades, nil
+}
+
+func (g *CTPGateway) waitQueryResult(resCh *queryResult, kind string) (queryResult, error) {
+	timeout := time.Duration(g.cfg.LoginWaitSeconds) * time.Second
+	if timeout < 5*time.Second {
+		timeout = 5 * time.Second
+	}
+	select {
+	case res := <-resCh.done:
+		return res, nil
+	case <-time.After(timeout):
+		if g.spi != nil {
+			g.spi.cancelQuery(resCh.reqID)
+		}
+		return queryResult{}, fmt.Errorf("trade gateway wait %s query timeout", kind)
+	}
 }
 
 func (g *CTPGateway) SubmitOrder(commandID string, req SubmitOrderRequest) (OrderRecord, error) {
@@ -425,6 +453,12 @@ func (p *ctpTradeSpi) beginQuery(reqID int) *queryResult {
 	return q
 }
 
+func (p *ctpTradeSpi) cancelQuery(reqID int) {
+	p.mu.Lock()
+	delete(p.queryWaiters, reqID)
+	p.mu.Unlock()
+}
+
 func (p *ctpTradeSpi) Subscribe() chan GatewayEvent {
 	ch := make(chan GatewayEvent, 32)
 	p.mu.Lock()
@@ -462,7 +496,7 @@ func (p *ctpTradeSpi) OnRspAuthenticate(_ ctp.CThostFtdcRspAuthenticateField, rs
 func (p *ctpTradeSpi) OnRspUserLogin(login ctp.CThostFtdcRspUserLoginField, rsp ctp.CThostFtdcRspInfoField, _ int, _ bool) {
 	err := rspError(rsp)
 	result := loginResult{Err: err}
-	if err == nil && login != nil {
+	if err == nil && !isNilCTPObject(login) {
 		result.TradingDay = login.GetTradingDay()
 		result.FrontID = login.GetFrontID()
 		result.SessionID = login.GetSessionID()
@@ -496,7 +530,7 @@ func (p *ctpTradeSpi) OnRspSettlementInfoConfirm(_ ctp.CThostFtdcSettlementInfoC
 
 func (p *ctpTradeSpi) OnRspQryTradingAccount(field ctp.CThostFtdcTradingAccountField, rsp ctp.CThostFtdcRspInfoField, reqID int, last bool) {
 	p.handleQuery(reqID, rspError(rsp), last, func(q *queryResult) {
-		if field == nil {
+		if isNilCTPObject(field) {
 			return
 		}
 		q.accounts = append(q.accounts, TradingAccountSnapshot{
@@ -515,7 +549,7 @@ func (p *ctpTradeSpi) OnRspQryTradingAccount(field ctp.CThostFtdcTradingAccountF
 
 func (p *ctpTradeSpi) OnRspQryInvestorPosition(field ctp.CThostFtdcInvestorPositionField, rsp ctp.CThostFtdcRspInfoField, reqID int, last bool) {
 	p.handleQuery(reqID, rspError(rsp), last, func(q *queryResult) {
-		if field == nil {
+		if isNilCTPObject(field) {
 			return
 		}
 		q.positions = append(q.positions, PositionSnapshot{
@@ -537,7 +571,7 @@ func (p *ctpTradeSpi) OnRspQryInvestorPosition(field ctp.CThostFtdcInvestorPosit
 
 func (p *ctpTradeSpi) OnRspQryOrder(field ctp.CThostFtdcOrderField, rsp ctp.CThostFtdcRspInfoField, reqID int, last bool) {
 	p.handleQuery(reqID, rspError(rsp), last, func(q *queryResult) {
-		if field == nil {
+		if isNilCTPObject(field) {
 			return
 		}
 		q.orders = append(q.orders, p.mapOrder(field))
@@ -546,7 +580,7 @@ func (p *ctpTradeSpi) OnRspQryOrder(field ctp.CThostFtdcOrderField, rsp ctp.CTho
 
 func (p *ctpTradeSpi) OnRspQryTrade(field ctp.CThostFtdcTradeField, rsp ctp.CThostFtdcRspInfoField, reqID int, last bool) {
 	p.handleQuery(reqID, rspError(rsp), last, func(q *queryResult) {
-		if field == nil {
+		if isNilCTPObject(field) {
 			return
 		}
 		q.trades = append(q.trades, p.mapTrade(field))
@@ -554,7 +588,7 @@ func (p *ctpTradeSpi) OnRspQryTrade(field ctp.CThostFtdcTradeField, rsp ctp.CTho
 }
 
 func (p *ctpTradeSpi) OnRtnOrder(field ctp.CThostFtdcOrderField) {
-	if field == nil {
+	if isNilCTPObject(field) {
 		return
 	}
 	rec := p.mapOrder(field)
@@ -562,7 +596,7 @@ func (p *ctpTradeSpi) OnRtnOrder(field ctp.CThostFtdcOrderField) {
 }
 
 func (p *ctpTradeSpi) OnRtnTrade(field ctp.CThostFtdcTradeField) {
-	if field == nil {
+	if isNilCTPObject(field) {
 		return
 	}
 	rec := p.mapTrade(field)
@@ -574,7 +608,7 @@ func (p *ctpTradeSpi) OnRspOrderInsert(_ ctp.CThostFtdcInputOrderField, rsp ctp.
 }
 
 func (p *ctpTradeSpi) OnErrRtnOrderInsert(field ctp.CThostFtdcInputOrderField, rsp ctp.CThostFtdcRspInfoField) {
-	if field == nil {
+	if isNilCTPObject(field) {
 		return
 	}
 	rec := OrderRecord{
@@ -600,7 +634,7 @@ func (p *ctpTradeSpi) OnRspOrderAction(_ ctp.CThostFtdcInputOrderActionField, rs
 }
 
 func (p *ctpTradeSpi) OnErrRtnOrderAction(field ctp.CThostFtdcOrderActionField, rsp ctp.CThostFtdcRspInfoField) {
-	if field == nil {
+	if isNilCTPObject(field) {
 		return
 	}
 	rec := OrderRecord{
@@ -753,10 +787,30 @@ func (p *ctpTradeSpi) setError(err error) {
 }
 
 func rspError(rsp ctp.CThostFtdcRspInfoField) error {
-	if rsp == nil || rsp.GetErrorID() == 0 {
+	if isNilCTPObject(rsp) {
 		return nil
 	}
-	return fmt.Errorf("ctp error %d: %s", rsp.GetErrorID(), strings.TrimSpace(rsp.GetErrorMsg()))
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Error("trade rsp info access panic recovered", "panic", r)
+		}
+	}()
+	errID := rsp.GetErrorID()
+	if errID == 0 {
+		return nil
+	}
+	return fmt.Errorf("ctp error %d: %s", errID, strings.TrimSpace(rsp.GetErrorMsg()))
+}
+
+func isNilCTPObject(v any) bool {
+	if v == nil {
+		return true
+	}
+	obj, ok := v.(interface{ Swigcptr() uintptr })
+	if !ok {
+		return false
+	}
+	return obj.Swigcptr() == 0
 }
 
 func errString(err error) string {

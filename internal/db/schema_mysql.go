@@ -307,7 +307,8 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
-			if strings.Contains(strings.ToLower(stmt), "create index") && isDuplicateObjectError(err) {
+			stmtText := strings.ToLower(strings.TrimSpace(stmt))
+			if (strings.Contains(stmtText, "create index") || strings.Contains(stmtText, "create unique index")) && isDuplicateObjectError(err) {
 				continue
 			}
 			return fmt.Errorf("ensure mysql schema failed: %w", err)
