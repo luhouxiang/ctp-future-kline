@@ -13,28 +13,38 @@ const (
 )
 
 type RuntimeSnapshot struct {
-	State          string    `json:"state"`
-	TraderFront    bool      `json:"trader_front"`
-	TraderLogin    bool      `json:"trader_login"`
-	MdFront        bool      `json:"md_front"`
-	MdLogin        bool      `json:"md_login"`
-	MdSubscribed   bool      `json:"md_subscribed"`
-	MdFrontDown    bool      `json:"md_front_disconnected"`
-	MdDownReason   int       `json:"md_disconnect_reason"`
-	MdReconnectTry int       `json:"md_reconnect_attempt"`
-	MdNextRetryAt  time.Time `json:"md_next_retry_at"`
-	NetworkSuspect bool      `json:"network_suspect"`
-	TickDedupDrop  int64     `json:"tick_dedup_dropped"`
-	DriftSeconds   float64   `json:"drift_seconds"`
-	DriftPaused    bool      `json:"drift_paused"`
-	DriftPauseCnt  int64     `json:"drift_pause_count"`
-	ServerTime     string    `json:"server_time"`
-	LastTickTime   time.Time `json:"last_tick_time"`
-	IsMarketOpen   bool      `json:"is_market_open"`
-	LastError      string    `json:"last_error"`
-	UpdatedAt      time.Time `json:"updated_at"`
-	TradingDay     string    `json:"trading_day"`
-	SubscribeCount int       `json:"subscribe_count"`
+	State                 string    `json:"state"`
+	TraderFront           bool      `json:"trader_front"`
+	TraderLogin           bool      `json:"trader_login"`
+	MdFront               bool      `json:"md_front"`
+	MdLogin               bool      `json:"md_login"`
+	MdSubscribed          bool      `json:"md_subscribed"`
+	MdFrontDown           bool      `json:"md_front_disconnected"`
+	MdDownReason          int       `json:"md_disconnect_reason"`
+	MdReconnectTry        int       `json:"md_reconnect_attempt"`
+	MdNextRetryAt         time.Time `json:"md_next_retry_at"`
+	NetworkSuspect        bool      `json:"network_suspect"`
+	TickDedupDrop         int64     `json:"tick_dedup_dropped"`
+	DriftSeconds          float64   `json:"drift_seconds"`
+	DriftPaused           bool      `json:"drift_paused"`
+	DriftPauseCnt         int64     `json:"drift_pause_count"`
+	UpstreamLagMS         float64   `json:"upstream_lag_ms"`
+	CallbackToProcMS      float64   `json:"callback_to_process_ms"`
+	LockWaitMS            float64   `json:"lock_wait_ms"`
+	SideEffectTickQueueMS float64   `json:"side_effect_tick_queue_ms"`
+	SideEffectBarQueueMS  float64   `json:"side_effect_bar_queue_ms"`
+	MinuteStoreMS         float64   `json:"minute_store_ms"`
+	MMQueueMS             float64   `json:"mm_queue_ms"`
+	MMRunMS               float64   `json:"mm_run_ms"`
+	LastLatencyInstrument string    `json:"last_latency_instrument"`
+	LastLatencyStage      string    `json:"last_latency_stage"`
+	ServerTime            string    `json:"server_time"`
+	LastTickTime          time.Time `json:"last_tick_time"`
+	IsMarketOpen          bool      `json:"is_market_open"`
+	LastError             string    `json:"last_error"`
+	UpdatedAt             time.Time `json:"updated_at"`
+	TradingDay            string    `json:"trading_day"`
+	SubscribeCount        int       `json:"subscribe_count"`
 }
 
 type RuntimeStatusCenter struct {
@@ -212,6 +222,45 @@ func (c *RuntimeStatusCenter) MarkDriftRecovered() {
 	c.mutate(func(s *RuntimeSnapshot) {
 		s.DriftPaused = false
 		s.DriftSeconds = 0
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkTickPipelineLatency(instrumentID string, upstreamLagMS float64, callbackToProcMS float64, lockWaitMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.UpstreamLagMS = upstreamLagMS
+		s.CallbackToProcMS = callbackToProcMS
+		s.LockWaitMS = lockWaitMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "tick_pipeline"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkSideEffectLatency(kind string, instrumentID string, queueMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		if kind == "tick" {
+			s.SideEffectTickQueueMS = queueMS
+		} else if kind == "bar" {
+			s.SideEffectBarQueueMS = queueMS
+		}
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "side_effect_" + kind
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkMinuteStoreLatency(instrumentID string, storeMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.MinuteStoreMS = storeMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "minute_store"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkMMRebuildLatency(instrumentID string, queueMS float64, runMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.MMQueueMS = queueMS
+		s.MMRunMS = runMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "mm_rebuild"
 	})
 }
 

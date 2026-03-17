@@ -234,15 +234,8 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	if tickRecorderErr != nil {
 		logger.Error("init tick csv recorder failed", "flow_path", s.cfg.FlowPath, "error", tickRecorderErr)
 	}
-	options := mdSpiOptions{
-		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
-		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
-		driftResumeTicks: s.cfg.DriftResumeTicks,
-		// onTick 是实时 tick 聚合前的旁路钩子。
-		// 它做两件事：
-		// 1. 记录 tick CSV，供历史回放使用
-		// 2. 把 tick 作为 bus 事件写出去，供其它消费者订阅
-		onTick: func(t tickEvent) {
+	sideEffects := newMarketDataSideEffects(status,
+		func(t tickEvent) {
 			if tickRecorder != nil {
 				if err := tickRecorder.Append(t); err != nil {
 					logger.Error("append tick csv failed", "instrument_id", t.InstrumentID, "error", err)
@@ -278,9 +271,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 				Payload:    payload,
 			})
 		},
-		// onBar 在某一分钟封口后触发。
-		// 这里不做写库，写库已经在 mdSpi 内完成；这里只负责把封口后的 bar 旁路发到 bus。
-		onBar: func(bar minuteBar) {
+		func(bar minuteBar) {
 			strategy.PublishRealtimeBar(strategy.BarEvent{
 				Variety:         bar.Variety,
 				InstrumentID:    bar.InstrumentID,
@@ -311,6 +302,13 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 				Payload:    payload,
 			})
 		},
+	)
+	options := mdSpiOptions{
+		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
+		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
+		driftResumeTicks: s.cfg.DriftResumeTicks,
+		onTick:           sideEffects.PublishTick,
+		onBar:            sideEffects.PublishBar,
 	}
 
 	var spi *mdSpi

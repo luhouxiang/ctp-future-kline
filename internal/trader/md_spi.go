@@ -5,6 +5,7 @@ import (
 	"math"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"ctp-go-demo/internal/klineclock"
@@ -13,6 +14,11 @@ import (
 	"ctp-go-demo/internal/sessiontime"
 
 	ctp "github.com/kkqy/ctp-go"
+)
+
+const (
+	latencyLogThreshold = 500 * time.Millisecond
+	latencyLogInterval  = 5 * time.Second
 )
 
 // mdSpi 是行情接收与分钟线聚合的核心实现。
@@ -64,8 +70,13 @@ type mdSpi struct {
 	driftPaused      bool
 	driftResumeCount int
 	// onTick/onBar 是可选观察钩子，通常给回放、测试或旁路采集逻辑使用。
-	onTick func(tickEvent)
-	onBar  func(minuteBar)
+	onTick         func(tickEvent)
+	onBar          func(minuteBar)
+	mmRebuildSem   chan struct{}
+	mmRebuildWG    sync.WaitGroup
+	mmRebuildErr   atomic.Pointer[error]
+	lastDriftLog   map[string]time.Time
+	lastLatencyLog map[string]time.Time
 }
 
 // instrumentMinuteState 保存某个合约当前分钟仍在累计中的 bar。
@@ -119,19 +130,24 @@ type mdSpiOptions struct {
 type tickEvent struct {
 	// tickEvent 是内部统一的 tick 事件结构。
 	// 它既可承接实时 CTP 回调，也可承接离线回放，因此同时保留原始字段和修正后的时间。
-	InstrumentID    string
-	ExchangeID      string
-	ActionDay       string
-	TradingDay      string
-	UpdateTime      string
-	UpdateMillisec  int
-	ReceivedAt      time.Time
-	LastPrice       float64
-	Volume          int
-	OpenInterest    float64
-	SettlementPrice float64
-	BidPrice1       float64
-	AskPrice1       float64
+	InstrumentID         string
+	ExchangeID           string
+	ActionDay            string
+	TradingDay           string
+	UpdateTime           string
+	UpdateMillisec       int
+	ReceivedAt           time.Time
+	CallbackAt           time.Time
+	ProcessStartedAt     time.Time
+	LockAcquiredAt       time.Time
+	SideEffectEnqueuedAt time.Time
+	SideEffectHandledAt  time.Time
+	LastPrice            float64
+	Volume               int
+	OpenInterest         float64
+	SettlementPrice      float64
+	BidPrice1            float64
+	AskPrice1            float64
 }
 
 // tickInputData 是 processTick 的输入结构。
@@ -144,6 +160,7 @@ type tickInputData struct {
 	UpdateTime      string
 	UpdateMillisec  int
 	ReceivedAt      time.Time
+	CallbackAt      time.Time
 	LastPrice       float64
 	Volume          int
 	OpenInterest    float64
@@ -189,6 +206,9 @@ func newMdSpiWithOptions(store *klineStore, l9Async *l9AsyncCalculator, opts mdS
 		driftResumeTicks:     driftResumeTicks,
 		onTick:               opts.onTick,
 		onBar:                opts.onBar,
+		mmRebuildSem:         make(chan struct{}, 4),
+		lastDriftLog:         make(map[string]time.Time),
+		lastLatencyLog:       make(map[string]time.Time),
 	}
 }
 
@@ -339,6 +359,7 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 		UpdateTime:      strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
 		UpdateMillisec:  pDepthMarketData.GetUpdateMillisec(),
 		ReceivedAt:      receivedAt,
+		CallbackAt:      receivedAt,
 		LastPrice:       pDepthMarketData.GetLastPrice(),
 		Volume:          pDepthMarketData.GetVolume(),
 		OpenInterest:    pDepthMarketData.GetOpenInterest(),
@@ -360,6 +381,7 @@ func (p *mdSpi) ProcessReplayTick(ev tickEvent) error {
 		UpdateTime:      strings.TrimSpace(ev.UpdateTime),
 		UpdateMillisec:  ev.UpdateMillisec,
 		ReceivedAt:      ev.ReceivedAt,
+		CallbackAt:      ev.CallbackAt,
 		LastPrice:       ev.LastPrice,
 		Volume:          ev.Volume,
 		OpenInterest:    ev.OpenInterest,
@@ -380,16 +402,11 @@ func (p *mdSpi) ProcessReplayTick(ev tickEvent) error {
 // 5. 1 分钟 bar 聚合与封口
 // 6. 1m 落库、mm 重建、L9 更新
 func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool) error {
-	// processTick 是整个行情链路的核心：
-	// 1. 校验与修正时间
-	// 2. 过滤非法价格
-	// 3. 近窗口重复 tick 去重
-	// 4. 用累计成交量推导当前 tick 的增量成交量
-	// 5. 按分钟聚合，必要时先封口上一根 bar 并落库
 	instrumentID := strings.TrimSpace(in.InstrumentID)
 	if instrumentID == "" {
 		return nil
 	}
+	processStartedAt := time.Now()
 	if replay {
 		p.logFirstReplayPipeline(in)
 	}
@@ -397,28 +414,28 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 	exchangeID := strings.TrimSpace(in.ExchangeID)
 	variety := normalizeVariety(instrumentID)
 	if variety == "" {
-		// 没法从合约推导品种时，就无法维护品种聚合和主连数据。
 		logger.Error("invalid instrument variety", "instrument_id", instrumentID)
 		return nil
 	}
 	minuteTime, adjustedTime, adjustedTickTime, err := p.resolveTickTimes(variety, in)
 	if err != nil {
-		// 时间是分钟线归档的主键之一，无法解析时直接丢弃该 tick。
 		logger.Error("parse tick time failed", "instrument_id", instrumentID, "error", err)
 		return err
 	}
 
 	now := in.ReceivedAt
 	if now.IsZero() && allowNowFallback {
-		// 实时接入时若调用方未显式传入接收时间，则退回到当前机器时间。
 		now = time.Now()
 	}
 	if now.IsZero() {
-		// 回放场景下更倾向使用修正后的 tick 时间，保证行为可重复。
 		now = adjustedTickTime
 	}
 	if now.IsZero() {
 		now = time.Now()
+	}
+	callbackAt := in.CallbackAt
+	if callbackAt.IsZero() {
+		callbackAt = now
 	}
 	if p.status != nil {
 		p.status.MarkTick(now)
@@ -436,7 +453,6 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 			"update_time", strings.TrimSpace(in.UpdateTime),
 			"update_millisec", in.UpdateMillisec,
 		)
-		// 无穷值、NaN、0 或负数价格都会污染 K 线，直接忽略。
 		return nil
 	}
 
@@ -448,29 +464,51 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 	currentVol := in.Volume
 	openInterest := in.OpenInterest
 	fingerprint := buildTickDedupFingerprint(in, price, currentVol, openInterest)
-
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
+	var sideEffectEnqueuedAt time.Time
 	if p.onTick != nil {
-		// onTick 在去重前触发，方便外部完整观察原始输入流。
+		sideEffectEnqueuedAt = time.Now()
 		p.onTick(tickEvent{
-			InstrumentID:    instrumentID,
-			ExchangeID:      exchangeID,
-			ActionDay:       strings.TrimSpace(in.ActionDay),
-			TradingDay:      strings.TrimSpace(in.TradingDay),
-			UpdateTime:      strings.TrimSpace(in.UpdateTime),
-			UpdateMillisec:  in.UpdateMillisec,
-			ReceivedAt:      now,
-			LastPrice:       price,
-			Volume:          currentVol,
-			OpenInterest:    openInterest,
-			SettlementPrice: settlement,
-			BidPrice1:       in.BidPrice1,
-			AskPrice1:       in.AskPrice1,
+			InstrumentID:         instrumentID,
+			ExchangeID:           exchangeID,
+			ActionDay:            strings.TrimSpace(in.ActionDay),
+			TradingDay:           strings.TrimSpace(in.TradingDay),
+			UpdateTime:           strings.TrimSpace(in.UpdateTime),
+			UpdateMillisec:       in.UpdateMillisec,
+			ReceivedAt:           now,
+			CallbackAt:           callbackAt,
+			ProcessStartedAt:     processStartedAt,
+			SideEffectEnqueuedAt: sideEffectEnqueuedAt,
+			LastPrice:            price,
+			Volume:               currentVol,
+			OpenInterest:         openInterest,
+			SettlementPrice:      settlement,
+			BidPrice1:            in.BidPrice1,
+			AskPrice1:            in.AskPrice1,
 		})
 	}
+
+	lockRequestedAt := time.Now()
+	p.mu.Lock()
+	lockAcquiredAt := time.Now()
+	upstreamLagMS := now.Sub(adjustedTickTime).Seconds() * 1000
+	callbackToProcMS := processStartedAt.Sub(callbackAt).Seconds() * 1000
+	lockWaitMS := lockAcquiredAt.Sub(lockRequestedAt).Seconds() * 1000
+	if p.status != nil {
+		p.status.MarkTickPipelineLatency(instrumentID, upstreamLagMS, callbackToProcMS, lockWaitMS)
+	}
+	sideEffectEnqueueMS := 0.0
+	if !sideEffectEnqueuedAt.IsZero() {
+		sideEffectEnqueueMS = sideEffectEnqueuedAt.Sub(processStartedAt).Seconds() * 1000
+	}
+	p.maybeLogLatency("tick_pipeline:"+instrumentID, lockAcquiredAt, "tick pipeline latency",
+		"instrument_id", instrumentID,
+		"upstream_lag_ms", upstreamLagMS,
+		"callback_to_process_ms", callbackToProcMS,
+		"lock_wait_ms", lockWaitMS,
+		"side_effect_enqueue_ms", sideEffectEnqueueMS,
+	)
 	if p.shouldDropDuplicateTick(instrumentID, fingerprint, now) {
+		p.mu.Unlock()
 		logger.Warn(
 			"drop duplicate tick in dedup window",
 			"instrument_id", instrumentID,
@@ -479,8 +517,6 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 			"received_at", now.Format("2006-01-02 15:04:05.000"),
 			"window_ms", p.tickDedupWindow.Milliseconds(),
 		)
-		// 去重只拦截“短时间窗口内内容完全相同”的 tick，
-		// 不会误杀价格或成交量发生变化的正常连续报价。
 		if p.status != nil {
 			p.status.MarkTickDedupDropped()
 		}
@@ -488,8 +524,6 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 	}
 
 	if shouldCheckTickDrift(now, adjustedTickTime) {
-		// 只对相差不超过 1 天的时间做漂移检测。
-		// 跨夜盘或回放跨日数据时，过大的日期差通常没有比较意义。
 		driftSec := math.Abs(now.Sub(adjustedTickTime).Seconds())
 		if p.status != nil {
 			p.status.MarkDrift(driftSec, p.driftPaused)
@@ -498,12 +532,16 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 			if p.status != nil {
 				p.status.MarkDrift(driftSec, false)
 			}
-			logger.Error(
-				"tick drift too large, continue writing",
-				"instrument_id", instrumentID,
-				"drift_seconds", driftSec,
-				"threshold_seconds", p.driftThreshold.Seconds(),
-			)
+			lastLoggedAt := p.lastDriftLog[instrumentID]
+			if now.Sub(lastLoggedAt) >= 5*time.Second {
+				p.lastDriftLog[instrumentID] = now
+				logger.Error(
+					"tick drift too large, continue writing",
+					"instrument_id", instrumentID,
+					"drift_seconds", driftSec,
+					"threshold_seconds", p.driftThreshold.Seconds(),
+				)
+			}
 		}
 	}
 
@@ -523,54 +561,49 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 		OpenInterest:   openInterest,
 	}
 
+	var endedBar *minuteBar
+	var endedLastTick minuteTickSnapshot
+
 	state := p.states[instrumentID]
 	if state == nil {
-		// 第一笔 tick 直接初始化当前分钟 bar。
 		startedBar := minuteBar{
-			Variety:         variety,
-			InstrumentID:    instrumentID,
-			Exchange:        exchangeID,
-			MinuteTime:      minuteTime,
-			AdjustedTime:    adjustedTime,
-			Period:          "1m",
-			Open:            price,
-			High:            price,
-			Low:             price,
-			Close:           price,
-			Volume:          0,
-			OpenInterest:    openInterest,
-			SettlementPrice: settlement,
+			Variety:          variety,
+			InstrumentID:     instrumentID,
+			Exchange:         exchangeID,
+			MinuteTime:       minuteTime,
+			AdjustedTime:     adjustedTime,
+			SourceReceivedAt: now,
+			Period:           "1m",
+			Open:             price,
+			High:             price,
+			Low:              price,
+			Close:            price,
+			Volume:           0,
+			OpenInterest:     openInterest,
+			SettlementPrice:  settlement,
 		}
 		p.states[instrumentID] = &instrumentMinuteState{bar: startedBar, lastTick: lastTick}
 		p.logMinuteFirstTick(startedBar, adjustedTickTime, price, currentVol, volumeDelta)
 	} else {
 		if !state.bar.MinuteTime.Equal(minuteTime) {
-			// 分钟切换：
-			// 先将上一分钟 bar 封口落库，再以当前 tick 初始化新一分钟 bar。
-			endedBar := state.bar
-			p.logMinuteLastTickConfirmed(endedBar, state.lastTick, "minute_rollover")
-			if err := p.flushEndedBar(endedBar, adjustedTickTime, "minute_rollover"); err != nil {
-				logger.Error("flush minute bar failed", "instrument_id", instrumentID, "error", err)
-			} else {
-				p.logMinuteBarPersisted(endedBar, state.lastTick, adjustedTickTime, "minute_rollover")
-			}
-			if p.onBar != nil {
-				p.onBar(endedBar)
-			}
+			barCopy := state.bar
+			endedBar = &barCopy
+			endedLastTick = state.lastTick
 			startedBar := minuteBar{
-				Variety:         variety,
-				InstrumentID:    instrumentID,
-				Exchange:        exchangeID,
-				MinuteTime:      minuteTime,
-				AdjustedTime:    adjustedTime,
-				Period:          "1m",
-				Open:            price,
-				High:            price,
-				Low:             price,
-				Close:           price,
-				Volume:          computeBucketVolume(currentVol, state.lastTick.CurrentVolume, true),
-				OpenInterest:    openInterest,
-				SettlementPrice: settlement,
+				Variety:          variety,
+				InstrumentID:     instrumentID,
+				Exchange:         exchangeID,
+				MinuteTime:       minuteTime,
+				AdjustedTime:     adjustedTime,
+				SourceReceivedAt: now,
+				Period:           "1m",
+				Open:             price,
+				High:             price,
+				Low:              price,
+				Close:            price,
+				Volume:           computeBucketVolume(currentVol, state.lastTick.CurrentVolume, true),
+				OpenInterest:     openInterest,
+				SettlementPrice:  settlement,
 			}
 			if startedBar.Volume < 0 {
 				logger.Warn("negative bucket volume detected, clamped", "instrument_id", instrumentID, "current_volume", currentVol, "prev_bucket_close_volume", state.lastTick.CurrentVolume)
@@ -582,7 +615,6 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 			state.lastTick = lastTick
 			p.logMinuteFirstTick(startedBar, adjustedTickTime, price, currentVol, volumeDelta)
 		} else {
-			// 同一分钟内持续更新 OHLC、增量成交量和最新持仓。
 			if price > state.bar.High {
 				state.bar.High = price
 			}
@@ -601,25 +633,27 @@ func (p *mdSpi) processTick(in tickInputData, allowNowFallback bool, replay bool
 			state.bar.OpenInterest = openInterest
 			state.bar.SettlementPrice = settlement
 			state.bar.AdjustedTime = adjustedTime
+			state.bar.SourceReceivedAt = now
 			state.lastTick = lastTick
 		}
 	}
+	p.mu.Unlock()
 
-	// logger.Debug(
-	// 	"market data push",
-	// 	"instrument_id", instrumentID,
-	// 	"exchange_id", exchangeID,
-	// 	"last_price", price,
-	// 	"bid1", in.BidPrice1,
-	// 	"ask1", in.AskPrice1,
-	// )
+	if endedBar != nil {
+		p.logMinuteLastTickConfirmed(*endedBar, endedLastTick, "minute_rollover")
+		if err := p.flushEndedBar(*endedBar, adjustedTickTime, "minute_rollover"); err != nil {
+			logger.Error("flush minute bar failed", "instrument_id", instrumentID, "error", err)
+		} else {
+			p.logMinuteBarPersisted(*endedBar, endedLastTick, adjustedTickTime, "minute_rollover")
+		}
+		if p.onBar != nil {
+			endedBar.SideEffectEnqueuedAt = time.Now()
+			p.onBar(*endedBar)
+		}
+	}
 	return nil
 }
 
-// resolveTickTimes 统一解析当前 tick 的三个关键时间：
-// 1. minuteTime: 标签分钟，最终写入 DataTime
-// 2. adjustedTime: 实际交易日期下的同标签分钟，最终写入 AdjustedTime
-// 3. adjustedTickTime: 修正后的秒级 tick 时间
 func (p *mdSpi) resolveTickTimes(variety string, in tickInputData) (time.Time, time.Time, time.Time, error) {
 	sessions, err := p.loadSessions(variety)
 	if err != nil {
@@ -730,43 +764,51 @@ func shouldCheckTickDrift(now time.Time, adjustedTickTime time.Time) bool {
 // Flush 强制把各合约当前未封口的最后一根 1m bar 落库。
 // 该函数通常在回放结束、服务退出或人工触发时调用。
 func (p *mdSpi) Flush() error {
-	// Flush 在进程退出、回放结束或人工触发时调用，
-	// 用来把各合约“尚未因分钟切换而封口”的最后一根 bar 强制落库。
 	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	for instrumentID, state := range p.states {
+	bars := make([]minuteBar, 0, len(p.states))
+	lastTicks := make([]minuteTickSnapshot, 0, len(p.states))
+	for _, state := range p.states {
 		if state == nil {
 			continue
 		}
-		endedBar := state.bar
-		p.logMinuteLastTickConfirmed(endedBar, state.lastTick, "flush")
+		bars = append(bars, state.bar)
+		lastTicks = append(lastTicks, state.lastTick)
+	}
+	p.mu.Unlock()
+
+	for i, endedBar := range bars {
+		p.logMinuteLastTickConfirmed(endedBar, lastTicks[i], "flush")
 		if err := p.flushEndedBar(endedBar, time.Time{}, "flush"); err != nil {
-			return fmt.Errorf("flush minute bar for %s failed: %w", instrumentID, err)
+			return fmt.Errorf("flush minute bar for %s failed: %w", endedBar.InstrumentID, err)
 		}
-		p.logMinuteBarPersisted(endedBar, state.lastTick, time.Time{}, "flush")
+		p.logMinuteBarPersisted(endedBar, lastTicks[i], time.Time{}, "flush")
 		if p.onBar != nil {
+			endedBar.SideEffectEnqueuedAt = time.Now()
 			p.onBar(endedBar)
 		}
+	}
+	if err := p.waitForMMRebuilds(); err != nil {
+		return err
 	}
 	return nil
 }
 
-// flushEndedBar 负责处理“上一分钟已经结束”的 bar：
-// 1. 写入 1m 表
-// 2. 触发普通合约 mm 重建
-// 3. 通知 L9 聚合器观察并尝试生成对应分钟的 L9
 func (p *mdSpi) flushEndedBar(endedBar minuteBar, nextTickTime time.Time, reason string) error {
+	storeStartedAt := time.Now()
+	endedBar.FlushStartedAt = storeStartedAt
 	if err := p.store.UpsertMinuteBar(endedBar); err != nil {
 		return err
 	}
-	if _, _, aggErr := mmkline.RebuildAndUpsert(p.store.DB(), mmkline.RebuildRequest{
-		Variety:      endedBar.Variety,
-		InstrumentID: endedBar.InstrumentID,
-		IsL9:         false,
-	}); aggErr != nil {
-		return aggErr
+	storeMS := time.Since(storeStartedAt).Seconds() * 1000
+	if p.status != nil {
+		p.status.MarkMinuteStoreLatency(endedBar.InstrumentID, storeMS)
 	}
+	p.maybeLogLatency("minute_store:"+endedBar.InstrumentID, time.Now(), "minute bar store latency",
+		"instrument_id", endedBar.InstrumentID,
+		"store_ms", storeMS,
+		"reason", reason,
+	)
+	p.scheduleMMRebuild(endedBar)
 	if p.l9Async != nil {
 		p.l9Async.ObserveMinuteBar(endedBar)
 		p.l9Async.Submit(endedBar.Variety, endedBar.MinuteTime)
@@ -776,7 +818,80 @@ func (p *mdSpi) flushEndedBar(endedBar minuteBar, nextTickTime time.Time, reason
 	return nil
 }
 
-// logMinuteFirstTick 记录某分钟第一笔 tick 进入聚合器时的关键信息。
+func (p *mdSpi) scheduleMMRebuild(bar minuteBar) {
+	if p.store == nil {
+		return
+	}
+	enqueuedAt := time.Now()
+	p.mmRebuildWG.Add(1)
+	go func() {
+		defer p.mmRebuildWG.Done()
+		p.mmRebuildSem <- struct{}{}
+		defer func() { <-p.mmRebuildSem }()
+		startedAt := time.Now()
+		queueMS := startedAt.Sub(enqueuedAt).Seconds() * 1000
+
+		if _, _, err := mmkline.RebuildAndUpsert(p.store.DB(), mmkline.RebuildRequest{
+			Variety:      bar.Variety,
+			InstrumentID: bar.InstrumentID,
+			IsL9:         false,
+		}); err != nil {
+			wrapped := fmt.Errorf("rebuild mm bars for %s failed: %w", bar.InstrumentID, err)
+			logger.Error("mm rebuild failed", "instrument_id", bar.InstrumentID, "error", err)
+			p.mmRebuildErr.CompareAndSwap(nil, &wrapped)
+		}
+		runMS := time.Since(startedAt).Seconds() * 1000
+		if p.status != nil {
+			p.status.MarkMMRebuildLatency(bar.InstrumentID, queueMS, runMS)
+		}
+		p.maybeLogLatency("mm_rebuild:"+bar.InstrumentID, time.Now(), "mm rebuild latency",
+			"instrument_id", bar.InstrumentID,
+			"queue_ms", queueMS,
+			"run_ms", runMS,
+		)
+	}()
+}
+
+func (p *mdSpi) waitForMMRebuilds() error {
+	p.mmRebuildWG.Wait()
+	if errPtr := p.mmRebuildErr.Load(); errPtr != nil {
+		return *errPtr
+	}
+	return nil
+}
+
+func (p *mdSpi) maybeLogLatency(key string, now time.Time, msg string, args ...any) {
+	if !shouldLogLatency(args...) {
+		return
+	}
+	lastLoggedAt := p.lastLatencyLog[key]
+	if now.Sub(lastLoggedAt) < latencyLogInterval {
+		return
+	}
+	p.lastLatencyLog[key] = now
+	logger.Warn(msg, args...)
+}
+
+func shouldLogLatency(args ...any) bool {
+	for i := 0; i+1 < len(args); i += 2 {
+		switch v := args[i+1].(type) {
+		case float64:
+			if v >= latencyLogThreshold.Seconds()*1000 {
+				return true
+			}
+		case int64:
+			if time.Duration(v)*time.Millisecond >= latencyLogThreshold {
+				return true
+			}
+		case int:
+			if time.Duration(v)*time.Millisecond >= latencyLogThreshold {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (p *mdSpi) logMinuteFirstTick(bar minuteBar, tickTime time.Time, price float64, currentVol int, volumeDelta int64) {
 	logger.Info(
 		"minute first tick received",

@@ -44,19 +44,22 @@ const (
 // 2. AdjustedTime 表示实际交易日期下的同标签分钟时间键
 // 3. Period 对于实时聚合固定为 "1m"，在写入 mm 表时由聚合器另行生成
 type minuteBar struct {
-	Variety         string
-	InstrumentID    string
-	Exchange        string
-	MinuteTime      time.Time
-	AdjustedTime    time.Time
-	Period          string
-	Open            float64
-	High            float64
-	Low             float64
-	Close           float64
-	Volume          int64
-	OpenInterest    float64
-	SettlementPrice float64
+	Variety              string
+	InstrumentID         string
+	Exchange             string
+	MinuteTime           time.Time
+	AdjustedTime         time.Time
+	SourceReceivedAt     time.Time
+	FlushStartedAt       time.Time
+	SideEffectEnqueuedAt time.Time
+	Period               string
+	Open                 float64
+	High                 float64
+	Low                  float64
+	Close                float64
+	Volume               int64
+	OpenInterest         float64
+	SettlementPrice      float64
 }
 
 // klineStore 封装分钟线、L9 分钟线和相关表结构的写入逻辑。

@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // tickCSVRecorder 负责把实时收到的 tick 追加保存成按合约拆分的 CSV。
@@ -15,14 +16,18 @@ import (
 type tickCSVRecorder struct {
 	dir string
 
-	mu      sync.Mutex
-	writers map[string]*tickCSVFile
+	mu            sync.Mutex
+	writers       map[string]*tickCSVFile
+	flushEvery    int
+	flushInterval time.Duration
 }
 
 // tickCSVFile 表示单个合约对应的 CSV 文件句柄和带缓冲写入器。
 type tickCSVFile struct {
-	file   *os.File
-	writer *bufio.Writer
+	file         *os.File
+	writer       *bufio.Writer
+	pendingLines int
+	lastFlush    time.Time
 }
 
 // newTickCSVRecorder 在 flow 目录下创建 ticks 子目录，并准备按合约拆分写文件。
@@ -31,7 +36,12 @@ func newTickCSVRecorder(baseDir string) (*tickCSVRecorder, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, fmt.Errorf("create tick csv dir failed: %w", err)
 	}
-	return &tickCSVRecorder{dir: dir, writers: make(map[string]*tickCSVFile)}, nil
+	return &tickCSVRecorder{
+		dir:           dir,
+		writers:       make(map[string]*tickCSVFile),
+		flushEvery:    128,
+		flushInterval: time.Second,
+	}, nil
 }
 
 // Append 把一笔实时 tick 追加到对应合约的 CSV 文件中。
@@ -76,10 +86,59 @@ func (r *tickCSVRecorder) Append(ev tickEvent) error {
 	if _, err := f.writer.WriteString(line); err != nil {
 		return fmt.Errorf("write tick csv failed: %w", err)
 	}
-	if err := f.writer.Flush(); err != nil {
-		return fmt.Errorf("flush tick csv failed: %w", err)
+	f.pendingLines++
+	if r.shouldFlushLocked(f, ev.ReceivedAt) {
+		if err := f.writer.Flush(); err != nil {
+			return fmt.Errorf("flush tick csv failed: %w", err)
+		}
+		f.pendingLines = 0
+		f.lastFlush = ev.ReceivedAt
 	}
 	return nil
+}
+
+func (r *tickCSVRecorder) Close() error {
+	if r == nil {
+		return nil
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	var firstErr error
+	for instrumentID, f := range r.writers {
+		if f.writer != nil {
+			if err := f.writer.Flush(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("flush tick csv for %s failed: %w", instrumentID, err)
+			}
+		}
+		if f.file != nil {
+			if err := f.file.Close(); err != nil && firstErr == nil {
+				firstErr = fmt.Errorf("close tick csv for %s failed: %w", instrumentID, err)
+			}
+		}
+	}
+	r.writers = make(map[string]*tickCSVFile)
+	return firstErr
+}
+
+func (r *tickCSVRecorder) shouldFlushLocked(f *tickCSVFile, ts time.Time) bool {
+	if f == nil {
+		return false
+	}
+	if r.flushEvery <= 1 || f.pendingLines >= r.flushEvery {
+		return true
+	}
+	if r.flushInterval <= 0 {
+		return false
+	}
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	if f.lastFlush.IsZero() {
+		return false
+	}
+	return ts.Sub(f.lastFlush) >= r.flushInterval
 }
 
 // openFileLocked 打开某个合约对应的 CSV 文件。
