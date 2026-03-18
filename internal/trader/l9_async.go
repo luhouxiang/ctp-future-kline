@@ -1,28 +1,20 @@
 package trader
 
 import (
-	"fmt"
-	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	"ctp-go-demo/internal/klineclock"
 	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/mmkline"
+	"ctp-go-demo/internal/sessiontime"
 )
 
-// l9Task 表示“某个品种在某一分钟尝试生成 L9”的异步任务。
 type l9Task struct {
 	variety    string
 	minuteTime time.Time
 }
 
-// l9AsyncCalculator 负责异步维护 L9 主连分钟线。
-//
-// 它的输入不是原始 tick，而是已经封口并落库的普通合约 1m bar。
-// 当某一分钟的多个合约 bar 被陆续观察到后，计算器会尝试拼出该分钟的 L9 bar，
-// 然后把结果写入 L9 1m 表，并继续触发 L9 的 mm 聚合。
 type l9AsyncCalculator struct {
 	store *klineStore
 	clock *klineclock.CalendarResolver
@@ -36,9 +28,10 @@ type l9AsyncCalculator struct {
 	latest            map[string]minuteBar
 	minuteBars        map[string]map[int64]map[string]minuteBar
 	instrumentVariety map[string]string
+	aggregators       map[string]*closedBarAggregator
+	persistSink       func([]persistTask)
 }
 
-// newL9AsyncCalculator 初始化 L9 异步计算器和后台 worker。
 func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
 	if workers <= 0 {
 		workers = 1
@@ -46,14 +39,14 @@ func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expected
 	c := &l9AsyncCalculator{
 		store:             store,
 		clock:             klineclock.NewCalendarResolver(store.DB()),
-		tasks:             make(chan l9Task, 1024),
+		tasks:             make(chan l9Task, defaultL9TaskQueueCapacity),
 		expected:          make(map[string]map[string]struct{}),
 		latest:            make(map[string]minuteBar),
 		minuteBars:        make(map[string]map[int64]map[string]minuteBar),
 		instrumentVariety: make(map[string]string),
+		aggregators:       make(map[string]*closedBarAggregator),
 	}
 	c.enabled.Store(enabled)
-
 	for variety, instruments := range expectedByVariety {
 		nv := normalizeVariety(variety)
 		if nv == "" {
@@ -72,7 +65,6 @@ func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expected
 			c.instrumentVariety[instrumentID] = nv
 		}
 	}
-
 	for i := 0; i < workers; i++ {
 		c.wg.Add(1)
 		go c.worker()
@@ -80,18 +72,20 @@ func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expected
 	return c
 }
 
-// Enable 打开 L9 计算开关。
+func (c *l9AsyncCalculator) SetPersistSink(fn func([]persistTask)) {
+	c.mu.Lock()
+	c.persistSink = fn
+	c.mu.Unlock()
+}
+
 func (c *l9AsyncCalculator) Enable() {
 	c.enabled.Store(true)
 }
 
-// Disable 关闭 L9 计算开关。
 func (c *l9AsyncCalculator) Disable() {
 	c.enabled.Store(false)
 }
 
-// ObserveMinuteBar 把一个普通合约的 1m bar 放入内存快照。
-// Submit 时会以这些快照为输入，计算同一分钟的 L9。
 func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 	if bar.InstrumentID == "" || bar.MinuteTime.IsZero() {
 		return
@@ -106,7 +100,6 @@ func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 	if bar.AdjustedTime.IsZero() {
 		bar.AdjustedTime = c.adjustedMinuteTime(bar.MinuteTime)
 	}
-
 	minuteKey := bar.MinuteTime.Unix()
 
 	c.mu.Lock()
@@ -114,7 +107,6 @@ func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 
 	c.latest[bar.InstrumentID] = bar
 	c.instrumentVariety[bar.InstrumentID] = bar.Variety
-
 	byMinute := c.minuteBars[bar.Variety]
 	if byMinute == nil {
 		byMinute = make(map[int64]map[string]minuteBar)
@@ -126,11 +118,9 @@ func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 		byMinute[minuteKey] = byInstrument
 	}
 	byInstrument[bar.InstrumentID] = bar
-
 	c.pruneOldMinutesLocked(bar.Variety, minuteKey)
 }
 
-// Submit 把某个品种某一分钟的 L9 计算请求入队。
 func (c *l9AsyncCalculator) Submit(variety string, minuteTime time.Time) {
 	if !c.enabled.Load() {
 		return
@@ -142,17 +132,15 @@ func (c *l9AsyncCalculator) Submit(variety string, minuteTime time.Time) {
 	select {
 	case c.tasks <- task:
 	default:
-		logger.Error("l9 task queue full, dropping task", "variety", task.variety, "minute", task.minuteTime.Format("2006-01-02 15:04:00"))
+		logger.Warn("l9 task queue full, dropping task", "variety", task.variety, "minute", task.minuteTime.Format("2006-01-02 15:04:00"))
 	}
 }
 
-// Close 停止 worker 并等待所有后台任务退出。
 func (c *l9AsyncCalculator) Close() {
 	close(c.tasks)
 	c.wg.Wait()
 }
 
-// worker 消费任务队列并调用 computeAndStore 完成实际计算。
 func (c *l9AsyncCalculator) worker() {
 	defer c.wg.Done()
 	for task := range c.tasks {
@@ -162,8 +150,6 @@ func (c *l9AsyncCalculator) worker() {
 	}
 }
 
-// computeAndStore 根据同品种该分钟的普通合约 bar 计算一根 L9 bar，
-// 然后写入 L9 1m 表，并重建对应品种的 L9 mm 数据。
 func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time) error {
 	bars := c.snapshotBarsForMinute(variety, minuteTime)
 	if len(bars) == 0 {
@@ -177,10 +163,13 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 	weightedClose := 0.0
 	weightedSettlement := 0.0
 	totalVolume := int64(0)
-
+	sourceReceivedAt := time.Time{}
 	for _, bar := range bars {
 		if bar.OpenInterest <= 0 {
 			continue
+		}
+		if sourceReceivedAt.IsZero() || bar.SourceReceivedAt.After(sourceReceivedAt) {
+			sourceReceivedAt = bar.SourceReceivedAt
 		}
 		w := bar.OpenInterest
 		totalOI += w
@@ -196,35 +185,87 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 	}
 
 	l9Bar := minuteBar{
-		Variety:         variety,
-		InstrumentID:    variety + "l9",
-		Exchange:        "L9",
-		MinuteTime:      minuteTime,
-		AdjustedTime:    c.adjustedMinuteTime(minuteTime),
-		Period:          "1m",
-		Open:            weightedOpen / totalOI,
-		High:            weightedHigh / totalOI,
-		Low:             weightedLow / totalOI,
-		Close:           weightedClose / totalOI,
-		Volume:          totalVolume,
-		OpenInterest:    totalOI,
-		SettlementPrice: weightedSettlement / totalOI,
+		Variety:          variety,
+		InstrumentID:     variety + "l9",
+		Exchange:         "L9",
+		MinuteTime:       minuteTime,
+		AdjustedTime:     c.adjustedMinuteTime(minuteTime),
+		SourceReceivedAt: sourceReceivedAt,
+		Period:           "1m",
+		Open:             weightedOpen / totalOI,
+		High:             weightedHigh / totalOI,
+		Low:              weightedLow / totalOI,
+		Close:            weightedClose / totalOI,
+		Volume:           totalVolume,
+		OpenInterest:     totalOI,
+		SettlementPrice:  weightedSettlement / totalOI,
 	}
 
-	if err := c.store.UpsertL9MinuteBar(l9Bar); err != nil {
-		return fmt.Errorf("upsert l9 bar failed: %w", err)
+	c.mu.Lock()
+	agg := c.aggregators[variety]
+	if agg == nil {
+		agg = newClosedBarAggregator(l9Bar.InstrumentID, l9Bar.Exchange)
+		c.aggregators[variety] = agg
 	}
-	if _, _, err := mmkline.RebuildAndUpsert(c.store.DB(), mmkline.RebuildRequest{
-		Variety:      variety,
-		InstrumentID: l9Bar.InstrumentID,
-		IsL9:         true,
-	}); err != nil {
-		return fmt.Errorf("rebuild l9 mm bars failed: %w", err)
+	sink := c.persistSink
+	c.mu.Unlock()
+
+	tasks := make([]persistTask, 0, 8)
+	if sink == nil {
+		if err := c.store.UpsertL9MinuteBar(l9Bar); err != nil {
+			return err
+		}
+	} else {
+		tableName, err := tableNameForL9Variety(variety)
+		if err != nil {
+			return err
+		}
+		trace := runtimeTrace{
+			ReceivedAt:        sourceReceivedAt,
+			MinuteClosedAt:    time.Now(),
+			PersistEnqueuedAt: time.Now(),
+		}
+		tasks = append(tasks, persistTask{
+			Bar:          l9Bar,
+			TableName:    tableName,
+			Trace:        trace,
+			InstrumentID: l9Bar.InstrumentID,
+			IsL9:         true,
+		})
+	}
+
+	sessions, err := c.loadSessions(variety)
+	if err == nil {
+		for _, bar := range agg.Consume(l9Bar, sessions, false) {
+			if sink == nil {
+				tableName, tableErr := l9MMTableName(variety)
+				if tableErr != nil {
+					return tableErr
+				}
+				if err := c.store.upsertMinuteBarToTable(tableName, bar); err != nil {
+					return err
+				}
+			} else {
+				tableName, tableErr := l9MMTableName(variety)
+				if tableErr != nil {
+					return tableErr
+				}
+				tasks = append(tasks, persistTask{
+					Bar:          bar,
+					TableName:    tableName,
+					Trace:        runtimeTrace{ReceivedAt: sourceReceivedAt, PersistEnqueuedAt: time.Now()},
+					InstrumentID: bar.InstrumentID,
+					IsL9:         true,
+				})
+			}
+		}
+	}
+	if sink != nil && len(tasks) > 0 {
+		sink(tasks)
 	}
 	return nil
 }
 
-// snapshotBarsForMinute 提取某个品种某一分钟当前可用的全部合约 bar 快照。
 func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime time.Time) []minuteBar {
 	variety = normalizeVariety(variety)
 	if variety == "" {
@@ -242,16 +283,15 @@ func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime tim
 				instrumentIDs = append(instrumentIDs, instrumentID)
 			}
 		}
-		sort.Strings(instrumentIDs)
 	}
 	if len(instrumentIDs) == 0 {
 		return nil
 	}
 
-	var bars []minuteBar
+	out := make([]minuteBar, 0, len(instrumentIDs))
 	for _, instrumentID := range instrumentIDs {
 		if bar, ok := c.minuteBarLocked(variety, minuteKey, instrumentID); ok {
-			bars = append(bars, bar)
+			out = append(out, bar)
 			continue
 		}
 		latest, ok := c.latest[instrumentID]
@@ -259,26 +299,26 @@ func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime tim
 			continue
 		}
 		price := latest.Close
-		bars = append(bars, minuteBar{
-			Variety:         variety,
-			InstrumentID:    instrumentID,
-			Exchange:        latest.Exchange,
-			MinuteTime:      minuteTime,
-			AdjustedTime:    c.adjustedMinuteTime(minuteTime),
-			Period:          "1m",
-			Open:            price,
-			High:            price,
-			Low:             price,
-			Close:           price,
-			Volume:          0,
-			OpenInterest:    latest.OpenInterest,
-			SettlementPrice: latest.SettlementPrice,
+		out = append(out, minuteBar{
+			Variety:          variety,
+			InstrumentID:     instrumentID,
+			Exchange:         latest.Exchange,
+			MinuteTime:       minuteTime,
+			AdjustedTime:     c.adjustedMinuteTime(minuteTime),
+			SourceReceivedAt: latest.SourceReceivedAt,
+			Period:           "1m",
+			Open:             price,
+			High:             price,
+			Low:              price,
+			Close:            price,
+			Volume:           0,
+			OpenInterest:     latest.OpenInterest,
+			SettlementPrice:  latest.SettlementPrice,
 		})
 	}
-	return bars
+	return out
 }
 
-// expectedInstrumentsLocked 返回某个品种理论上应参与 L9 计算的合约集合。
 func (c *l9AsyncCalculator) expectedInstrumentsLocked(variety string) []string {
 	set := c.expected[variety]
 	if len(set) == 0 {
@@ -288,11 +328,9 @@ func (c *l9AsyncCalculator) expectedInstrumentsLocked(variety string) []string {
 	for instrumentID := range set {
 		out = append(out, instrumentID)
 	}
-	sort.Strings(out)
 	return out
 }
 
-// minuteBarLocked 读取内存中缓存的“某品种-某分钟-某合约”的 bar。
 func (c *l9AsyncCalculator) minuteBarLocked(variety string, minuteKey int64, instrumentID string) (minuteBar, bool) {
 	byMinute := c.minuteBars[variety]
 	if byMinute == nil {
@@ -306,7 +344,6 @@ func (c *l9AsyncCalculator) minuteBarLocked(variety string, minuteKey int64, ins
 	return bar, ok
 }
 
-// pruneOldMinutesLocked 清理旧分钟缓存，避免内存随运行时间持续增长。
 func (c *l9AsyncCalculator) pruneOldMinutesLocked(variety string, currentMinuteKey int64) {
 	byMinute := c.minuteBars[variety]
 	if byMinute == nil {
@@ -320,7 +357,6 @@ func (c *l9AsyncCalculator) pruneOldMinutesLocked(variety string, currentMinuteK
 	}
 }
 
-// adjustedMinuteTime 为 L9 分钟线补交易日历修正后的时间键。
 func (c *l9AsyncCalculator) adjustedMinuteTime(minuteTime time.Time) time.Time {
 	day := time.Date(minuteTime.Year(), minuteTime.Month(), minuteTime.Day(), 0, 0, 0, 0, time.Local)
 	_, adjusted, err := klineclock.BuildBarTimes(day, klineclock.HHMMFromTime(minuteTime), c.clock)
@@ -328,4 +364,13 @@ func (c *l9AsyncCalculator) adjustedMinuteTime(minuteTime time.Time) time.Time {
 		return minuteTime
 	}
 	return adjusted
+}
+
+func (c *l9AsyncCalculator) loadSessions(variety string) ([]sessiontime.Range, error) {
+	resolver := newSessionResolver(c.store.DB())
+	return resolver.Sessions(variety)
+}
+
+func l9MMTableName(variety string) (string, error) {
+	return TableNameForL9MMVariety(variety)
 }

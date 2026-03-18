@@ -36,6 +36,19 @@ type RuntimeSnapshot struct {
 	MinuteStoreMS         float64   `json:"minute_store_ms"`
 	MMQueueMS             float64   `json:"mm_queue_ms"`
 	MMRunMS               float64   `json:"mm_run_ms"`
+	RouterQueueMS         float64   `json:"router_queue_ms"`
+	ShardQueueMS          float64   `json:"shard_queue_ms"`
+	PersistQueueMS        float64   `json:"persist_queue_ms"`
+	EndToEndMS            float64   `json:"end_to_end_ms"`
+	DBFlushMS             float64   `json:"db_flush_ms"`
+	DBFlushRows           int       `json:"db_flush_rows"`
+	DBQueueDepth          int       `json:"db_queue_depth"`
+	FileFlushMS           float64   `json:"file_flush_ms"`
+	FileQueueDepth        int       `json:"file_queue_depth"`
+	ShardBacklog          []int     `json:"shard_backlog"`
+	DroppedTicks          int64     `json:"dropped_ticks"`
+	LateTicks             int64     `json:"late_ticks"`
+	Goroutines            int       `json:"goroutines"`
 	LastLatencyInstrument string    `json:"last_latency_instrument"`
 	LastLatencyStage      string    `json:"last_latency_stage"`
 	ServerTime            string    `json:"server_time"`
@@ -261,6 +274,86 @@ func (c *RuntimeStatusCenter) MarkMMRebuildLatency(instrumentID string, queueMS 
 		s.MMRunMS = runMS
 		s.LastLatencyInstrument = instrumentID
 		s.LastLatencyStage = "mm_rebuild"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkRuntimeQueues(shardBacklog []int, dbQueueDepth int, _ int64, goroutines int) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.ShardBacklog = append([]int(nil), shardBacklog...)
+		s.DBQueueDepth = dbQueueDepth
+		s.Goroutines = goroutines
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkRouterLatency(instrumentID string, queueMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.RouterQueueMS = queueMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "router_queue"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkShardLatency(instrumentID string, shardID int, queueMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.ShardQueueMS = queueMS
+		if shardID >= 0 && shardID < len(s.ShardBacklog) {
+			_ = shardID
+		}
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "shard_queue"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkUpstreamLag(instrumentID string, upstreamLagMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.UpstreamLagMS = upstreamLagMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "upstream_lag"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkPersistLatency(instrumentID string, queueMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.PersistQueueMS = queueMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "persist_queue"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkEndToEndLatency(instrumentID string, totalMS float64) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.EndToEndMS = totalMS
+		s.LastLatencyInstrument = instrumentID
+		s.LastLatencyStage = "end_to_end"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkDBFlush(rows int, flushMS float64, queueDepth int) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.DBFlushRows = rows
+		s.DBFlushMS = flushMS
+		s.DBQueueDepth = queueDepth
+		s.LastLatencyStage = "db_flush"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkFileFlush(flushMS int, queueDepth int) {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.FileFlushMS = float64(flushMS)
+		s.FileQueueDepth = queueDepth
+		s.LastLatencyStage = "file_flush"
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkTickDropped() {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.DroppedTicks++
+	})
+}
+
+func (c *RuntimeStatusCenter) MarkLateTick() {
+	c.mutate(func(s *RuntimeSnapshot) {
+		s.LateTicks++
 	})
 }
 

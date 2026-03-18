@@ -230,17 +230,8 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 
 	var session *mdSession
 	busLog, _ := s.getBusLog()
-	tickRecorder, tickRecorderErr := newTickCSVRecorder(s.cfg.FlowPath)
-	if tickRecorderErr != nil {
-		logger.Error("init tick csv recorder failed", "flow_path", s.cfg.FlowPath, "error", tickRecorderErr)
-	}
 	sideEffects := newMarketDataSideEffects(status,
 		func(t tickEvent) {
-			if tickRecorder != nil {
-				if err := tickRecorder.Append(t); err != nil {
-					logger.Error("append tick csv failed", "instrument_id", t.InstrumentID, "error", err)
-				}
-			}
 			strategy.PublishRealtimeTick(strategy.TickEvent{
 				InstrumentID:    t.InstrumentID,
 				ExchangeID:      t.ExchangeID,
@@ -307,6 +298,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks: s.cfg.DriftResumeTicks,
+		flowPath:         s.cfg.FlowPath,
 		onTick:           sideEffects.PublishTick,
 		onBar:            sideEffects.PublishBar,
 	}
