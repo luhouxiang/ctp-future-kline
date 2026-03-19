@@ -20,6 +20,19 @@ const status = reactive({
   drift_seconds: 0,
   drift_paused: false,
   drift_pause_count: 0,
+  last_drift_instrument: '',
+  last_drift_at: '',
+  upstream_lag_ms: 0,
+  callback_to_process_ms: 0,
+  router_queue_ms: 0,
+  shard_queue_ms: 0,
+  persist_queue_ms: 0,
+  db_flush_ms: 0,
+  db_flush_rows: 0,
+  db_queue_depth: 0,
+  file_flush_ms: 0,
+  file_queue_depth: 0,
+  end_to_end_ms: 0,
   server_time: '',
   trading_day: '',
   is_market_open: false,
@@ -193,6 +206,7 @@ const replaySupported = ref(false)
 let ws
 let statusPollTimer = null
 let tradePollTimer = null
+let lastLargeDriftLogKey = ''
 
 const marketBadgeClass = computed(() => (status.is_market_open ? 'badge open' : 'badge closed'))
 const marketBadgeText = computed(() => (status.is_market_open ? '开市中' : '非开市'))
@@ -250,6 +264,22 @@ function addLog(message) {
   if (logs.value.length > 80) {
     logs.value = logs.value.slice(0, 80)
   }
+}
+
+function applyStatusSnapshot(snapshot) {
+  Object.assign(status, snapshot || {})
+  const driftSeconds = Number(status.drift_seconds || 0)
+  if (!Number.isFinite(driftSeconds) || driftSeconds <= 86400) {
+    return
+  }
+  const instrumentID = String(status.last_drift_instrument || '').trim() || 'unknown'
+  const driftAt = String(status.last_drift_at || '').trim() || 'unknown'
+  const logKey = `${instrumentID}|${driftAt}`
+  if (logKey === lastLargeDriftLogKey) {
+    return
+  }
+  lastLargeDriftLogKey = logKey
+  addLog(`漂移超过86400秒: 合约=${instrumentID} drift_seconds=${driftSeconds.toFixed(3)} drift_at=${driftAt}`)
 }
 
 function formatBytes(bytes) {
@@ -325,7 +355,7 @@ async function fetchStatus() {
     throw new Error(`status http ${resp.status}`)
   }
   const data = await resp.json()
-  Object.assign(status, data.status || {})
+  applyStatusSnapshot(data.status || {})
   if (data.replay) {
     replaySupported.value = true
     applyReplayState(data.replay)
@@ -856,7 +886,7 @@ function connectWS() {
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data)
     if (msg.type === 'status_update' && msg.data?.status) {
-      Object.assign(status, msg.data.status)
+      applyStatusSnapshot(msg.data.status)
       if (msg.data.replay) {
         replaySupported.value = true
         applyReplayState(msg.data.replay)
@@ -1011,6 +1041,24 @@ onUnmounted(() => {
       <p v-if="status.last_error" style="color: #b22222">错误: {{ status.last_error }}</p>
       <p v-if="status.network_suspect" style="color: #b22222">告警: 长时间无Tick，疑似断网</p>
       <p v-if="status.drift_paused" style="color: #b22222">告警: 行情时钟漂移超阈值，已暂停写入</p>
+    </div>
+
+    <div class="panel">
+      <h3>链路耗时</h3>
+      <div class="status-grid">
+        <div class="status-item">上游时间差: {{ Number(status.upstream_lag_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">回调到入队: {{ Number(status.callback_to_process_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">路由排队时间: {{ Number(status.router_queue_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">分片排队时间: {{ Number(status.shard_queue_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 排队时间: {{ Number(status.persist_queue_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 批量执行时间: {{ Number(status.db_flush_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 本批写入行数: {{ status.db_flush_rows || 0 }}</div>
+        <div class="status-item">DB 队列深度: {{ status.db_queue_depth || 0 }}</div>
+        <div class="status-item">文件批量落盘时间: {{ Number(status.file_flush_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">文件队列深度: {{ status.file_queue_depth || 0 }}</div>
+        <div class="status-item">端到端总耗时: {{ Number(status.end_to_end_ms || 0).toFixed(1) }} ms</div>
+      </div>
+      <p>说明: 排队时间看堆积，批量执行时间看数据库写入本身，总耗时看单条数据从接收到落库的整体延迟。</p>
     </div>
 
     <div class="panel">

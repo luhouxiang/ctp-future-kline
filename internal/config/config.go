@@ -41,6 +41,7 @@ type CTPConfig struct {
 	Password                string   `json:"password"`
 	SubscribeInstruments    []string `json:"subscribe_instruments"`
 	EnableL9Async           *bool    `json:"enable_l9_async"`
+	EnableMultiMinute       *bool    `json:"enable_multi_minute"`
 	ConnectWaitSeconds      int      `json:"connect_wait_seconds"`
 	AuthenticateWaitSeconds int      `json:"authenticate_wait_seconds"`
 	LoginWaitSeconds        int      `json:"login_wait_seconds"`
@@ -386,9 +387,16 @@ func (c *AppConfig) Validate() error {
 
 func (c CTPConfig) IsL9AsyncEnabled() bool {
 	if c.EnableL9Async == nil {
-		return true
+		return false
 	}
 	return *c.EnableL9Async
+}
+
+func (c CTPConfig) IsMultiMinuteEnabled() bool {
+	if c.EnableMultiMinute == nil {
+		return false
+	}
+	return *c.EnableMultiMinute
 }
 
 func (c CTPConfig) IsMdReconnectEnabled() bool {

@@ -57,13 +57,16 @@ func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCoun
 		flushInterval = defaultDBFlushInterval
 	}
 
-	minuteCount := workerCount / 2
+	minuteCount := workerCount - 1
 	if minuteCount <= 0 {
 		minuteCount = 1
 	}
 	mmCount := workerCount - minuteCount
 	if mmCount <= 0 {
 		mmCount = 1
+		if minuteCount > 1 {
+			minuteCount--
+		}
 	}
 
 	out := &dbBatchWriter{
@@ -286,13 +289,17 @@ func (w *dbWriterWorker) flush(buffer []persistTask) []persistTask {
 	sort.Strings(tables)
 
 	totalRows := 0
+	executedStatements := 0
+	tableSummaries := make([]string, 0, len(tables))
 	for _, table := range tables {
 		batch := byTable[table]
 		if err := w.upsertBatch(table, batch); err != nil {
 			logger.Error("batch upsert failed", "table", table, "worker_id", w.id, "error", err)
 			continue
 		}
+		executedStatements++
 		totalRows += len(batch)
+		tableSummaries = append(tableSummaries, fmt.Sprintf("%s:%d", table, len(batch)))
 		for _, task := range batch {
 			endToEndMS := time.Since(task.Trace.ReceivedAt).Seconds() * 1000
 			if w.status != nil {
@@ -309,7 +316,14 @@ func (w *dbWriterWorker) flush(buffer []persistTask) []persistTask {
 		w.status.MarkDBFlush(totalRows, elapsedMS, w.pendingDepth())
 	}
 	if elapsedMS >= latencyLogThreshold.Seconds()*1000 {
-		logger.Warn("db batch flush latency", "worker_id", w.id, "rows", totalRows, "flush_ms", elapsedMS)
+		logger.Warn(
+			"db batch flush latency",
+			"worker_id", w.id,
+			"rows", totalRows,
+			"flush_ms", elapsedMS,
+			"statement_count", executedStatements,
+			"tables", strings.Join(tableSummaries, ","),
+		)
 	}
 	return buffer[:0]
 }

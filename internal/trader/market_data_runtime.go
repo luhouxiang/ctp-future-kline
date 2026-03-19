@@ -21,8 +21,8 @@ const (
 	defaultShardChannelCapacity   = 8192
 	defaultPersistQueueCapacity   = 16384
 	defaultFileQueueCapacity      = 16384
-	defaultDBWriterCount          = 4
-	defaultDBFlushBatch           = 200
+	defaultDBWriterCount          = 12
+	defaultDBFlushBatch           = 128
 	defaultDBFlushInterval        = 100 * time.Millisecond
 	defaultFileFlushInterval      = 200 * time.Millisecond
 	defaultFileFsyncInterval      = time.Second
@@ -36,6 +36,7 @@ type runtimeOptions struct {
 	tickDedupWindow  time.Duration
 	driftThreshold   time.Duration
 	driftResumeTicks int
+	enableMultiMinute bool
 	flowPath         string
 	onTick           func(tickEvent)
 	onBar            func(minuteBar)
@@ -371,13 +372,26 @@ func (r *marketDataRuntime) publishQueueMetrics() {
 	}
 }
 
+func (r *marketDataRuntime) currentTradingDay() string {
+	if r == nil || r.status == nil {
+		return ""
+	}
+	return strings.TrimSpace(r.status.TradingDay())
+}
+
 func (r *marketDataRuntime) onLiveTick(in tickInputData) error {
+	tradingDay := r.currentTradingDay()
+	if tradingDay == "" {
+		tradingDay = strings.TrimSpace(in.TradingDay)
+	}
 	return r.enqueue(runtimeTick{
 		tickEvent: tickEvent{
 			InstrumentID:    strings.TrimSpace(in.InstrumentID),
 			ExchangeID:      strings.TrimSpace(in.ExchangeID),
+			RawActionDay:    strings.TrimSpace(in.ActionDay),
+			RawTradingDay:   strings.TrimSpace(in.TradingDay),
 			ActionDay:       strings.TrimSpace(in.ActionDay),
-			TradingDay:      strings.TrimSpace(in.TradingDay),
+			TradingDay:      tradingDay,
 			UpdateTime:      strings.TrimSpace(in.UpdateTime),
 			UpdateMillisec:  in.UpdateMillisec,
 			ReceivedAt:      in.ReceivedAt,
@@ -394,6 +408,16 @@ func (r *marketDataRuntime) onLiveTick(in tickInputData) error {
 
 func (r *marketDataRuntime) onReplayTick(ev tickEvent) error {
 	r.logFirstReplayProcess(ev)
+	if strings.TrimSpace(ev.RawActionDay) == "" {
+		ev.RawActionDay = ev.ActionDay
+	}
+	if strings.TrimSpace(ev.RawTradingDay) == "" {
+		ev.RawTradingDay = ev.TradingDay
+	}
+	tradingDay := r.currentTradingDay()
+	if tradingDay != "" {
+		ev.TradingDay = tradingDay
+	}
 	return r.enqueue(runtimeTick{tickEvent: ev, replay: true})
 }
 
@@ -415,6 +439,9 @@ func (r *marketDataRuntime) enqueue(t runtimeTick) error {
 	routeAt := time.Now()
 	shardID := r.shardForInstrument(instrumentID)
 	t.SideEffectEnqueuedAt = routeAt
+	if !t.replay && shardID >= 0 && shardID < len(r.shards) && r.shards[shardID].fileWriter != nil {
+		r.shards[shardID].fileWriter.Enqueue(t.tickEvent)
+	}
 	select {
 	case r.shards[shardID].in <- t:
 		atomic.StoreInt64(&r.shardQueueDepthGauge[shardID], int64(len(r.shards[shardID].in)))
@@ -601,14 +628,32 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		TradingDay:     t.TradingDay,
 		UpdateTime:     t.UpdateTime,
 		UpdateMillisec: t.UpdateMillisec,
+		BidPrice1:      t.BidPrice1,
+		AskPrice1:      t.AskPrice1,
 	}, price, currentVol, openInterest)
 	if s.runtime.opts.tickDedupWindow > 0 && fingerprint == state.lastFingerprint.fingerprint && now.Sub(state.lastFingerprint.at) <= s.runtime.opts.tickDedupWindow {
 		if s.runtime.status != nil {
 			s.runtime.status.MarkTickDedupDropped()
 		}
+		prevTick := state.lastFingerprint.tick
+		dupKind := "runtime_normalized_duplicate"
+		if sameRawMarketData(prevTick, t.tickEvent) {
+			dupKind = "upstream_raw_duplicate"
+		}
+		logger.Warn(
+			"tick dedup dropped",
+			"instrument_id", instrumentID,
+			"duplicate_kind", dupKind,
+			"dedup_window_ms", s.runtime.opts.tickDedupWindow.Milliseconds(),
+			"since_previous_ms", now.Sub(state.lastFingerprint.at).Milliseconds(),
+			"effective_prev", formatTickForLog(prevTick, false),
+			"effective_curr", formatTickForLog(t.tickEvent, false),
+			"raw_prev", formatTickForLog(prevTick, true),
+			"raw_curr", formatTickForLog(t.tickEvent, true),
+		)
 		return
 	}
-	state.lastFingerprint = tickFingerprintState{fingerprint: fingerprint, at: now}
+	state.lastFingerprint = tickFingerprintState{fingerprint: fingerprint, at: now, tick: t.tickEvent}
 
 	upstreamLagMS := now.Sub(adjustedTickTime).Seconds() * 1000
 	shardQueueMS := dequeuedAt.Sub(t.ProcessStartedAt).Seconds() * 1000
@@ -621,7 +666,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	if shouldCheckTickDrift(now, adjustedTickTime) {
 		driftSec := math.Abs(now.Sub(adjustedTickTime).Seconds())
 		if s.runtime.status != nil {
-			s.runtime.status.MarkDrift(driftSec, false)
+			s.runtime.status.MarkDrift(instrumentID, driftSec, false)
 			s.runtime.status.MarkUpstreamLag(instrumentID, upstreamLagMS)
 		}
 		if driftSec > s.runtime.opts.driftThreshold.Seconds() {
@@ -640,9 +685,6 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	if s.runtime.opts.onTick != nil {
 		t.SideEffectEnqueuedAt = dequeuedAt
 		s.runtime.opts.onTick(t.tickEvent)
-	}
-	if s.fileWriter != nil {
-		s.fileWriter.Enqueue(t.tickEvent)
 	}
 
 	volumeDelta := int64(0)
@@ -752,6 +794,50 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	}
 }
 
+func sameRawMarketData(a tickEvent, b tickEvent) bool {
+	return strings.TrimSpace(a.InstrumentID) == strings.TrimSpace(b.InstrumentID) &&
+		strings.TrimSpace(a.ExchangeID) == strings.TrimSpace(b.ExchangeID) &&
+		strings.TrimSpace(a.RawTradingDay) == strings.TrimSpace(b.RawTradingDay) &&
+		strings.TrimSpace(a.RawActionDay) == strings.TrimSpace(b.RawActionDay) &&
+		strings.TrimSpace(a.UpdateTime) == strings.TrimSpace(b.UpdateTime) &&
+		a.UpdateMillisec == b.UpdateMillisec &&
+		a.LastPrice == b.LastPrice &&
+		a.Volume == b.Volume &&
+		a.OpenInterest == b.OpenInterest &&
+		a.SettlementPrice == b.SettlementPrice &&
+		a.BidPrice1 == b.BidPrice1 &&
+		a.AskPrice1 == b.AskPrice1
+}
+
+func formatTickForLog(ev tickEvent, raw bool) string {
+	actionDay := strings.TrimSpace(ev.ActionDay)
+	tradingDay := strings.TrimSpace(ev.TradingDay)
+	if raw {
+		if strings.TrimSpace(ev.RawActionDay) != "" {
+			actionDay = strings.TrimSpace(ev.RawActionDay)
+		}
+		if strings.TrimSpace(ev.RawTradingDay) != "" {
+			tradingDay = strings.TrimSpace(ev.RawTradingDay)
+		}
+	}
+	return fmt.Sprintf(
+		"received_at=%s instrument_id=%s exchange_id=%s trading_day=%s action_day=%s update_time=%s update_millisec=%d last_price=%.8f volume=%d open_interest=%.8f settlement_price=%.8f bid_price1=%.8f ask_price1=%.8f",
+		ev.ReceivedAt.Format("2006-01-02 15:04:05.000"),
+		strings.TrimSpace(ev.InstrumentID),
+		strings.TrimSpace(ev.ExchangeID),
+		tradingDay,
+		actionDay,
+		strings.TrimSpace(ev.UpdateTime),
+		ev.UpdateMillisec,
+		ev.LastPrice,
+		ev.Volume,
+		ev.OpenInterest,
+		ev.SettlementPrice,
+		ev.BidPrice1,
+		ev.AskPrice1,
+	)
+}
+
 func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTrace, flush bool) []persistTask {
 	tasks := make([]persistTask, 0, 8)
 	tableName, err := tableNameForVariety(closedBar.Variety)
@@ -766,7 +852,7 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 	}
 
 	sessions, err := s.runtime.sessionResolver.Sessions(closedBar.Variety)
-	if err == nil {
+	if err == nil && s.runtime.opts.enableMultiMinute {
 		state := s.state[closedBar.InstrumentID]
 		if state != nil {
 			aggBars := state.aggregator.Consume(closedBar, sessions, flush)

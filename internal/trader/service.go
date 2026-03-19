@@ -226,7 +226,10 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		return nil, nil, nil, fmt.Errorf("no instruments to subscribe")
 	}
 	expectedByVariety := buildExpectedVarietyInstruments(queriedInstruments, subscribeTargets)
-	l9Calc := newL9AsyncCalculator(store, s.cfg.IsL9AsyncEnabled(), 1, expectedByVariety)
+	var l9Calc *l9AsyncCalculator
+	if s.cfg.IsL9AsyncEnabled() {
+		l9Calc = newL9AsyncCalculator(store, true, 1, expectedByVariety)
+	}
 
 	var session *mdSession
 	busLog, _ := s.getBusLog()
@@ -298,6 +301,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks: s.cfg.DriftResumeTicks,
+		enableMultiMinute: s.cfg.IsMultiMinuteEnabled(),
 		flowPath:         s.cfg.FlowPath,
 		onTick:           sideEffects.PublishTick,
 		onBar:            sideEffects.PublishBar,

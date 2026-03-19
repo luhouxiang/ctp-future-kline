@@ -36,11 +36,15 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 	if err != nil {
 		return nil, err
 	}
-	l9Calc := newL9AsyncCalculator(store, cfg.IsL9AsyncEnabled(), 1, nil)
+	var l9Calc *l9AsyncCalculator
+	if cfg.IsL9AsyncEnabled() {
+		l9Calc = newL9AsyncCalculator(store, true, 1, nil)
+	}
 	spi := newMdSpiWithStatusAndOptions(store, l9Calc, status, mdSpiOptions{
 		tickDedupWindow:  time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:   time.Duration(cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks: cfg.DriftResumeTicks,
+		enableMultiMinute: cfg.IsMultiMinuteEnabled(),
 		flowPath:         cfg.FlowPath,
 		onTick: func(t tickEvent) {
 			strategy.PublishReplayTick(strategy.TickEvent{

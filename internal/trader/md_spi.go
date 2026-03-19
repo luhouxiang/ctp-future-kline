@@ -31,6 +31,7 @@ type mdSpiOptions struct {
 	tickDedupWindow  time.Duration
 	driftThreshold   time.Duration
 	driftResumeTicks int
+	enableMultiMinute bool
 	flowPath         string
 	onTick           func(tickEvent)
 	onBar            func(minuteBar)
@@ -39,6 +40,8 @@ type mdSpiOptions struct {
 type tickEvent struct {
 	InstrumentID         string
 	ExchangeID           string
+	RawActionDay         string
+	RawTradingDay        string
 	ActionDay            string
 	TradingDay           string
 	UpdateTime           string
@@ -88,6 +91,7 @@ type minuteTickSnapshot struct {
 type tickFingerprintState struct {
 	fingerprint string
 	at          time.Time
+	tick        tickEvent
 }
 
 func newMdSpi(store *klineStore, l9Async *l9AsyncCalculator) *mdSpi {
@@ -111,6 +115,7 @@ func newMdSpiWithStatusAndOptions(store *klineStore, l9Async *l9AsyncCalculator,
 		tickDedupWindow:  opts.tickDedupWindow,
 		driftThreshold:   opts.driftThreshold,
 		driftResumeTicks: opts.driftResumeTicks,
+		enableMultiMinute: opts.enableMultiMinute,
 		flowPath:         opts.flowPath,
 		onTick:           opts.onTick,
 		onBar:            opts.onBar,
@@ -248,7 +253,7 @@ func shouldCheckTickDrift(now time.Time, adjustedTickTime time.Time) bool {
 
 func buildTickDedupFingerprint(in tickInputData, price float64, currentVol int, openInterest float64) string {
 	return fmt.Sprintf(
-		"%s|%s|%s|%03d|%.8f|%d|%.8f",
+		"%s|%s|%s|%03d|%.8f|%d|%.8f|%.8f|%.8f",
 		strings.TrimSpace(in.TradingDay),
 		strings.TrimSpace(in.ActionDay),
 		strings.TrimSpace(in.UpdateTime),
@@ -256,6 +261,8 @@ func buildTickDedupFingerprint(in tickInputData, price float64, currentVol int, 
 		price,
 		currentVol,
 		openInterest,
+		in.BidPrice1,
+		in.AskPrice1,
 	)
 }
 

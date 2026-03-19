@@ -28,6 +28,8 @@ type RuntimeSnapshot struct {
 	DriftSeconds          float64   `json:"drift_seconds"`
 	DriftPaused           bool      `json:"drift_paused"`
 	DriftPauseCnt         int64     `json:"drift_pause_count"`
+	LastDriftInstrument   string    `json:"last_drift_instrument"`
+	LastDriftAt           time.Time `json:"last_drift_at"`
 	UpstreamLagMS         float64   `json:"upstream_lag_ms"`
 	CallbackToProcMS      float64   `json:"callback_to_process_ms"`
 	LockWaitMS            float64   `json:"lock_wait_ms"`
@@ -87,6 +89,15 @@ func (c *RuntimeStatusCenter) Snapshot(now time.Time) RuntimeSnapshot {
 	}
 	out.IsMarketOpen = now.Sub(out.LastTickTime) <= c.marketOpenStale
 	return out
+}
+
+func (c *RuntimeStatusCenter) TradingDay() string {
+	if c == nil {
+		return ""
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.snapshot.TradingDay
 }
 
 func (c *RuntimeStatusCenter) Subscribe() (<-chan RuntimeSnapshot, func()) {
@@ -220,9 +231,11 @@ func (c *RuntimeStatusCenter) MarkTickDedupDropped() {
 	})
 }
 
-func (c *RuntimeStatusCenter) MarkDrift(driftSec float64, paused bool) {
+func (c *RuntimeStatusCenter) MarkDrift(instrumentID string, driftSec float64, paused bool) {
 	c.mutate(func(s *RuntimeSnapshot) {
 		s.DriftSeconds = driftSec
+		s.LastDriftInstrument = instrumentID
+		s.LastDriftAt = time.Now()
 		wasPaused := s.DriftPaused
 		s.DriftPaused = paused
 		if paused && !wasPaused {

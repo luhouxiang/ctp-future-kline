@@ -110,12 +110,18 @@ func (w *shardFileWriter) append(ev tickEvent) error {
 		w.files[inst] = f
 	}
 
+	tradingDay := ev.TradingDay
+	actionDay := ev.ActionDay
+	if strings.TrimSpace(ev.RawActionDay) != "" {
+		actionDay = ev.RawActionDay
+	}
+
 	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%d\n",
 		ev.ReceivedAt.Format("2006-01-02 15:04:05.000"),
 		ev.InstrumentID,
 		ev.ExchangeID,
-		ev.TradingDay,
-		ev.ActionDay,
+		tradingDay,
+		actionDay,
 		ev.UpdateTime,
 		ev.LastPrice,
 		ev.Volume,

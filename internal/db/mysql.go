@@ -55,8 +55,8 @@ func Open(dsn string) (*sql.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	db.SetMaxOpenConns(20)
-	db.SetMaxIdleConns(10)
+	db.SetMaxOpenConns(48)
+	db.SetMaxIdleConns(24)
 	db.SetConnMaxLifetime(30 * time.Minute)
 	if err := db.Ping(); err != nil {
 		_ = db.Close()
