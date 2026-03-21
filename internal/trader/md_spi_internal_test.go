@@ -1,6 +1,7 @@
 package trader
 
 import (
+	"math"
 	"testing"
 	"time"
 )
@@ -21,5 +22,16 @@ func TestShouldCheckTickDriftNearTradingDayOnly(t *testing.T) {
 	}
 	if shouldCheckTickDrift(now, oldDay) {
 		t.Fatal("old day tick should not check drift")
+	}
+}
+
+func TestSanitizeSettlementPriceResetsExtremeValueToZero(t *testing.T) {
+	t.Parallel()
+
+	if got := sanitizeSettlementPrice(math.MaxFloat64); got != 0 {
+		t.Fatalf("sanitizeSettlementPrice(MaxFloat64) = %v, want 0", got)
+	}
+	if got := sanitizeSettlementPrice(5427.25); got != 5427.25 {
+		t.Fatalf("sanitizeSettlementPrice(normal) = %v, want 5427.25", got)
 	}
 }

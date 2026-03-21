@@ -203,7 +203,7 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 		LastPrice:       pDepthMarketData.GetLastPrice(),
 		Volume:          pDepthMarketData.GetVolume(),
 		OpenInterest:    pDepthMarketData.GetOpenInterest(),
-		SettlementPrice: pDepthMarketData.GetSettlementPrice(),
+		SettlementPrice: sanitizeSettlementPrice(pDepthMarketData.GetSettlementPrice()),
 		BidPrice1:       pDepthMarketData.GetBidPrice1(),
 		AskPrice1:       pDepthMarketData.GetAskPrice1(),
 	})
@@ -338,6 +338,13 @@ func computeBucketVolume(currentVol int, prevBucketCloseVol int, hasPrevBucket b
 
 func isValidTradePrice(price float64) bool {
 	return isFinitePrice(price) && price > 0
+}
+
+func sanitizeSettlementPrice(price float64) float64 {
+	if !isFinitePrice(price) {
+		return 0
+	}
+	return price
 }
 
 func isFinitePrice(price float64) bool {
