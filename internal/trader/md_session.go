@@ -12,25 +12,39 @@ import (
 )
 
 type mdSessionOps struct {
-	login         func() error
-	subscribe     func() error
-	now           func() time.Time
-	sleep         func(time.Duration)
+	// login 在重连流程中触发一次 MD 登录。
+	login func() error
+	// subscribe 在登录成功后重新发起订阅。
+	subscribe func() error
+	// now 允许测试注入当前时间。
+	now func() time.Time
+	// sleep 允许测试替换等待逻辑。
+	sleep func(time.Duration)
+	// logWarnNoTick 在长时间无 tick 时输出告警。
 	logWarnNoTick func()
 }
 
 type mdSession struct {
-	cfg              config.CTPConfig
-	status           *RuntimeStatusCenter
+	// cfg 保存行情会话的重连和告警配置。
+	cfg config.CTPConfig
+	// status 用于向外同步断线、重连和网络怀疑状态。
+	status *RuntimeStatusCenter
+	// subscribeTargets 保存断线重连后需要重新订阅的合约列表。
 	subscribeTargets []string
-	ops              mdSessionOps
+	// ops 保存可替换的重连动作和时间函数。
+	ops mdSessionOps
 
+	// disconnectCh 接收 mdSpi 上报的断线 reason。
 	disconnectCh chan int
 
-	mu            sync.Mutex
-	reconnecting  bool
+	// mu 保护 reconnecting、networkWarned 和 rng。
+	mu sync.Mutex
+	// reconnecting 表示当前是否已经有重连流程在跑。
+	reconnecting bool
+	// networkWarned 用于避免连续重复打印无 tick 告警。
 	networkWarned bool
-	rng           *rand.Rand
+	// rng 用于给退避等待注入随机抖动。
+	rng *rand.Rand
 }
 
 func newMDSession(cfg config.CTPConfig, status *RuntimeStatusCenter, subscribeTargets []string, ops mdSessionOps) *mdSession {

@@ -15,25 +15,41 @@ import (
 const timeLayout = "2006-01-02 15:04:05"
 
 type Item struct {
-	TableName  string    `json:"table_name"`
-	Symbol     string    `json:"symbol"`
-	SymbolNorm string    `json:"symbol_norm"`
-	Variety    string    `json:"variety"`
-	Exchange   string    `json:"exchange"`
-	Kind       string    `json:"kind"`
-	MinTime    time.Time `json:"min_time"`
-	MaxTime    time.Time `json:"max_time"`
-	BarCount   int64     `json:"bar_count"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	// TableName 是索引命中的底层 K 线表名。
+	TableName string `json:"table_name"`
+	// Symbol 是展示给前端的合约或品种标识。
+	Symbol string `json:"symbol"`
+	// SymbolNorm 是标准化后的 symbol，用于搜索和去重。
+	SymbolNorm string `json:"symbol_norm"`
+	// Variety 是品种代码。
+	Variety string `json:"variety"`
+	// Exchange 是交易所代码。
+	Exchange string `json:"exchange"`
+	// Kind 表示 instrument、l9、mm 等数据类型。
+	Kind string `json:"kind"`
+	// MinTime 是表内最早数据时间。
+	MinTime time.Time `json:"min_time"`
+	// MaxTime 是表内最晚数据时间。
+	MaxTime time.Time `json:"max_time"`
+	// BarCount 是表内记录总数。
+	BarCount int64 `json:"bar_count"`
+	// UpdatedAt 是索引刷新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Manager struct {
-	dbPath          string
+	// dbPath 是业务数据库连接串。
+	dbPath string
+	// refreshInterval 控制索引自动刷新周期。
 	refreshInterval time.Duration
 
-	mu          sync.Mutex
-	cond        *sync.Cond
-	refreshing  bool
+	// mu 保护刷新状态。
+	mu sync.Mutex
+	// cond 用于协调并发刷新请求。
+	cond *sync.Cond
+	// refreshing 标记当前是否有刷新在进行。
+	refreshing bool
+	// lastRefresh 记录最近一次刷新时间。
 	lastRefresh time.Time
 }
 

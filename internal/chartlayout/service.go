@@ -6,6 +6,7 @@ import (
 )
 
 type Service struct {
+	// store 是图表布局持久化存储。
 	store *Store
 }
 

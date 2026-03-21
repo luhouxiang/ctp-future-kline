@@ -16,60 +16,112 @@ const (
 )
 
 type RuntimeSnapshot struct {
-	State                 string    `json:"state"`
-	TraderFront           bool      `json:"trader_front"`
-	TraderLogin           bool      `json:"trader_login"`
-	MdFront               bool      `json:"md_front"`
-	MdLogin               bool      `json:"md_login"`
-	MdSubscribed          bool      `json:"md_subscribed"`
-	MdFrontDown           bool      `json:"md_front_disconnected"`
-	MdDownReason          int       `json:"md_disconnect_reason"`
-	MdReconnectTry        int       `json:"md_reconnect_attempt"`
-	MdNextRetryAt         time.Time `json:"md_next_retry_at"`
-	NetworkSuspect        bool      `json:"network_suspect"`
-	TickDedupDrop         int64     `json:"tick_dedup_dropped"`
-	DriftSeconds          float64   `json:"drift_seconds"`
-	DriftPaused           bool      `json:"drift_paused"`
-	DriftPauseCnt         int64     `json:"drift_pause_count"`
-	LastDriftInstrument   string    `json:"last_drift_instrument"`
-	LastDriftAt           time.Time `json:"last_drift_at"`
-	UpstreamLagMS         float64   `json:"upstream_lag_ms"`
-	CallbackToProcMS      float64   `json:"callback_to_process_ms"`
-	LockWaitMS            float64   `json:"lock_wait_ms"`
-	SideEffectTickQueueMS float64   `json:"side_effect_tick_queue_ms"`
-	SideEffectBarQueueMS  float64   `json:"side_effect_bar_queue_ms"`
-	MinuteStoreMS         float64   `json:"minute_store_ms"`
-	MMQueueMS             float64   `json:"mm_queue_ms"`
-	MMRunMS               float64   `json:"mm_run_ms"`
-	RouterQueueMS         float64   `json:"router_queue_ms"`
-	ShardQueueMS          float64   `json:"shard_queue_ms"`
-	PersistQueueMS        float64   `json:"persist_queue_ms"`
-	EndToEndMS            float64   `json:"end_to_end_ms"`
-	DBFlushMS             float64   `json:"db_flush_ms"`
-	DBFlushRows           int       `json:"db_flush_rows"`
-	DBQueueDepth          int       `json:"db_queue_depth"`
-	FileFlushMS           float64   `json:"file_flush_ms"`
-	FileQueueDepth        int       `json:"file_queue_depth"`
-	ShardBacklog          []int     `json:"shard_backlog"`
-	DroppedTicks          int64     `json:"dropped_ticks"`
-	LateTicks             int64     `json:"late_ticks"`
-	Goroutines            int       `json:"goroutines"`
-	LastLatencyInstrument string    `json:"last_latency_instrument"`
-	LastLatencyStage      string    `json:"last_latency_stage"`
-	ServerTime            string    `json:"server_time"`
-	LastTickTime          time.Time `json:"last_tick_time"`
-	IsMarketOpen          bool      `json:"is_market_open"`
-	LastError             string    `json:"last_error"`
-	UpdatedAt             time.Time `json:"updated_at"`
-	TradingDay            string    `json:"trading_day"`
-	SubscribeCount        int       `json:"subscribe_count"`
+	// State 描述行情主链路的整体状态，如 idle、starting、running、error。
+	State string `json:"state"`
+	// TraderFront 表示 Trader 前置是否已连通。
+	TraderFront bool `json:"trader_front"`
+	// TraderLogin 表示 Trader 会话是否已登录成功。
+	TraderLogin bool `json:"trader_login"`
+	// MdFront 表示行情前置是否已连通。
+	MdFront bool `json:"md_front"`
+	// MdLogin 表示行情会话是否已登录成功。
+	MdLogin bool `json:"md_login"`
+	// MdSubscribed 表示行情订阅是否已发起且处于有效状态。
+	MdSubscribed bool `json:"md_subscribed"`
+	// MdFrontDown 表示最近一次状态是否为行情前置断开。
+	MdFrontDown bool `json:"md_front_disconnected"`
+	// MdDownReason 保存行情断开时的 CTP reason code。
+	MdDownReason int `json:"md_disconnect_reason"`
+	// MdReconnectTry 是当前或最近一次自动重连尝试次数。
+	MdReconnectTry int `json:"md_reconnect_attempt"`
+	// MdNextRetryAt 是预计下一次重连时间。
+	MdNextRetryAt time.Time `json:"md_next_retry_at"`
+	// NetworkSuspect 表示虽然连接还在，但系统怀疑链路已卡住或无行情。
+	NetworkSuspect bool `json:"network_suspect"`
+	// TickDedupDrop 是重复 tick 被丢弃的累计次数。
+	TickDedupDrop int64 `json:"tick_dedup_dropped"`
+	// DriftSeconds 是最近一次 tick 业务时间与本地时间的偏移秒数。
+	DriftSeconds float64 `json:"drift_seconds"`
+	// DriftPaused 表示系统当前是否处于时间漂移暂停告警状态。
+	DriftPaused bool `json:"drift_paused"`
+	// DriftPauseCnt 是累计进入漂移暂停状态的次数。
+	DriftPauseCnt int64 `json:"drift_pause_count"`
+	// LastDriftInstrument 是最近一次产生漂移指标的合约。
+	LastDriftInstrument string `json:"last_drift_instrument"`
+	// LastDriftAt 是最近一次刷新漂移指标的时间。
+	LastDriftAt time.Time `json:"last_drift_at"`
+	// UpstreamLagMS 是最近一次 tick 从业务时间到本地接收时间的延迟。
+	UpstreamLagMS float64 `json:"upstream_lag_ms"`
+	// CallbackToProcMS 是 CTP 回调到进入处理逻辑之间的延迟。
+	CallbackToProcMS float64 `json:"callback_to_process_ms"`
+	// LockWaitMS 是处理链路等待关键锁的耗时。
+	LockWaitMS float64 `json:"lock_wait_ms"`
+	// SideEffectTickQueueMS 是 tick 旁路事件排队耗时。
+	SideEffectTickQueueMS float64 `json:"side_effect_tick_queue_ms"`
+	// SideEffectBarQueueMS 是 bar 旁路事件排队耗时。
+	SideEffectBarQueueMS float64 `json:"side_effect_bar_queue_ms"`
+	// MinuteStoreMS 是分钟线单次写入存储耗时。
+	MinuteStoreMS float64 `json:"minute_store_ms"`
+	// MMQueueMS 是多周期聚合任务进入队列前的等待耗时。
+	MMQueueMS float64 `json:"mm_queue_ms"`
+	// MMRunMS 是多周期聚合实际执行耗时。
+	MMRunMS float64 `json:"mm_run_ms"`
+	// RouterQueueMS 是 tick 从入口到分片路由入队的耗时。
+	RouterQueueMS float64 `json:"router_queue_ms"`
+	// ShardQueueMS 是 tick 在 shard 内排队等待处理的耗时。
+	ShardQueueMS float64 `json:"shard_queue_ms"`
+	// PersistQueueMS 是持久化任务在 DB writer 中排队的耗时。
+	PersistQueueMS float64 `json:"persist_queue_ms"`
+	// EndToEndMS 是 tick 从接收到最终落库的总耗时。
+	EndToEndMS float64 `json:"end_to_end_ms"`
+	// DBFlushMS 是最近一批数据库 flush 的耗时。
+	DBFlushMS float64 `json:"db_flush_ms"`
+	// DBFlushRows 是最近一批数据库 flush 的行数。
+	DBFlushRows int `json:"db_flush_rows"`
+	// DBQueueDepth 是当前 DB writer 队列深度。
+	DBQueueDepth int `json:"db_queue_depth"`
+	// FileFlushMS 是最近一次文件刷盘耗时。
+	FileFlushMS float64 `json:"file_flush_ms"`
+	// FileQueueDepth 是当前文件写队列深度。
+	FileQueueDepth int `json:"file_queue_depth"`
+	// ShardBacklog 展示每个行情 shard 当前积压量。
+	ShardBacklog []int `json:"shard_backlog"`
+	// DroppedTicks 是因为队列打满等原因被直接丢弃的 tick 数。
+	DroppedTicks int64 `json:"dropped_ticks"`
+	// LateTicks 是时间漂移过大的 tick 计数。
+	LateTicks int64 `json:"late_ticks"`
+	// Goroutines 是当前进程 goroutine 数，用于观察运行压力。
+	Goroutines int `json:"goroutines"`
+	// LastLatencyInstrument 是最近一次刷新延迟指标时对应的合约。
+	LastLatencyInstrument string `json:"last_latency_instrument"`
+	// LastLatencyStage 是最近一次刷新延迟指标的阶段名称。
+	LastLatencyStage string `json:"last_latency_stage"`
+	// ServerTime 是对前端展示的服务端参考时间。
+	ServerTime string `json:"server_time"`
+	// LastTickTime 是最近一次成功进入处理链路的 tick 接收时间。
+	LastTickTime time.Time `json:"last_tick_time"`
+	// IsMarketOpen 是根据最近 tick 活跃度推断出的市场是否开市。
+	IsMarketOpen bool `json:"is_market_open"`
+	// LastError 保存主链路最近一次错误信息。
+	LastError string `json:"last_error"`
+	// UpdatedAt 是快照最后更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
+	// TradingDay 是当前识别到的交易日。
+	TradingDay string `json:"trading_day"`
+	// SubscribeCount 是当前成功订阅的合约数量。
+	SubscribeCount int `json:"subscribe_count"`
 }
 
 type RuntimeStatusCenter struct {
-	mu                sync.RWMutex
-	marketOpenStale   time.Duration
-	snapshot          RuntimeSnapshot
-	subscribers       map[chan RuntimeSnapshot]struct{}
+	// mu 保护 snapshot 和订阅者集合的并发读写。
+	mu sync.RWMutex
+	// marketOpenStale 是最近 tick 超过多久后判定市场不再活跃的阈值。
+	marketOpenStale time.Duration
+	// snapshot 保存当前最新的行情运行状态快照。
+	snapshot RuntimeSnapshot
+	// subscribers 保存订阅状态更新的监听者。
+	subscribers map[chan RuntimeSnapshot]struct{}
+	// subscriberBufSize 是状态订阅通道的缓冲大小。
 	subscriberBufSize int
 }
 

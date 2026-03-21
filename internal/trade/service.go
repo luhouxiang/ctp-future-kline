@@ -18,19 +18,31 @@ import (
 )
 
 type Service struct {
-	cfg       config.TradeConfig
-	ctpCfg    config.CTPConfig
-	store     *Store
-	gateway   Gateway
+	// cfg 保存交易子系统本身的启用和风控配置。
+	cfg config.TradeConfig
+	// ctpCfg 保存交易侧复用的 CTP 接入参数。
+	ctpCfg config.CTPConfig
+	// store 是交易子系统的持久化存储。
+	store *Store
+	// gateway 是底层 CTP 交易网关抽象。
+	gateway Gateway
+	// accountID 是系统内部统一使用的账户标识。
 	accountID string
 
-	mu        sync.RWMutex
-	status    TradeStatus
-	account   TradingAccountSnapshot
+	// mu 保护 status、account、positions 这些内存快照。
+	mu sync.RWMutex
+	// status 是当前交易链路状态快照。
+	status TradeStatus
+	// account 是最近一次账户资金快照。
+	account TradingAccountSnapshot
+	// positions 是最近一次持仓快照。
 	positions []PositionSnapshot
 
-	subs   map[chan EventEnvelope]struct{}
+	// subs 保存订阅交易事件的监听者。
+	subs map[chan EventEnvelope]struct{}
+	// subsMu 保护 subs 集合。
 	subsMu sync.Mutex
+	// busLog 用于把订单指令等事件旁路写到 bus，总线可选。
 	busLog *bus.FileLog
 }
 

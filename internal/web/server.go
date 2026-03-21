@@ -37,21 +37,35 @@ import (
 )
 
 type Server struct {
-	cfg      config.AppConfig
-	status   *trader.RuntimeStatusCenter
-	runtime  runtimeStarter
-	search   *searchindex.Manager
-	query    *klinequery.Service
+	// cfg 保存整个应用配置，供路由和子模块装配时使用。
+	cfg config.AppConfig
+	// status 是行情运行时统一状态中心，对应 /api/status 中的 status 字段。
+	status *trader.RuntimeStatusCenter
+	// runtime 是行情主链路启动入口，通常为 trader.RuntimeManager。
+	runtime runtimeStarter
+	// search 是搜索索引管理器，用于关键字检索 K 线记录。
+	search *searchindex.Manager
+	// query 提供 K 线查询和图表数据接口。
+	query *klinequery.Service
+	// calendar 管理交易日历查询与导入。
 	calendar *calendar.Manager
-	replay   *replay.Service
-	chart    *chartlayout.Service
+	// replay 是回放任务调度服务，可为空表示未启用。
+	replay *replay.Service
+	// chart 是图表布局和绘图对象存储服务。
+	chart *chartlayout.Service
+	// strategy 是策略子系统控制器，可为空表示未启用。
 	strategy *strategy.Manager
-	trade    *trade.Service
+	// trade 是实盘交易服务，可为空表示未启用。
+	trade *trade.Service
 
-	mu        sync.Mutex
+	// mu 保护导入会话和 websocket 连接集合等共享状态。
+	mu sync.Mutex
+	// wsWriteMu 串行化 websocket 写操作，避免多个 goroutine 同时写同一连接。
 	wsWriteMu sync.Mutex
-	sessions  map[string]*importer.TDXImportSession
-	wsConns   map[*websocket.Conn]struct{}
+	// sessions 保存当前上传/导入任务会话。
+	sessions map[string]*importer.TDXImportSession
+	// wsConns 保存当前在线的 websocket 客户端连接。
+	wsConns map[*websocket.Conn]struct{}
 }
 
 type runtimeStarter interface {
@@ -1440,7 +1454,9 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 }
 
 type sessionHandler struct {
-	server    *Server
+	// server 用于把导入过程中的进度和冲突事件广播到前端。
+	server *Server
+	// sessionID 标识当前导入会话，便于前后端关联事件。
 	sessionID string
 }
 

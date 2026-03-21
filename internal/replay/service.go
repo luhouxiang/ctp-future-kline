@@ -28,46 +28,81 @@ const (
 // StartRequest 描述一次 replay 任务的输入范围与推进方式。
 // 它既支持从 bus 日志读取，也支持从 tick_dir 直接读取 CSV。
 type StartRequest struct {
-	Topics     []string        `json:"topics"`
-	Sources    []string        `json:"sources"`
-	StartTime  *time.Time      `json:"start_time"`
-	EndTime    *time.Time      `json:"end_time"`
-	Mode       string          `json:"mode"`
-	Speed      float64         `json:"speed"`
+	// Topics 指定需要回放的 bus topic 列表。
+	Topics []string `json:"topics"`
+	// Sources 指定回放来源，例如 bus 或 replay.tickcsv。
+	Sources []string `json:"sources"`
+	// StartTime 指定回放起始时间，可为空表示不限制下界。
+	StartTime *time.Time `json:"start_time"`
+	// EndTime 指定回放结束时间，可为空表示不限制上界。
+	EndTime *time.Time `json:"end_time"`
+	// Mode 指定回放模式，例如 fast 或 realtime。
+	Mode string `json:"mode"`
+	// Speed 指定回放速度倍率。
+	Speed float64 `json:"speed"`
+	// FromCursor 指定 bus 文件回放起始游标。
 	FromCursor *bus.FileCursor `json:"from_cursor"`
-	TickDir    string          `json:"tick_dir"`
-	FullReplay bool            `json:"full_replay"`
+	// TickDir 指定 tick CSV 回放目录。
+	TickDir string `json:"tick_dir"`
+	// FullReplay 表示开始前是否清空去重记录并做全量回放。
+	FullReplay bool `json:"full_replay"`
 }
 
 // TaskSnapshot 是 replay 任务的可观测状态快照。
 // Web 接口和调试日志都依赖它向外暴露当前推进位置与统计信息。
 type TaskSnapshot struct {
-	TaskID              string          `json:"task_id"`
-	Status              string          `json:"status"`
-	Mode                string          `json:"mode"`
-	Speed               float64         `json:"speed"`
-	Topics              []string        `json:"topics"`
-	Sources             []string        `json:"sources"`
-	StartTime           *time.Time      `json:"start_time"`
-	EndTime             *time.Time      `json:"end_time"`
-	FromCursor          *bus.FileCursor `json:"from_cursor"`
-	LastCursor          *bus.FileCursor `json:"last_cursor"`
-	TickDir             string          `json:"tick_dir"`
-	TickFiles           int             `json:"tick_files"`
-	Instruments         int             `json:"instruments"`
-	TotalTicks          int64           `json:"total_ticks"`
-	ProcessedTicks      int64           `json:"processed_ticks"`
-	CurrentInstrumentID string          `json:"current_instrument_id"`
-	CurrentSimTime      *time.Time      `json:"current_sim_time"`
-	FirstSimTime        *time.Time      `json:"first_sim_time"`
-	LastSimTime         *time.Time      `json:"last_sim_time"`
-	Dispatched          int64           `json:"dispatched"`
-	Skipped             int64           `json:"skipped"`
-	Errors              int64           `json:"errors"`
-	LastError           string          `json:"last_error"`
-	CreatedAt           time.Time       `json:"created_at"`
-	StartedAt           time.Time       `json:"started_at"`
-	FinishedAt          time.Time       `json:"finished_at"`
+	// TaskID 是本次回放任务唯一标识。
+	TaskID string `json:"task_id"`
+	// Status 是当前任务状态。
+	Status string `json:"status"`
+	// Mode 是当前任务回放模式。
+	Mode string `json:"mode"`
+	// Speed 是当前回放速度倍率。
+	Speed float64 `json:"speed"`
+	// Topics 是本任务订阅的 topic 列表。
+	Topics []string `json:"topics"`
+	// Sources 是本任务使用的数据源列表。
+	Sources []string `json:"sources"`
+	// StartTime 是用户请求的起始时间。
+	StartTime *time.Time `json:"start_time"`
+	// EndTime 是用户请求的结束时间。
+	EndTime *time.Time `json:"end_time"`
+	// FromCursor 是任务起始游标。
+	FromCursor *bus.FileCursor `json:"from_cursor"`
+	// LastCursor 是任务当前推进到的最新游标。
+	LastCursor *bus.FileCursor `json:"last_cursor"`
+	// TickDir 是 tick CSV 回放目录。
+	TickDir string `json:"tick_dir"`
+	// TickFiles 是本次加载到的 tick CSV 文件数。
+	TickFiles int `json:"tick_files"`
+	// Instruments 是本次回放涉及的合约数量。
+	Instruments int `json:"instruments"`
+	// TotalTicks 是预计总 tick 数。
+	TotalTicks int64 `json:"total_ticks"`
+	// ProcessedTicks 是已处理的 tick 数。
+	ProcessedTicks int64 `json:"processed_ticks"`
+	// CurrentInstrumentID 是当前正在处理的合约。
+	CurrentInstrumentID string `json:"current_instrument_id"`
+	// CurrentSimTime 是当前模拟时间。
+	CurrentSimTime *time.Time `json:"current_sim_time"`
+	// FirstSimTime 是任务内第一条事件时间。
+	FirstSimTime *time.Time `json:"first_sim_time"`
+	// LastSimTime 是任务内最后一条事件时间。
+	LastSimTime *time.Time `json:"last_sim_time"`
+	// Dispatched 是已成功分发给 consumer 的事件数。
+	Dispatched int64 `json:"dispatched"`
+	// Skipped 是被过滤或跳过的事件数。
+	Skipped int64 `json:"skipped"`
+	// Errors 是执行过程中累计错误数。
+	Errors int64 `json:"errors"`
+	// LastError 是最近一次错误消息。
+	LastError string `json:"last_error"`
+	// CreatedAt 是任务对象创建时间。
+	CreatedAt time.Time `json:"created_at"`
+	// StartedAt 是任务真正开始运行时间。
+	StartedAt time.Time `json:"started_at"`
+	// FinishedAt 是任务结束时间。
+	FinishedAt time.Time `json:"finished_at"`
 }
 
 type ConsumerFunc func(ctx context.Context, ev bus.BusEvent) error
@@ -83,16 +118,26 @@ type TaskLifecycle interface {
 // 3. consumer 分发：把每条事件投递给注册的消费方
 // 4. 去重存储：避免同一 consumer 重复消费同一事件
 type Service struct {
-	reader                  *bus.FileLog
-	dedup                   *bus.ConsumerStore
+	// reader 是 bus 文件日志读取入口。
+	reader *bus.FileLog
+	// dedup 保存 replay consumer 去重状态。
+	dedup *bus.ConsumerStore
+	// replayAllowOrderCommand 控制回放期间是否允许订单指令事件透传。
 	replayAllowOrderCommand bool
 
-	mu                sync.Mutex
-	activeID          string
-	cancel            context.CancelFunc
-	snapshot          TaskSnapshot
-	consumers         map[string]ConsumerFunc
-	hooks             map[string]TaskLifecycle
+	// mu 保护当前活动任务和 consumer 注册表。
+	mu sync.Mutex
+	// activeID 是当前活动任务 ID，为空表示没有活动任务。
+	activeID string
+	// cancel 用于取消当前活动任务。
+	cancel context.CancelFunc
+	// snapshot 保存当前任务快照。
+	snapshot TaskSnapshot
+	// consumers 保存已注册的事件消费者。
+	consumers map[string]ConsumerFunc
+	// hooks 保存任务生命周期回调。
+	hooks map[string]TaskLifecycle
+	// seenFirstDispatch 用于记录首条分发日志是否已打印。
 	seenFirstDispatch map[string]struct{}
 }
 

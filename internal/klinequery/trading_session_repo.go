@@ -13,24 +13,36 @@ import (
 )
 
 type tradingSessionRange struct {
+	// Start 是 JSON 中的起始 HH:MM。
 	Start string `json:"start"`
-	End   string `json:"end"`
+	// End 是 JSON 中的结束 HH:MM。
+	End string `json:"end"`
 }
 
 type sessionMinuteRange struct {
+	// Start 是交易时段起始分钟。
 	Start int
-	End   int
+	// End 是交易时段结束分钟。
+	End int
 }
 
 type tradingSessionRecord struct {
-	Variety       string
-	SessionText   string
-	SessionJSON   string
-	IsCompleted   bool
-	SampleDate    sql.NullTime
+	// Variety 是品种代码。
+	Variety string
+	// SessionText 是交易时段的文本表示。
+	SessionText string
+	// SessionJSON 是交易时段的结构化 JSON 表示。
+	SessionJSON string
+	// IsCompleted 表示该品种时段是否已经确认完整。
+	IsCompleted bool
+	// SampleDate 是用于推断时段的样本交易日。
+	SampleDate sql.NullTime
+	// ValidatedDate 是最后一次验证通过的交易日。
 	ValidatedDate sql.NullTime
-	MatchRatio    float64
-	UpdatedAt     time.Time
+	// MatchRatio 是时段推断和实际数据匹配度。
+	MatchRatio float64
+	// UpdatedAt 是记录更新时间。
+	UpdatedAt time.Time
 }
 
 func loadTradingSession(db *sql.DB, variety string) (tradingSessionRecord, bool, error) {

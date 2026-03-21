@@ -13,10 +13,14 @@ import (
 )
 
 type RuntimeManager struct {
-	cfg    config.CTPConfig
+	// cfg 保存行情主链路运行所需的 CTP 配置。
+	cfg config.CTPConfig
+	// status 指向全局行情状态中心，用于同步启动和运行结果。
 	status *RuntimeStatusCenter
 
-	mu      sync.Mutex
+	// mu 保护 started 状态，避免重复启动行情主链路。
+	mu sync.Mutex
+	// started 标记是否已经触发过 Start。
 	started bool
 }
 

@@ -19,14 +19,21 @@ import (
 )
 
 type CTPGateway struct {
-	cfg      config.CTPConfig
+	// cfg 保存交易侧复用的 CTP 接入参数。
+	cfg config.CTPConfig
+	// tradeCfg 保存交易子系统配置，如账户 ID 和结算确认策略。
 	tradeCfg config.TradeConfig
 
-	api    ctp.CThostFtdcTraderApi
-	spi    *ctpTradeSpi
+	// api 是底层 Trader API 实例。
+	api ctp.CThostFtdcTraderApi
+	// spi 是交易回调适配器。
+	spi *ctpTradeSpi
+	// status 以原子方式保存当前交易状态，供并发读。
 	status atomic.Pointer[TradeStatus]
 
-	mu      sync.Mutex
+	// mu 保护启动和关闭过程。
+	mu sync.Mutex
+	// started 标记网关是否已经完成启动。
 	started bool
 }
 
@@ -382,46 +389,75 @@ func (g *CTPGateway) setStatus(fn func(*TradeStatus)) {
 }
 
 type loginResult struct {
+	// TradingDay 是登录返回的当前交易日。
 	TradingDay string
-	FrontID    int
-	SessionID  int
-	Err        error
+	// FrontID 是登录返回的 FrontID。
+	FrontID int
+	// SessionID 是登录返回的 SessionID。
+	SessionID int
+	// Err 是登录阶段错误。
+	Err error
 }
 
 type queryResult struct {
-	reqID     int
-	done      chan queryResult
-	err       error
-	accounts  []TradingAccountSnapshot
+	// reqID 是本次查询对应的请求号。
+	reqID int
+	// done 在查询回调最后一条到达时回传完整结果。
+	done chan queryResult
+	// err 保存本次查询的错误结果。
+	err error
+	// accounts 保存账户查询结果，通常只会有一条。
+	accounts []TradingAccountSnapshot
+	// positions 保存持仓查询结果。
 	positions []PositionSnapshot
-	orders    []OrderRecord
-	trades    []TradeRecord
+	// orders 保存委托查询结果。
+	orders []OrderRecord
+	// trades 保存成交查询结果。
+	trades []TradeRecord
 }
 
 type ctpTradeSpi struct {
 	ctp.TraderSpi
 
+	// accountID 是系统内部账户标识，会灌入各类快照对象。
 	accountID string
 
-	reqIDSeq    atomic.Int64
+	// reqIDSeq 生成递增请求号。
+	reqIDSeq atomic.Int64
+	// orderRefSeq 生成递增本地报单引用。
 	orderRefSeq atomic.Int64
 
+	// frontConnected 在前置连接成功时写入信号。
 	frontConnected chan struct{}
-	authResp       chan error
-	loginResp      chan loginResult
+	// authResp 接收认证响应结果。
+	authResp chan error
+	// loginResp 接收登录结果。
+	loginResp chan loginResult
+	// settlementResp 接收结算确认结果。
 	settlementResp chan error
 
-	mu                  sync.Mutex
-	connected           bool
-	loggedIn            bool
+	// mu 保护动态查询状态和事件订阅者。
+	mu sync.Mutex
+	// connected 表示前置是否已连接。
+	connected bool
+	// loggedIn 表示登录是否已成功。
+	loggedIn bool
+	// settlementConfirmed 表示结算确认是否已完成。
 	settlementConfirmed bool
-	tradingDayValue     string
-	frontIDValue        int
-	sessionIDValue      int
-	lastErr             string
-	queryWaiters        map[int]*queryResult
-	commandByOrderRef   map[string]string
-	subscribers         map[chan GatewayEvent]struct{}
+	// tradingDayValue 保存当前交易日。
+	tradingDayValue string
+	// frontIDValue 保存当前会话 FrontID。
+	frontIDValue int
+	// sessionIDValue 保存当前会话 SessionID。
+	sessionIDValue int
+	// lastErr 保存最近一次底层错误信息。
+	lastErr string
+	// queryWaiters 保存 reqID 到查询结果容器的映射。
+	queryWaiters map[int]*queryResult
+	// commandByOrderRef 记录 order_ref 到 command_id 的映射，便于回报反查。
+	commandByOrderRef map[string]string
+	// subscribers 保存网关事件监听者。
+	subscribers map[chan GatewayEvent]struct{}
 }
 
 func newCTPTradeSpi(accountID string) *ctpTradeSpi {

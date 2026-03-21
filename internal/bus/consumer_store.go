@@ -8,6 +8,7 @@ import (
 )
 
 type ConsumerStore struct {
+	// db 是去重存储使用的数据库连接。
 	db *sql.DB
 }
 

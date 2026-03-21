@@ -14,21 +14,33 @@ import (
 )
 
 type SearchItem struct {
-	Type      string `json:"type"`
-	Symbol    string `json:"symbol"`
-	Variety   string `json:"variety"`
-	Exchange  string `json:"exchange"`
-	MinTime   string `json:"min_time"`
-	MaxTime   string `json:"max_time"`
-	BarCount  int64  `json:"bar_count"`
+	// Type 表示命中数据类型，如 instrument、l9、mm。
+	Type string `json:"type"`
+	// Symbol 是展示给前端的合约或品种名。
+	Symbol string `json:"symbol"`
+	// Variety 是品种代码。
+	Variety string `json:"variety"`
+	// Exchange 是交易所代码。
+	Exchange string `json:"exchange"`
+	// MinTime 是该数据集起始时间。
+	MinTime string `json:"min_time"`
+	// MaxTime 是该数据集结束时间。
+	MaxTime string `json:"max_time"`
+	// BarCount 是总 bar 数量。
+	BarCount int64 `json:"bar_count"`
+	// TableName 是底层命中的数据库表名。
 	TableName string `json:"table_name"`
 }
 
 type SearchResponse struct {
-	Items    []SearchItem `json:"items"`
-	Total    int          `json:"total"`
-	Page     int          `json:"page"`
-	PageSize int          `json:"page_size"`
+	// Items 是当前页结果列表。
+	Items []SearchItem `json:"items"`
+	// Total 是总命中数量。
+	Total int `json:"total"`
+	// Page 是当前页码。
+	Page int `json:"page"`
+	// PageSize 是当前页大小。
+	PageSize int `json:"page_size"`
 }
 
 type KlineBar struct {
@@ -50,21 +62,30 @@ type MACDPoint struct {
 }
 
 type BarsMeta struct {
-	Symbol   string `json:"symbol"`
-	Type     string `json:"type"`
-	Variety  string `json:"variety"`
+	// Symbol 是当前查询的展示 symbol。
+	Symbol string `json:"symbol"`
+	// Type 是当前查询类型。
+	Type string `json:"type"`
+	// Variety 是品种代码。
+	Variety string `json:"variety"`
+	// Exchange 是交易所代码。
 	Exchange string `json:"exchange"`
 }
 
 type BarsResponse struct {
-	Meta BarsMeta    `json:"meta"`
-	Bars []KlineBar  `json:"bars"`
+	// Meta 是当前 bars 查询的元信息。
+	Meta BarsMeta `json:"meta"`
+	// Bars 是 K 线序列。
+	Bars []KlineBar `json:"bars"`
+	// MACD 是可选的 MACD 指标序列。
 	MACD []MACDPoint `json:"macd"`
 }
 
 type Service struct {
+	// dbPath 是业务数据库连接串。
 	dbPath string
-	index  *searchindex.Manager
+	// index 是表级索引管理器。
+	index *searchindex.Manager
 }
 
 func NewService(dbPath string, index *searchindex.Manager) *Service {

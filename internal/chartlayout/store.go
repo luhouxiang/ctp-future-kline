@@ -13,6 +13,7 @@ import (
 )
 
 type Store struct {
+	// db 是图表布局使用的数据库连接。
 	db *sql.DB
 }
 

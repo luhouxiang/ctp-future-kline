@@ -24,44 +24,74 @@ import (
 const dateLayout = "2006-01-02"
 
 type Config struct {
-	AutoUpdateOnStart  bool
-	MinFutureOpenDays  int
-	SourceURL          string
-	SourceCSVPath      string
+	// AutoUpdateOnStart 控制服务启动时是否自动检查并刷新交易日历。
+	AutoUpdateOnStart bool
+	// MinFutureOpenDays 是未来至少应保证存在的开市交易日数量。
+	MinFutureOpenDays int
+	// SourceURL 是在线抓取公告时使用的入口地址。
+	SourceURL string
+	// SourceCSVPath 是本地 CSV 导入时使用的文件路径。
+	SourceCSVPath string
+	// CheckIntervalHours 是后台定期检查日历的周期。
 	CheckIntervalHours int
-	BrowserFallback    bool
-	BrowserPath        string
-	BrowserHeadless    bool
+	// BrowserFallback 控制抓取失败时是否使用浏览器兜底。
+	BrowserFallback bool
+	// BrowserPath 指定浏览器兜底抓取时的浏览器可执行文件。
+	BrowserPath string
+	// BrowserHeadless 控制浏览器兜底抓取是否启用无头模式。
+	BrowserHeadless bool
 }
 
 type Status struct {
-	TotalRows            int    `json:"total_rows"`
-	OpenRows             int    `json:"open_rows"`
-	MinDate              string `json:"min_date"`
-	MaxDate              string `json:"max_date"`
-	MaxOpenTradeDate     string `json:"max_open_trade_date"`
-	LastCheckAt          string `json:"last_check_at"`
-	LastSuccessAt        string `json:"last_success_at"`
-	LastSource           string `json:"last_source"`
-	LastError            string `json:"last_error"`
-	NeedFutureDays       int    `json:"need_future_days"`
-	DaysToHorizon        int    `json:"days_to_horizon"`
-	NeedsAutoUpdate      bool   `json:"needs_auto_update"`
-	LastAnnouncementYear int    `json:"last_announcement_year"`
+	// TotalRows 是 trading_calendar 表总行数。
+	TotalRows int `json:"total_rows"`
+	// OpenRows 是标记为开市的交易日行数。
+	OpenRows int `json:"open_rows"`
+	// MinDate 是表内最早日期。
+	MinDate string `json:"min_date"`
+	// MaxDate 是表内最晚日期。
+	MaxDate string `json:"max_date"`
+	// MaxOpenTradeDate 是最近一个开市交易日。
+	MaxOpenTradeDate string `json:"max_open_trade_date"`
+	// LastCheckAt 是最近一次检查时间。
+	LastCheckAt string `json:"last_check_at"`
+	// LastSuccessAt 是最近一次成功刷新时间。
+	LastSuccessAt string `json:"last_success_at"`
+	// LastSource 是最近一次成功刷新的来源标记。
+	LastSource string `json:"last_source"`
+	// LastError 是最近一次刷新错误。
+	LastError string `json:"last_error"`
+	// NeedFutureDays 是系统要求保证的未来交易日数量。
+	NeedFutureDays int `json:"need_future_days"`
+	// DaysToHorizon 是当前还能覆盖的未来开市日数量。
+	DaysToHorizon int `json:"days_to_horizon"`
+	// NeedsAutoUpdate 表示当前是否需要自动刷新。
+	NeedsAutoUpdate bool `json:"needs_auto_update"`
+	// LastAnnouncementYear 是最近一次成功导入公告对应年份。
+	LastAnnouncementYear int `json:"last_announcement_year"`
 }
 
 type TDXDailyImportResult struct {
-	ImportedDays     int    `json:"imported_days"`
-	DeletedRangeRows int    `json:"deleted_range_rows"`
-	MinDate          string `json:"min_date"`
-	MaxDate          string `json:"max_date"`
-	LastSource       string `json:"last_source"`
-	TableName        string `json:"table_name"`
-	WriteSuccess     bool   `json:"write_success"`
+	// ImportedDays 是本次导入写入的交易日数量。
+	ImportedDays int `json:"imported_days"`
+	// DeletedRangeRows 是导入前按区间删除的旧记录数。
+	DeletedRangeRows int `json:"deleted_range_rows"`
+	// MinDate 是本次导入最早日期。
+	MinDate string `json:"min_date"`
+	// MaxDate 是本次导入最晚日期。
+	MaxDate string `json:"max_date"`
+	// LastSource 是本次导入来源标识。
+	LastSource string `json:"last_source"`
+	// TableName 是写入目标表名。
+	TableName string `json:"table_name"`
+	// WriteSuccess 表示数据库写入是否成功。
+	WriteSuccess bool `json:"write_success"`
 }
 
 type Manager struct {
+	// dbPath 是业务数据库连接串。
 	dbPath string
+	// source 是 SHFE 公告数据源抽象。
 	source SHFESource
 }
 

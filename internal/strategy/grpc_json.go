@@ -24,87 +24,131 @@ func init() {
 type HealthRequest struct{}
 
 type HealthResponse struct {
-	OK         bool   `json:"ok"`
-	Version    string `json:"version"`
+	// OK 表示健康检查是否通过。
+	OK bool `json:"ok"`
+	// Version 是策略服务版本。
+	Version string `json:"version"`
+	// ServerTime 是策略服务当前时间。
 	ServerTime string `json:"server_time"`
 }
 
 type ListStrategiesRequest struct{}
 
 type ListStrategiesResponse struct {
+	// Strategies 是当前服务暴露的策略定义列表。
 	Strategies []StrategyDefinition `json:"strategies"`
 }
 
 type LoadStrategyRequest struct {
+	// StrategyID 是待加载策略定义 ID。
 	StrategyID string `json:"strategy_id"`
 }
 
 type StartInstanceRequest struct {
+	// Instance 是待启动的策略实例配置。
 	Instance StrategyInstance `json:"instance"`
 }
 
 type StopInstanceRequest struct {
+	// InstanceID 是待停止的策略实例 ID。
 	InstanceID string `json:"instance_id"`
 }
 
 type DecisionRequest struct {
-	Instance        StrategyInstance `json:"instance"`
-	Symbol          string           `json:"symbol"`
-	EventTime       string           `json:"event_time"`
-	Mode            string           `json:"mode"`
-	CurrentPosition float64          `json:"current_position"`
-	Account         map[string]any   `json:"account"`
-	Tick            *TickEvent       `json:"tick,omitempty"`
-	Bar             *BarEvent        `json:"bar,omitempty"`
+	// Instance 是当前触发决策的策略实例。
+	Instance StrategyInstance `json:"instance"`
+	// Symbol 是当前事件对应合约。
+	Symbol string `json:"symbol"`
+	// EventTime 是事件时间。
+	EventTime string `json:"event_time"`
+	// Mode 是运行模式，如 realtime 或 replay。
+	Mode string `json:"mode"`
+	// CurrentPosition 是当前持仓。
+	CurrentPosition float64 `json:"current_position"`
+	// Account 是账户快照扩展信息。
+	Account map[string]any `json:"account"`
+	// Tick 是 tick 驱动决策时附带的 tick 数据。
+	Tick *TickEvent `json:"tick,omitempty"`
+	// Bar 是 bar 驱动决策时附带的 bar 数据。
+	Bar *BarEvent `json:"bar,omitempty"`
 }
 
 type SignalDecision struct {
-	InstanceID     string         `json:"instance_id"`
-	Symbol         string         `json:"symbol"`
-	EventTime      string         `json:"event_time"`
-	TargetPosition float64        `json:"target_position"`
-	Confidence     float64        `json:"confidence"`
-	Reason         string         `json:"reason"`
-	Metrics        map[string]any `json:"metrics"`
+	// InstanceID 是发出信号的实例 ID。
+	InstanceID string `json:"instance_id"`
+	// Symbol 是目标合约。
+	Symbol string `json:"symbol"`
+	// EventTime 是信号事件时间。
+	EventTime string `json:"event_time"`
+	// TargetPosition 是目标仓位。
+	TargetPosition float64 `json:"target_position"`
+	// Confidence 是置信度。
+	Confidence float64 `json:"confidence"`
+	// Reason 是信号原因说明。
+	Reason string `json:"reason"`
+	// Metrics 是附带的策略指标。
+	Metrics map[string]any `json:"metrics"`
 }
 
 type BacktestRequest struct {
-	RunID      string           `json:"run_id"`
-	Instance   StrategyInstance `json:"instance"`
-	Symbol     string           `json:"symbol"`
-	Timeframe  string           `json:"timeframe"`
-	StartTime  string           `json:"start_time"`
-	EndTime    string           `json:"end_time"`
-	Parameters map[string]any   `json:"parameters"`
+	// RunID 是回测任务 ID。
+	RunID string `json:"run_id"`
+	// Instance 是回测使用的策略实例配置。
+	Instance StrategyInstance `json:"instance"`
+	// Symbol 是回测标的。
+	Symbol string `json:"symbol"`
+	// Timeframe 是回测周期。
+	Timeframe string `json:"timeframe"`
+	// StartTime 是回测起始时间。
+	StartTime string `json:"start_time"`
+	// EndTime 是回测结束时间。
+	EndTime string `json:"end_time"`
+	// Parameters 是回测参数集。
+	Parameters map[string]any `json:"parameters"`
 }
 
 type BacktestResponse struct {
-	RunID   string         `json:"run_id"`
-	Status  string         `json:"status"`
+	// RunID 是回测任务 ID。
+	RunID string `json:"run_id"`
+	// Status 是回测状态。
+	Status string `json:"status"`
+	// Summary 是摘要结果。
 	Summary map[string]any `json:"summary"`
-	Result  map[string]any `json:"result"`
+	// Result 是详细结果载荷。
+	Result map[string]any `json:"result"`
 }
 
 type BacktestResultRequest struct {
+	// RunID 是要查询结果的回测任务 ID。
 	RunID string `json:"run_id"`
 }
 
 type ParameterSweepRequest struct {
-	StrategyID string           `json:"strategy_id"`
-	Symbol     string           `json:"symbol"`
-	Timeframe  string           `json:"timeframe"`
-	Grid       map[string][]any `json:"grid"`
-	StartTime  string           `json:"start_time"`
-	EndTime    string           `json:"end_time"`
+	// StrategyID 是待优化策略 ID。
+	StrategyID string `json:"strategy_id"`
+	// Symbol 是优化标的。
+	Symbol string `json:"symbol"`
+	// Timeframe 是优化周期。
+	Timeframe string `json:"timeframe"`
+	// Grid 是参数搜索网格。
+	Grid map[string][]any `json:"grid"`
+	// StartTime 是优化起始时间。
+	StartTime string `json:"start_time"`
+	// EndTime 是优化结束时间。
+	EndTime string `json:"end_time"`
 }
 
 type ParameterSweepResponse struct {
-	RunID   string         `json:"run_id"`
-	Status  string         `json:"status"`
+	// RunID 是参数扫描任务 ID。
+	RunID string `json:"run_id"`
+	// Status 是扫描任务状态。
+	Status string `json:"status"`
+	// Summary 是优化摘要结果。
 	Summary map[string]any `json:"summary"`
 }
 
 type StrategyServiceClient struct {
+	// cc 是底层 gRPC 连接。
 	cc *grpc.ClientConn
 }
 

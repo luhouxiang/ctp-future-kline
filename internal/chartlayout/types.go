@@ -6,80 +6,136 @@ import (
 )
 
 type DrawingPoint struct {
-	Time  int64    `json:"time"`
+	// Time 是绘图锚点对应的时间戳。
+	Time int64 `json:"time"`
+	// Price 是绘图锚点对应的价格，允许为空表示纯时间点。
 	Price *float64 `json:"price,omitempty"`
 }
 
 type DrawingStyle struct {
-	Color   string   `json:"color"`
-	Width   *float64 `json:"width,omitempty"`
-	Fill    string   `json:"fill,omitempty"`
+	// Color 是主颜色。
+	Color string `json:"color"`
+	// Width 是线宽。
+	Width *float64 `json:"width,omitempty"`
+	// Fill 是填充色。
+	Fill string `json:"fill,omitempty"`
+	// Opacity 是透明度。
 	Opacity *float64 `json:"opacity,omitempty"`
 }
 
 type DrawingObject struct {
-	ID           string         `json:"id"`
-	Type         string         `json:"type"`
-	Owner        string         `json:"owner"`
-	Symbol       string         `json:"symbol"`
-	Kind         string         `json:"type_kind"`
-	Variety      string         `json:"variety"`
-	Timeframe    string         `json:"timeframe"`
-	ObjectClass  string         `json:"object_class,omitempty"`
-	Points       []DrawingPoint `json:"points"`
-	Text         string         `json:"text,omitempty"`
-	Style        DrawingStyle   `json:"style"`
-	StartTime    int64          `json:"start_time,omitempty"`
-	EndTime      int64          `json:"end_time,omitempty"`
-	StartPrice   *float64       `json:"start_price,omitempty"`
-	EndPrice     *float64       `json:"end_price,omitempty"`
-	LineColor    string         `json:"line_color,omitempty"`
-	LineWidth    *float64       `json:"line_width,omitempty"`
-	LineStyle    string         `json:"line_style,omitempty"`
-	LeftCap      string         `json:"left_cap,omitempty"`
-	RightCap     string         `json:"right_cap,omitempty"`
-	LabelText    string         `json:"label_text,omitempty"`
-	LabelPos     string         `json:"label_pos,omitempty"`
-	LabelAlign   string         `json:"label_align,omitempty"`
-	VisibleRange string         `json:"visible_range,omitempty"`
-	Locked       bool           `json:"locked"`
-	Visible      bool           `json:"visible"`
-	Z            int64          `json:"z"`
-	CreatedAt    time.Time      `json:"created_at"`
-	UpdatedAt    time.Time      `json:"updated_at"`
+	// ID 是绘图对象唯一标识。
+	ID string `json:"id"`
+	// Type 是绘图类型，例如 line、ray、rect。
+	Type string `json:"type"`
+	// Owner 是布局归属者。
+	Owner string `json:"owner"`
+	// Symbol 是绘图所属 symbol。
+	Symbol string `json:"symbol"`
+	// Kind 是绘图所属数据类型。
+	Kind string `json:"type_kind"`
+	// Variety 是品种代码。
+	Variety string `json:"variety"`
+	// Timeframe 是所属周期。
+	Timeframe string `json:"timeframe"`
+	// ObjectClass 是附加对象分类。
+	ObjectClass string `json:"object_class,omitempty"`
+	// Points 是绘图锚点集合。
+	Points []DrawingPoint `json:"points"`
+	// Text 是文本类绘图内容。
+	Text string `json:"text,omitempty"`
+	// Style 是通用样式配置。
+	Style DrawingStyle `json:"style"`
+	// StartTime 是线段或区域起始时间。
+	StartTime int64 `json:"start_time,omitempty"`
+	// EndTime 是线段或区域结束时间。
+	EndTime int64 `json:"end_time,omitempty"`
+	// StartPrice 是起始价格。
+	StartPrice *float64 `json:"start_price,omitempty"`
+	// EndPrice 是结束价格。
+	EndPrice *float64 `json:"end_price,omitempty"`
+	// LineColor 是线条颜色覆盖值。
+	LineColor string `json:"line_color,omitempty"`
+	// LineWidth 是线条宽度覆盖值。
+	LineWidth *float64 `json:"line_width,omitempty"`
+	// LineStyle 是线型。
+	LineStyle string `json:"line_style,omitempty"`
+	// LeftCap 是左端点样式。
+	LeftCap string `json:"left_cap,omitempty"`
+	// RightCap 是右端点样式。
+	RightCap string `json:"right_cap,omitempty"`
+	// LabelText 是对象标签文本。
+	LabelText string `json:"label_text,omitempty"`
+	// LabelPos 是标签位置。
+	LabelPos string `json:"label_pos,omitempty"`
+	// LabelAlign 是标签对齐方式。
+	LabelAlign string `json:"label_align,omitempty"`
+	// VisibleRange 指定对象的可见范围策略。
+	VisibleRange string `json:"visible_range,omitempty"`
+	// Locked 表示对象是否禁止编辑。
+	Locked bool `json:"locked"`
+	// Visible 表示对象是否显示。
+	Visible bool `json:"visible"`
+	// Z 是绘图层级。
+	Z int64 `json:"z"`
+	// CreatedAt 是对象创建时间。
+	CreatedAt time.Time `json:"created_at"`
+	// UpdatedAt 是对象最后更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type PaneSettings struct {
+	// RightWatchlistOpen 表示右侧观察列表是否展开。
 	RightWatchlistOpen bool `json:"right_watchlist_open"`
-	BottomPanelOpen    bool `json:"bottom_panel_open"`
+	// BottomPanelOpen 表示底部面板是否展开。
+	BottomPanelOpen bool `json:"bottom_panel_open"`
 }
 
 type IndicatorSettings struct {
-	MA20   bool `json:"ma20"`
-	MACD   bool `json:"macd"`
+	// MA20 控制是否显示 MA20。
+	MA20 bool `json:"ma20"`
+	// MACD 控制是否显示 MACD。
+	MACD bool `json:"macd"`
+	// Volume 控制是否显示成交量。
 	Volume bool `json:"volume"`
 }
 
 type ChannelDisplaySettings struct {
-	ShowExtrema    bool `json:"show_extrema"`
-	ShowRansac     bool `json:"show_ransac"`
+	// ShowExtrema 控制是否显示极值法通道。
+	ShowExtrema bool `json:"show_extrema"`
+	// ShowRansac 控制是否显示 RANSAC 通道。
+	ShowRansac bool `json:"show_ransac"`
+	// ShowRegression 控制是否显示回归通道。
 	ShowRegression bool `json:"show_regression"`
 }
 
 type ChannelCommonSettings struct {
-	WindowSizeMinute int     `json:"window_size_minute"`
-	WindowSizeHour   int     `json:"window_size_hour"`
-	WindowSizeDay    int     `json:"window_size_day"`
-	StepDivisor      int     `json:"step_divisor"`
-	InsideRatioMin   float64 `json:"inside_ratio_min"`
-	MinTouches       int     `json:"min_touches"`
-	NmsIoU           float64 `json:"nms_iou"`
-	NmsSlopeFactor   float64 `json:"nms_slope_factor"`
-	MaxSegments      int     `json:"max_segments"`
-	ShowTopAutoN     int     `json:"show_top_auto_n"`
-	HideAuto         bool    `json:"hide_auto"`
-	LiveApply        bool    `json:"live_apply"`
-	ShowLabels       bool    `json:"show_labels"`
+	// WindowSizeMinute 是分钟级窗口大小。
+	WindowSizeMinute int `json:"window_size_minute"`
+	// WindowSizeHour 是小时级窗口大小。
+	WindowSizeHour int `json:"window_size_hour"`
+	// WindowSizeDay 是日级窗口大小。
+	WindowSizeDay int `json:"window_size_day"`
+	// StepDivisor 控制窗口滑动步长分母。
+	StepDivisor int `json:"step_divisor"`
+	// InsideRatioMin 是通道内部点占比阈值。
+	InsideRatioMin float64 `json:"inside_ratio_min"`
+	// MinTouches 是有效通道的最小触碰次数。
+	MinTouches int `json:"min_touches"`
+	// NmsIoU 是通道去重时的 IoU 阈值。
+	NmsIoU float64 `json:"nms_iou"`
+	// NmsSlopeFactor 是通道去重时斜率相似度阈值。
+	NmsSlopeFactor float64 `json:"nms_slope_factor"`
+	// MaxSegments 是每次最多保留的通道段数。
+	MaxSegments int `json:"max_segments"`
+	// ShowTopAutoN 控制自动展示前 N 个候选通道。
+	ShowTopAutoN int `json:"show_top_auto_n"`
+	// HideAuto 控制是否隐藏自动通道。
+	HideAuto bool `json:"hide_auto"`
+	// LiveApply 控制实时计算时是否自动应用通道结果。
+	LiveApply bool `json:"live_apply"`
+	// ShowLabels 控制是否显示通道标签。
+	ShowLabels bool `json:"show_labels"`
 }
 
 type ChannelExtremaSettings struct {
@@ -105,26 +161,38 @@ type ChannelExtremaSettings struct {
 }
 
 type ChannelRansacSettings struct {
-	PivotKMinute      int     `json:"pivot_k_minute"`
-	PivotKHour        int     `json:"pivot_k_hour"`
-	PivotKDay         int     `json:"pivot_k_day"`
+	// PivotKMinute 是分钟级拐点识别参数。
+	PivotKMinute int `json:"pivot_k_minute"`
+	// PivotKHour 是小时级拐点识别参数。
+	PivotKHour int `json:"pivot_k_hour"`
+	// PivotKDay 是日级拐点识别参数。
+	PivotKDay int `json:"pivot_k_day"`
+	// ResidualAtrFactor 是残差容忍 ATR 系数。
 	ResidualAtrFactor float64 `json:"residual_atr_factor"`
+	// SlopeTolAtrFactor 是斜率容忍 ATR 系数。
 	SlopeTolAtrFactor float64 `json:"slope_tol_atr_factor"`
 }
 
 type ChannelRegressionSettings struct {
+	// ResidualAtrFactor 是回归通道残差容忍 ATR 系数。
 	ResidualAtrFactor float64 `json:"residual_atr_factor"`
 }
 
 type ChannelAlgorithmSettings struct {
-	Extrema    ChannelExtremaSettings    `json:"extrema"`
-	Ransac     ChannelRansacSettings     `json:"ransac"`
+	// Extrema 是极值法参数。
+	Extrema ChannelExtremaSettings `json:"extrema"`
+	// Ransac 是 RANSAC 法参数。
+	Ransac ChannelRansacSettings `json:"ransac"`
+	// Regression 是回归法参数。
 	Regression ChannelRegressionSettings `json:"regression"`
 }
 
 type ChannelSettings struct {
-	Display    ChannelDisplaySettings   `json:"display"`
-	Common     ChannelCommonSettings    `json:"common"`
+	// Display 控制通道图层显示。
+	Display ChannelDisplaySettings `json:"display"`
+	// Common 是通道算法共享参数。
+	Common ChannelCommonSettings `json:"common"`
+	// Algorithms 是各类通道算法的专属参数。
 	Algorithms ChannelAlgorithmSettings `json:"algorithms"`
 }
 
@@ -294,93 +362,156 @@ func (s *ChannelSettings) UnmarshalJSON(data []byte) error {
 }
 
 type ChannelDecision struct {
-	ID         string    `json:"id"`
-	BaseID     string    `json:"base_id,omitempty"`
-	Status     string    `json:"status"`
-	Locked     bool      `json:"locked"`
-	Hidden     bool      `json:"hidden"`
-	Method     string    `json:"method,omitempty"`
-	StartTime  int64     `json:"start_time,omitempty"`
-	EndTime    int64     `json:"end_time,omitempty"`
-	UpperStart float64   `json:"upper_start,omitempty"`
-	UpperEnd   float64   `json:"upper_end,omitempty"`
-	LowerStart float64   `json:"lower_start,omitempty"`
-	LowerEnd   float64   `json:"lower_end,omitempty"`
-	Slope      float64   `json:"slope,omitempty"`
-	Score      float64   `json:"score,omitempty"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	Operator   string    `json:"operator,omitempty"`
-	Source     string    `json:"source,omitempty"`
+	// ID 是通道决策唯一标识。
+	ID string `json:"id"`
+	// BaseID 是关联的基础通道 ID。
+	BaseID string `json:"base_id,omitempty"`
+	// Status 是当前决策状态。
+	Status string `json:"status"`
+	// Locked 表示该通道是否被锁定。
+	Locked bool `json:"locked"`
+	// Hidden 表示该通道是否隐藏。
+	Hidden bool `json:"hidden"`
+	// Method 是该通道来源算法。
+	Method string `json:"method,omitempty"`
+	// StartTime 是上轨起始时间。
+	StartTime int64 `json:"start_time,omitempty"`
+	// EndTime 是上轨结束时间。
+	EndTime int64 `json:"end_time,omitempty"`
+	// UpperStart 是上轨起点价格。
+	UpperStart float64 `json:"upper_start,omitempty"`
+	// UpperEnd 是上轨终点价格。
+	UpperEnd float64 `json:"upper_end,omitempty"`
+	// LowerStart 是下轨起点价格。
+	LowerStart float64 `json:"lower_start,omitempty"`
+	// LowerEnd 是下轨终点价格。
+	LowerEnd float64 `json:"lower_end,omitempty"`
+	// Slope 是通道斜率。
+	Slope float64 `json:"slope,omitempty"`
+	// Score 是通道评分。
+	Score float64 `json:"score,omitempty"`
+	// UpdatedAt 是决策更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
+	// Operator 是最近一次操作人。
+	Operator string `json:"operator,omitempty"`
+	// Source 标记决策来源。
+	Source string `json:"source,omitempty"`
 }
 
 type ChannelLayout struct {
-	Settings   ChannelSettings   `json:"settings"`
-	Decisions  []ChannelDecision `json:"decisions"`
-	SelectedID string            `json:"selected_id,omitempty"`
+	// Settings 是通道配置。
+	Settings ChannelSettings `json:"settings"`
+	// Decisions 是当前所有通道决策。
+	Decisions []ChannelDecision `json:"decisions"`
+	// SelectedID 是当前选中的通道 ID。
+	SelectedID string `json:"selected_id,omitempty"`
 }
 
 type ReversalSettings struct {
-	Enabled              bool    `json:"enabled"`
-	MidTrendMinBars      int     `json:"mid_trend_min_bars"`
-	MidTrendMaxBars      int     `json:"mid_trend_max_bars"`
-	PivotKMinute         int     `json:"pivot_k_minute"`
-	PivotKHour           int     `json:"pivot_k_hour"`
-	PivotKDay            int     `json:"pivot_k_day"`
-	LineToleranceAtr     float64 `json:"line_tolerance_atr_factor"`
-	BreakThresholdPct    float64 `json:"break_threshold_pct"`
+	// Enabled 控制是否启用反转形态识别。
+	Enabled bool `json:"enabled"`
+	// MidTrendMinBars 是中继趋势最小 bar 数。
+	MidTrendMinBars int `json:"mid_trend_min_bars"`
+	// MidTrendMaxBars 是中继趋势最大 bar 数。
+	MidTrendMaxBars int `json:"mid_trend_max_bars"`
+	// PivotKMinute 是分钟级拐点识别参数。
+	PivotKMinute int `json:"pivot_k_minute"`
+	// PivotKHour 是小时级拐点识别参数。
+	PivotKHour int `json:"pivot_k_hour"`
+	// PivotKDay 是日级拐点识别参数。
+	PivotKDay int `json:"pivot_k_day"`
+	// LineToleranceAtr 是连线容忍 ATR 系数。
+	LineToleranceAtr float64 `json:"line_tolerance_atr_factor"`
+	// BreakThresholdPct 是突破阈值百分比。
+	BreakThresholdPct float64 `json:"break_threshold_pct"`
+	// MinSwingAmplitudeAtr 是最小摆动幅度 ATR 阈值。
 	MinSwingAmplitudeAtr float64 `json:"min_swing_amplitude_atr"`
-	ConfirmOnClose       bool    `json:"confirm_on_close"`
-	ShowLabels           bool    `json:"show_labels"`
+	// ConfirmOnClose 控制是否以收盘确认突破。
+	ConfirmOnClose bool `json:"confirm_on_close"`
+	// ShowLabels 控制是否显示形态标签。
+	ShowLabels bool `json:"show_labels"`
 }
 
 type ReversalLine struct {
-	ID         string  `json:"id"`
-	Side       string  `json:"side"`
-	StartIndex int     `json:"start_index"`
-	EndIndex   int     `json:"end_index"`
+	// ID 是反转线唯一标识。
+	ID string `json:"id"`
+	// Side 表示该线属于压力线还是支撑线。
+	Side string `json:"side"`
+	// StartIndex 是起点在 bars 中的索引。
+	StartIndex int `json:"start_index"`
+	// EndIndex 是终点在 bars 中的索引。
+	EndIndex int `json:"end_index"`
+	// StartPrice 是起点价格。
 	StartPrice float64 `json:"start_price"`
-	EndPrice   float64 `json:"end_price"`
-	Slope      float64 `json:"slope"`
-	Intercept  float64 `json:"intercept"`
-	Touches    int     `json:"touches"`
-	Score      float64 `json:"score"`
+	// EndPrice 是终点价格。
+	EndPrice float64 `json:"end_price"`
+	// Slope 是线条斜率。
+	Slope float64 `json:"slope"`
+	// Intercept 是线性表达式截距。
+	Intercept float64 `json:"intercept"`
+	// Touches 是触碰次数。
+	Touches int `json:"touches"`
+	// Score 是线条评分。
+	Score float64 `json:"score"`
 }
 
 type ReversalPoint struct {
-	Index int64   `json:"index"`
-	Time  int64   `json:"time"`
+	// Index 是点在 bars 中的索引。
+	Index int64 `json:"index"`
+	// Time 是点的时间戳。
+	Time int64 `json:"time"`
+	// Price 是点的价格。
 	Price float64 `json:"price"`
 }
 
 type ReversalCondition struct {
-	Met bool  `json:"met"`
-	At  int64 `json:"at"`
+	// Met 表示条件是否满足。
+	Met bool `json:"met"`
+	// At 是条件满足的时间戳。
+	At int64 `json:"at"`
 }
 
 type ReversalEvent struct {
-	ID          string                       `json:"id"`
-	LineID      string                       `json:"line_id"`
-	Direction   string                       `json:"direction"`
-	P1          *ReversalPoint               `json:"p1,omitempty"`
-	P2          *ReversalPoint               `json:"p2,omitempty"`
-	P3          *ReversalPoint               `json:"p3,omitempty"`
-	Conditions  map[string]ReversalCondition `json:"conditions,omitempty"`
-	Confirmed   bool                         `json:"confirmed"`
-	Invalidated bool                         `json:"invalidated"`
-	Score       float64                      `json:"score"`
-	Label       string                       `json:"label,omitempty"`
+	// ID 是事件唯一标识。
+	ID string `json:"id"`
+	// LineID 是事件关联的趋势线 ID。
+	LineID string `json:"line_id"`
+	// Direction 表示反转方向。
+	Direction string `json:"direction"`
+	// P1 是第一关键点。
+	P1 *ReversalPoint `json:"p1,omitempty"`
+	// P2 是第二关键点。
+	P2 *ReversalPoint `json:"p2,omitempty"`
+	// P3 是第三关键点。
+	P3 *ReversalPoint `json:"p3,omitempty"`
+	// Conditions 是各类判定条件及结果。
+	Conditions map[string]ReversalCondition `json:"conditions,omitempty"`
+	// Confirmed 表示事件是否已确认。
+	Confirmed bool `json:"confirmed"`
+	// Invalidated 表示事件是否已失效。
+	Invalidated bool `json:"invalidated"`
+	// Score 是事件评分。
+	Score float64 `json:"score"`
+	// Label 是前端展示标签。
+	Label string `json:"label,omitempty"`
 }
 
 type ReversalResult struct {
-	Lines  []ReversalLine  `json:"lines"`
+	// Lines 是识别出的候选趋势线。
+	Lines []ReversalLine `json:"lines"`
+	// Events 是识别出的反转事件。
 	Events []ReversalEvent `json:"events"`
 }
 
 type ReversalLayout struct {
-	Settings       ReversalSettings `json:"settings"`
-	Results        ReversalResult   `json:"results"`
-	PersistVersion int64            `json:"persist_version"`
-	SelectedID     string           `json:"selected_id,omitempty"`
+	// Settings 是反转识别配置。
+	Settings ReversalSettings `json:"settings"`
+	// Results 是当前反转识别结果。
+	Results ReversalResult `json:"results"`
+	// PersistVersion 是持久化版本号，用于并发控制。
+	PersistVersion int64 `json:"persist_version"`
+	// SelectedID 是当前选中的事件或线条 ID。
+	SelectedID string `json:"selected_id,omitempty"`
 }
 
 func DefaultReversalSettings() ReversalSettings {
@@ -400,24 +531,41 @@ func DefaultReversalSettings() ReversalSettings {
 }
 
 type LayoutSnapshot struct {
-	Owner      string            `json:"owner"`
-	Symbol     string            `json:"symbol"`
-	Type       string            `json:"type"`
-	Variety    string            `json:"variety"`
-	Timeframe  string            `json:"timeframe"`
-	Theme      string            `json:"theme"`
-	Panes      PaneSettings      `json:"panes"`
+	// Owner 是布局归属者。
+	Owner string `json:"owner"`
+	// Symbol 是布局对应 symbol。
+	Symbol string `json:"symbol"`
+	// Type 是布局对应的数据类型。
+	Type string `json:"type"`
+	// Variety 是品种代码。
+	Variety string `json:"variety"`
+	// Timeframe 是周期。
+	Timeframe string `json:"timeframe"`
+	// Theme 是当前主题名称。
+	Theme string `json:"theme"`
+	// Panes 是面板开关设置。
+	Panes PaneSettings `json:"panes"`
+	// Indicators 是指标显示设置。
 	Indicators IndicatorSettings `json:"indicators"`
-	Channels   ChannelLayout     `json:"channels"`
-	Reversal   ReversalLayout    `json:"reversal"`
-	Drawings   []DrawingObject   `json:"drawings"`
-	UpdatedAt  time.Time         `json:"updated_at"`
+	// Channels 是通道布局设置和结果。
+	Channels ChannelLayout `json:"channels"`
+	// Reversal 是反转布局设置和结果。
+	Reversal ReversalLayout `json:"reversal"`
+	// Drawings 是自定义绘图对象列表。
+	Drawings []DrawingObject `json:"drawings"`
+	// UpdatedAt 是布局快照更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Scope struct {
-	Owner     string
-	Symbol    string
-	Kind      string
-	Variety   string
+	// Owner 是布局归属者。
+	Owner string
+	// Symbol 是目标 symbol。
+	Symbol string
+	// Kind 是目标类型。
+	Kind string
+	// Variety 是品种代码。
+	Variety string
+	// Timeframe 是周期。
 	Timeframe string
 }

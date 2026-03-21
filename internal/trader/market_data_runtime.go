@@ -36,64 +36,101 @@ const (
 )
 
 type runtimeOptions struct {
-	tickDedupWindow  time.Duration
-	driftThreshold   time.Duration
+	// tickDedupWindow 是重复 tick 的判定窗口。
+	tickDedupWindow time.Duration
+	// driftThreshold 是允许的 tick 时间漂移阈值。
+	driftThreshold time.Duration
+	// driftResumeTicks 是恢复正常漂移状态所需的连续正常 tick 数。
 	driftResumeTicks int
+	// enableMultiMinute 控制是否继续生成 mm 周期 bar。
 	enableMultiMinute bool
-	flowPath         string
-	onTick           func(tickEvent)
-	onBar            func(minuteBar)
+	// flowPath 指向 flow 根目录，用于初始化文件输出。
+	flowPath string
+	// onTick 是 tick 旁路回调。
+	onTick func(tickEvent)
+	// onBar 是 bar 旁路回调。
+	onBar func(minuteBar)
 }
 
 type runtimeTick struct {
+	// tickEvent 是统一后的 tick 数据体。
 	tickEvent
+	// replay 标记该 tick 是否来自回放，而非实时 CTP。
 	replay bool
 }
 
 type runtimeTrace struct {
-	ReceivedAt        time.Time
-	RouteEnqueuedAt   time.Time
-	ShardDequeuedAt   time.Time
-	StateUpdatedAt    time.Time
-	MinuteClosedAt    time.Time
+	// ReceivedAt 是 tick 被接收的时间。
+	ReceivedAt time.Time
+	// RouteEnqueuedAt 是路由到 shard 前的入队时间。
+	RouteEnqueuedAt time.Time
+	// ShardDequeuedAt 是从 shard 队列取出开始处理的时间。
+	ShardDequeuedAt time.Time
+	// StateUpdatedAt 是完成 shard 内状态更新的时间。
+	StateUpdatedAt time.Time
+	// MinuteClosedAt 是关闭前一根分钟线的时间。
+	MinuteClosedAt time.Time
+	// PersistEnqueuedAt 是持久化任务入队时间。
 	PersistEnqueuedAt time.Time
-	DBDequeuedAt      time.Time
-	DBFlushedAt       time.Time
+	// DBDequeuedAt 是 DB writer 取出该任务的时间。
+	DBDequeuedAt time.Time
+	// DBFlushedAt 是该任务随批次成功写入数据库的时间。
+	DBFlushedAt time.Time
 }
 
 type persistTask struct {
-	Bar          minuteBar
-	TableName    string
-	Trace        runtimeTrace
+	// Bar 是待落库的分钟线数据。
+	Bar minuteBar
+	// TableName 是目标表名。
+	TableName string
+	// Trace 保存该 bar 从 tick 到落库的时序跟踪信息。
+	Trace runtimeTrace
+	// InstrumentID 是该任务所属合约。
 	InstrumentID string
-	ShardID      int
-	IsL9         bool
+	// ShardID 是生成该任务的行情分片编号。
+	ShardID int
+	// IsL9 标记该任务是否属于 L9/主连产物。
+	IsL9 bool
 }
 
 type flushRequest struct {
+	// done 用于把 flush 结果回传给调用方。
 	done chan error
 }
 
 type stopRequest struct {
+	// done 用于通知 shard 已完成停止流程。
 	done chan struct{}
 }
 
 type instrumentRuntimeState struct {
-	bar                 minuteBar
-	lastTick            minuteTickSnapshot
-	hasBar              bool
-	prevBucketCloseVol  int
+	// bar 保存当前正在构建中的分钟线。
+	bar minuteBar
+	// lastTick 保存最近一个有效 tick 的快照。
+	lastTick minuteTickSnapshot
+	// hasBar 表示当前是否已经为该合约初始化过 bar。
+	hasBar bool
+	// prevBucketCloseVol 是上一分钟结束时的累计成交量。
+	prevBucketCloseVol int
+	// hasPrevBucketVolume 表示是否已有上一分钟的累计成交量基准。
 	hasPrevBucketVolume bool
-	lastFingerprint     tickFingerprintState
-	lastVolumes         int
-	aggregator          *closedBarAggregator
+	// lastFingerprint 保存最近一次去重指纹状态。
+	lastFingerprint tickFingerprintState
+	// lastVolumes 是最近一次看到的累计成交量。
+	lastVolumes int
+	// aggregator 负责把连续 1m bar 进一步聚合成 mm 和日线等结果。
+	aggregator *closedBarAggregator
 }
 
 type closedBarAggregator struct {
+	// instrumentID 是当前聚合器所属合约。
 	instrumentID string
-	exchange     string
-	history      []minuteBar
-	lastEmitted  map[string]time.Time
+	// exchange 是当前合约所在交易所。
+	exchange string
+	// history 保存最近一段时间的已关闭分钟线历史。
+	history []minuteBar
+	// lastEmitted 记录各周期最近一次已输出的 bar 时间，避免重复发射。
+	lastEmitted map[string]time.Time
 }
 
 func newClosedBarAggregator(instrumentID string, exchange string) *closedBarAggregator {
@@ -263,31 +300,51 @@ func (a *closedBarAggregator) consumeDaily(closedBar minuteBar, flush bool) (min
 }
 
 type marketDataRuntime struct {
-	store           *klineStore
-	status          *RuntimeStatusCenter
-	clock           *klineclock.CalendarResolver
+	// store 是 K 线存储层，负责分钟线落库与查询。
+	store *klineStore
+	// status 是全局行情状态中心。
+	status *RuntimeStatusCenter
+	// clock 用于解析交易日和业务时间。
+	clock *klineclock.CalendarResolver
+	// sessionResolver 提供品种交易时段信息。
 	sessionResolver *sessionResolver
-	l9Async         *l9AsyncCalculator
-	opts            runtimeOptions
+	// l9Async 用于异步计算主连/L9。
+	l9Async *l9AsyncCalculator
+	// opts 保存运行时行为参数和旁路回调。
+	opts runtimeOptions
 
-	shards    []*marketDataShard
-	dbWriter  *dbBatchWriter
-	closed    atomic.Bool
-	logMu     sync.Mutex
+	// shards 是按合约 hash 切分出的处理分片。
+	shards []*marketDataShard
+	// dbWriter 负责持久化任务批量写库。
+	dbWriter *dbBatchWriter
+	// closed 标记 runtime 是否已关闭。
+	closed atomic.Bool
+	// logMu 保护 lastLogAt。
+	logMu sync.Mutex
+	// lastLogAt 用于限频某些告警日志。
 	lastLogAt map[string]time.Time
 
-	replayMu             sync.Mutex
-	replayProcessSeen    map[string]struct{}
-	replayPipelineSeen   map[string]struct{}
+	// replayMu 保护 replay 首条日志状态。
+	replayMu sync.Mutex
+	// replayProcessSeen 记录哪些合约已经打过首次进入 runtime 的回放日志。
+	replayProcessSeen map[string]struct{}
+	// replayPipelineSeen 记录哪些合约已经打过首次进入 shard 的回放日志。
+	replayPipelineSeen map[string]struct{}
+	// shardQueueDepthGauge 记录每个 shard 当前队列长度。
 	shardQueueDepthGauge []int64
 }
 
 type marketDataShard struct {
+	// runtime 指回所属的全局运行时。
 	runtime *marketDataRuntime
-	id      int
-	in      chan any
+	// id 是 shard 编号。
+	id int
+	// in 是该 shard 的输入队列。
+	in chan any
 
-	state      map[string]*instrumentRuntimeState
+	// state 保存该 shard 内各合约的聚合状态。
+	state map[string]*instrumentRuntimeState
+	// fileWriter 负责该 shard 的文件侧异步输出。
 	fileWriter *shardFileWriter
 }
 

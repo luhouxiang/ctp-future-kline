@@ -12,7 +12,9 @@ var ErrReplayOrderBlocked = errors.New("ERR_REPLAY_ORDER_BLOCKED")
 type replayKey struct{}
 
 type ReplayMeta struct {
-	EventID      string
+	// EventID 是当前回放事件 ID。
+	EventID string
+	// ReplayTaskID 是当前回放任务 ID。
 	ReplayTaskID string
 }
 

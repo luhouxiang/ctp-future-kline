@@ -23,77 +23,133 @@ const (
 type mdSpi struct {
 	ctp.MarketDataSpi
 
-	runtime        *marketDataRuntime
-	status         *RuntimeStatusCenter
+	// runtime 是实时行情处理核心，所有 tick 最终都交给它处理。
+	runtime *marketDataRuntime
+	// status 指向全局运行状态中心，用于刷新前置连接和登录状态。
+	status *RuntimeStatusCenter
+	// onDisconnected 由 mdSession 注入，用于把断线事件转成重连流程。
 	onDisconnected func(int)
 }
 
 type mdSpiOptions struct {
-	onDisconnected   func(int)
-	tickDedupWindow  time.Duration
-	driftThreshold   time.Duration
+	// onDisconnected 是行情前置断开时的回调。
+	onDisconnected func(int)
+	// tickDedupWindow 是重复 tick 的判定窗口。
+	tickDedupWindow time.Duration
+	// driftThreshold 是可接受的 tick 时间漂移阈值。
+	driftThreshold time.Duration
+	// driftResumeTicks 是恢复漂移正常状态需要的连续正常 tick 数。
 	driftResumeTicks int
+	// enableMultiMinute 控制是否继续聚合 mm 周期 bar。
 	enableMultiMinute bool
-	flowPath         string
-	onTick           func(tickEvent)
-	onBar            func(minuteBar)
+	// flowPath 用于初始化 flow 目录下的文件输出。
+	flowPath string
+	// onTick 是 tick 旁路回调，供策略和 bus 使用。
+	onTick func(tickEvent)
+	// onBar 是 bar 旁路回调，供策略和 bus 使用。
+	onBar func(minuteBar)
 }
 
 type tickEvent struct {
-	InstrumentID         string
-	ExchangeID           string
-	RawActionDay         string
-	RawTradingDay        string
-	ActionDay            string
-	TradingDay           string
-	UpdateTime           string
-	UpdateMillisec       int
-	ReceivedAt           time.Time
-	CallbackAt           time.Time
-	ProcessStartedAt     time.Time
-	LockAcquiredAt       time.Time
+	// InstrumentID 是合约代码。
+	InstrumentID string
+	// ExchangeID 是交易所代码。
+	ExchangeID string
+	// RawActionDay 保留 CTP 原始 action_day 字段，便于排障。
+	RawActionDay string
+	// RawTradingDay 保留 CTP 原始 trading_day 字段，便于排障。
+	RawTradingDay string
+	// ActionDay 是经清洗后的自然日字段。
+	ActionDay string
+	// TradingDay 是经运行时修正后的业务交易日字段。
+	TradingDay string
+	// UpdateTime 是 tick 的 HH:MM:SS 时间部分。
+	UpdateTime string
+	// UpdateMillisec 是 tick 的毫秒部分。
+	UpdateMillisec int
+	// ReceivedAt 是 Go 进程接收到该 tick 的时间。
+	ReceivedAt time.Time
+	// CallbackAt 是进入 CTP 回调的时间点。
+	CallbackAt time.Time
+	// ProcessStartedAt 是运行时开始路由该 tick 的时间。
+	ProcessStartedAt time.Time
+	// LockAcquiredAt 是进入关键处理区后的时间，用于延迟分析。
+	LockAcquiredAt time.Time
+	// SideEffectEnqueuedAt 是旁路事件入队时间。
 	SideEffectEnqueuedAt time.Time
-	SideEffectHandledAt  time.Time
-	LastPrice            float64
-	Volume               int
-	OpenInterest         float64
-	SettlementPrice      float64
-	BidPrice1            float64
-	AskPrice1            float64
+	// SideEffectHandledAt 是旁路事件实际处理完成时间。
+	SideEffectHandledAt time.Time
+	// LastPrice 是最新成交价，也是分钟线价格主字段。
+	LastPrice float64
+	// Volume 是 CTP 返回的累计成交量。
+	Volume int
+	// OpenInterest 是当前持仓量。
+	OpenInterest float64
+	// SettlementPrice 是结算价；异常极值会在入站时清洗为 0。
+	SettlementPrice float64
+	// BidPrice1 是买一价。
+	BidPrice1 float64
+	// AskPrice1 是卖一价。
+	AskPrice1 float64
 }
 
 type tickInputData struct {
-	InstrumentID    string
-	ExchangeID      string
-	ActionDay       string
-	TradingDay      string
-	UpdateTime      string
-	UpdateMillisec  int
-	ReceivedAt      time.Time
-	CallbackAt      time.Time
-	LastPrice       float64
-	Volume          int
-	OpenInterest    float64
+	// InstrumentID 是从 CTP 回调直接取出的合约代码。
+	InstrumentID string
+	// ExchangeID 是从 CTP 回调直接取出的交易所代码。
+	ExchangeID string
+	// ActionDay 是原始自然日字段。
+	ActionDay string
+	// TradingDay 是原始交易日字段。
+	TradingDay string
+	// UpdateTime 是原始时间字符串。
+	UpdateTime string
+	// UpdateMillisec 是原始毫秒值。
+	UpdateMillisec int
+	// ReceivedAt 是接收时间。
+	ReceivedAt time.Time
+	// CallbackAt 是回调时间。
+	CallbackAt time.Time
+	// LastPrice 是原始最新价。
+	LastPrice float64
+	// Volume 是原始累计成交量。
+	Volume int
+	// OpenInterest 是原始持仓量。
+	OpenInterest float64
+	// SettlementPrice 是原始结算价，进入 runtime 前已允许做清洗。
 	SettlementPrice float64
-	BidPrice1       float64
-	AskPrice1       float64
+	// BidPrice1 是原始买一价。
+	BidPrice1 float64
+	// AskPrice1 是原始卖一价。
+	AskPrice1 float64
 }
 
 type minuteTickSnapshot struct {
-	TickTime       time.Time
-	ReceivedAt     time.Time
-	UpdateTime     string
+	// TickTime 是该 tick 对应到业务时间轴后的实际时刻。
+	TickTime time.Time
+	// ReceivedAt 是该 tick 的接收时间。
+	ReceivedAt time.Time
+	// UpdateTime 是原始 HH:MM:SS 字段。
+	UpdateTime string
+	// UpdateMillisec 是原始毫秒字段。
 	UpdateMillisec int
-	Price          float64
-	CurrentVolume  int
-	VolumeDelta    int64
-	OpenInterest   float64
+	// Price 是该 tick 的有效价格。
+	Price float64
+	// CurrentVolume 是该 tick 对应的累计成交量。
+	CurrentVolume int
+	// VolumeDelta 是相对上一 tick 算出的增量成交量。
+	VolumeDelta int64
+	// OpenInterest 是该 tick 对应的持仓量。
+	OpenInterest float64
 }
 
 type tickFingerprintState struct {
+	// fingerprint 是用于去重比较的指纹字符串。
 	fingerprint string
-	at          time.Time
-	tick        tickEvent
+	// at 是记录该指纹被看到的时间。
+	at time.Time
+	// tick 保存生成该指纹时对应的完整 tick，便于日志比较。
+	tick tickEvent
 }
 
 func newMdSpi(store *klineStore, l9Async *l9AsyncCalculator) *mdSpi {
@@ -114,13 +170,13 @@ func newMdSpiWithStatusAndOptions(store *klineStore, l9Async *l9AsyncCalculator,
 		onDisconnected: opts.onDisconnected,
 	}
 	spi.runtime = newMarketDataRuntime(store, l9Async, status, runtimeOptions{
-		tickDedupWindow:  opts.tickDedupWindow,
-		driftThreshold:   opts.driftThreshold,
-		driftResumeTicks: opts.driftResumeTicks,
+		tickDedupWindow:   opts.tickDedupWindow,
+		driftThreshold:    opts.driftThreshold,
+		driftResumeTicks:  opts.driftResumeTicks,
 		enableMultiMinute: opts.enableMultiMinute,
-		flowPath:         opts.flowPath,
-		onTick:           opts.onTick,
-		onBar:            opts.onBar,
+		flowPath:          opts.flowPath,
+		onTick:            opts.onTick,
+		onBar:             opts.onBar,
 	})
 	return spi
 }

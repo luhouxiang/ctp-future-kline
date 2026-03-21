@@ -14,14 +14,22 @@ import (
 )
 
 type FileLog struct {
-	dir           string
+	// dir 是总线日志目录。
+	dir string
+	// flushInterval 控制 writer 的定期 flush 周期。
 	flushInterval time.Duration
 
-	mu            sync.Mutex
-	currentDay    string
-	currentPath   string
-	file          *os.File
-	writer        *bufio.Writer
+	// mu 保护当前打开文件和 writer 状态。
+	mu sync.Mutex
+	// currentDay 记录当前写入文件所属日期。
+	currentDay string
+	// currentPath 是当前写入文件路径。
+	currentPath string
+	// file 是当前打开的日志文件句柄。
+	file *os.File
+	// writer 是 file 对应的缓冲写入器。
+	writer *bufio.Writer
+	// lastFlushTime 是最近一次 flush 时间。
 	lastFlushTime time.Time
 }
 

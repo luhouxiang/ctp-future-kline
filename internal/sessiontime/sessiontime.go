@@ -9,19 +9,26 @@ import (
 )
 
 type Range struct {
+	// Start 是交易时段起始分钟。
 	Start int
-	End   int
+	// End 是交易时段结束分钟。
+	End int
 }
 
 type MinuteMeta struct {
-	GlobalSeq  int
-	SessionID  int
+	// GlobalSeq 是该分钟在全天交易分钟序列中的位置。
+	GlobalSeq int
+	// SessionID 是该分钟所属交易时段编号。
+	SessionID int
+	// SessionSeq 是该分钟在时段内部的顺序位置。
 	SessionSeq int
 }
 
 type jsonRange struct {
+	// Start 是 JSON 中的起始 HH:MM 字符串。
 	Start string `json:"start"`
-	End   string `json:"end"`
+	// End 是 JSON 中的结束 HH:MM 字符串。
+	End string `json:"end"`
 }
 
 func TradingMinuteOrderKey(minute int) int {

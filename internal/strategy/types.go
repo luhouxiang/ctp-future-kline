@@ -19,20 +19,34 @@ const (
 )
 
 type ManagerStatus struct {
-	Enabled          bool      `json:"enabled"`
-	ProcessRunning   bool      `json:"process_running"`
-	Connected        bool      `json:"connected"`
-	GRPCAddr         string    `json:"grpc_addr"`
-	PythonEntry      string    `json:"python_entry"`
-	LastError        string    `json:"last_error"`
-	LastHealthAt     time.Time `json:"last_health_at"`
-	UpdatedAt        time.Time `json:"updated_at"`
-	Definitions      int       `json:"definitions"`
-	Instances        int       `json:"instances"`
-	RunningCount     int       `json:"running_count"`
-	SignalCount      int64     `json:"signal_count"`
-	AuditCount       int64     `json:"audit_count"`
-	BacktestRunCount int64     `json:"backtest_run_count"`
+	// Enabled 表示策略子系统是否启用。
+	Enabled bool `json:"enabled"`
+	// ProcessRunning 表示 Python 策略进程是否存活。
+	ProcessRunning bool `json:"process_running"`
+	// Connected 表示 Go 侧是否已连上策略 gRPC 服务。
+	Connected bool `json:"connected"`
+	// GRPCAddr 是当前 gRPC 服务地址。
+	GRPCAddr string `json:"grpc_addr"`
+	// PythonEntry 是策略进程入口脚本。
+	PythonEntry string `json:"python_entry"`
+	// LastError 是最近一次策略侧错误。
+	LastError string `json:"last_error"`
+	// LastHealthAt 是最近一次健康检查成功时间。
+	LastHealthAt time.Time `json:"last_health_at"`
+	// UpdatedAt 是状态更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
+	// Definitions 是已同步到本地的策略定义数量。
+	Definitions int `json:"definitions"`
+	// Instances 是本地保存的策略实例数量。
+	Instances int `json:"instances"`
+	// RunningCount 是当前运行中的策略实例数量。
+	RunningCount int `json:"running_count"`
+	// SignalCount 是累计策略信号数。
+	SignalCount int64 `json:"signal_count"`
+	// AuditCount 是累计订单审计记录数。
+	AuditCount int64 `json:"audit_count"`
+	// BacktestRunCount 是累计回测或优化运行记录数。
+	BacktestRunCount int64 `json:"backtest_run_count"`
 }
 
 type StrategyDefinition struct {
@@ -118,45 +132,77 @@ type ExecutionPlan struct {
 }
 
 type OrdersStatus struct {
-	Mode        string             `json:"mode"`
-	Positions   map[string]float64 `json:"positions"`
-	LastAuditAt *time.Time         `json:"last_audit_at,omitempty"`
-	UpdatedAt   time.Time          `json:"updated_at"`
+	// Mode 表示当前订单执行模式，例如 simulated。
+	Mode string `json:"mode"`
+	// Positions 是按 symbol 汇总的目标或模拟持仓。
+	Positions map[string]float64 `json:"positions"`
+	// LastAuditAt 是最近一次订单审计时间。
+	LastAuditAt *time.Time `json:"last_audit_at,omitempty"`
+	// UpdatedAt 是状态更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type TickEvent struct {
-	InstrumentID    string    `json:"instrument_id"`
-	ExchangeID      string    `json:"exchange_id"`
-	ActionDay       string    `json:"action_day"`
-	TradingDay      string    `json:"trading_day"`
-	UpdateTime      string    `json:"update_time"`
-	UpdateMillisec  int       `json:"update_millisec"`
-	ReceivedAt      time.Time `json:"received_at"`
-	LastPrice       float64   `json:"last_price"`
-	Volume          int       `json:"volume"`
-	OpenInterest    float64   `json:"open_interest"`
-	SettlementPrice float64   `json:"settlement_price"`
-	BidPrice1       float64   `json:"bid_price1"`
-	AskPrice1       float64   `json:"ask_price1"`
+	// InstrumentID 是合约代码。
+	InstrumentID string `json:"instrument_id"`
+	// ExchangeID 是交易所代码。
+	ExchangeID string `json:"exchange_id"`
+	// ActionDay 是自然日。
+	ActionDay string `json:"action_day"`
+	// TradingDay 是业务交易日。
+	TradingDay string `json:"trading_day"`
+	// UpdateTime 是 HH:MM:SS 时间部分。
+	UpdateTime string `json:"update_time"`
+	// UpdateMillisec 是毫秒部分。
+	UpdateMillisec int `json:"update_millisec"`
+	// ReceivedAt 是 Go 侧接收时间。
+	ReceivedAt time.Time `json:"received_at"`
+	// LastPrice 是最新价。
+	LastPrice float64 `json:"last_price"`
+	// Volume 是累计成交量。
+	Volume int `json:"volume"`
+	// OpenInterest 是持仓量。
+	OpenInterest float64 `json:"open_interest"`
+	// SettlementPrice 是结算价。
+	SettlementPrice float64 `json:"settlement_price"`
+	// BidPrice1 是买一价。
+	BidPrice1 float64 `json:"bid_price1"`
+	// AskPrice1 是卖一价。
+	AskPrice1 float64 `json:"ask_price1"`
 }
 
 type BarEvent struct {
-	Variety         string    `json:"variety"`
-	InstrumentID    string    `json:"instrument_id"`
-	Exchange        string    `json:"exchange"`
-	DataTime        time.Time `json:"data_time"`
-	AdjustedTime    time.Time `json:"adjusted_time"`
-	Period          string    `json:"period"`
-	Open            float64   `json:"open"`
-	High            float64   `json:"high"`
-	Low             float64   `json:"low"`
-	Close           float64   `json:"close"`
-	Volume          int64     `json:"volume"`
-	OpenInterest    float64   `json:"open_interest"`
-	SettlementPrice float64   `json:"settlement_price"`
+	// Variety 是品种代码。
+	Variety string `json:"variety"`
+	// InstrumentID 是合约代码。
+	InstrumentID string `json:"instrument_id"`
+	// Exchange 是交易所代码。
+	Exchange string `json:"exchange"`
+	// DataTime 是该 bar 的业务分钟时间。
+	DataTime time.Time `json:"data_time"`
+	// AdjustedTime 是跨夜修正后的实际时间轴。
+	AdjustedTime time.Time `json:"adjusted_time"`
+	// Period 是 bar 周期，例如 1m、5m。
+	Period string `json:"period"`
+	// Open 是开盘价。
+	Open float64 `json:"open"`
+	// High 是最高价。
+	High float64 `json:"high"`
+	// Low 是最低价。
+	Low float64 `json:"low"`
+	// Close 是收盘价。
+	Close float64 `json:"close"`
+	// Volume 是本 bar 成交量增量。
+	Volume int64 `json:"volume"`
+	// OpenInterest 是 bar 结束时持仓量。
+	OpenInterest float64 `json:"open_interest"`
+	// SettlementPrice 是 bar 对应的结算价字段。
+	SettlementPrice float64 `json:"settlement_price"`
 }
 
 type EventEnvelope struct {
+	// Type 是策略模块广播事件类型。
 	Type string `json:"type"`
-	Data any    `json:"data"`
+	// Data 是事件携带的数据体。
+	Data any `json:"data"`
 }

@@ -24,36 +24,58 @@ const (
 // tickCSVEvent 表示从 CSV 中读出并标准化后的回放事件。
 // 它同时保留 bus 事件本体、断点续播游标和排序用时间。
 type tickCSVEvent struct {
-	Event        bus.BusEvent
-	Cursor       bus.FileCursor
-	Time         time.Time
+	// Event 是标准化后的总线事件。
+	Event bus.BusEvent
+	// Cursor 是该事件在 tick CSV 源中的文件游标。
+	Cursor bus.FileCursor
+	// Time 是排序和推进回放时使用的事件时间。
+	Time time.Time
+	// InstrumentID 是该事件所属合约。
 	InstrumentID string
 }
 
 // tickCSVLoadResult 汇总 tick 目录加载结果，供 replay service 初始化任务快照使用。
 type tickCSVLoadResult struct {
-	Events          []tickCSVEvent
-	FileCount       int
+	// Events 是加载并排序后的所有 tick 事件。
+	Events []tickCSVEvent
+	// FileCount 是扫描到的 tick CSV 文件数。
+	FileCount int
+	// InstrumentCount 是涉及的合约数量。
 	InstrumentCount int
-	FirstTime       *time.Time
-	LastTime        *time.Time
+	// FirstTime 是最早事件时间。
+	FirstTime *time.Time
+	// LastTime 是最晚事件时间。
+	LastTime *time.Time
 }
 
 // tickPayload 是写入 CSV 后再回放时恢复出来的 payload 结构。
 type tickPayload struct {
-	InstrumentID    string    `json:"InstrumentID"`
-	ExchangeID      string    `json:"ExchangeID"`
-	ActionDay       string    `json:"ActionDay"`
-	TradingDay      string    `json:"TradingDay"`
-	UpdateTime      string    `json:"UpdateTime"`
-	UpdateMillisec  int       `json:"UpdateMillisec"`
-	ReceivedAt      time.Time `json:"ReceivedAt"`
-	LastPrice       float64   `json:"LastPrice"`
-	Volume          int       `json:"Volume"`
-	OpenInterest    float64   `json:"OpenInterest"`
-	SettlementPrice float64   `json:"SettlementPrice"`
-	BidPrice1       float64   `json:"BidPrice1"`
-	AskPrice1       float64   `json:"AskPrice1"`
+	// InstrumentID 是合约代码。
+	InstrumentID string `json:"InstrumentID"`
+	// ExchangeID 是交易所代码。
+	ExchangeID string `json:"ExchangeID"`
+	// ActionDay 是自然日。
+	ActionDay string `json:"ActionDay"`
+	// TradingDay 是业务交易日。
+	TradingDay string `json:"TradingDay"`
+	// UpdateTime 是 HH:MM:SS 时间部分。
+	UpdateTime string `json:"UpdateTime"`
+	// UpdateMillisec 是毫秒部分。
+	UpdateMillisec int `json:"UpdateMillisec"`
+	// ReceivedAt 是录制该 tick 时的接收时间。
+	ReceivedAt time.Time `json:"ReceivedAt"`
+	// LastPrice 是最新价。
+	LastPrice float64 `json:"LastPrice"`
+	// Volume 是累计成交量。
+	Volume int `json:"Volume"`
+	// OpenInterest 是持仓量。
+	OpenInterest float64 `json:"OpenInterest"`
+	// SettlementPrice 是结算价。
+	SettlementPrice float64 `json:"SettlementPrice"`
+	// BidPrice1 是买一价。
+	BidPrice1 float64 `json:"BidPrice1"`
+	// AskPrice1 是卖一价。
+	AskPrice1 float64 `json:"AskPrice1"`
 }
 
 // runTickDir 负责执行“从 tick CSV 目录回放”的主循环。

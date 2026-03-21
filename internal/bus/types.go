@@ -17,26 +17,41 @@ const (
 )
 
 type BusEvent struct {
-	EventID      string          `json:"event_id"`
-	Topic        string          `json:"topic"`
-	Source       string          `json:"source"`
-	OccurredAt   time.Time       `json:"occurred_at"`
-	ProducedAt   time.Time       `json:"produced_at"`
-	Replay       bool            `json:"replay"`
-	ReplayTaskID string          `json:"replay_task_id,omitempty"`
-	Payload      json.RawMessage `json:"payload"`
+	// EventID 是总线事件唯一标识。
+	EventID string `json:"event_id"`
+	// Topic 表示事件主题，例如 tick、bar、order_command。
+	Topic string `json:"topic"`
+	// Source 表示事件来源模块。
+	Source string `json:"source"`
+	// OccurredAt 是业务上事件发生的时间。
+	OccurredAt time.Time `json:"occurred_at"`
+	// ProducedAt 是事件被写入总线日志的时间。
+	ProducedAt time.Time `json:"produced_at"`
+	// Replay 标记该事件是否来自回放链路。
+	Replay bool `json:"replay"`
+	// ReplayTaskID 标记该事件所属的回放任务。
+	ReplayTaskID string `json:"replay_task_id,omitempty"`
+	// Payload 保存事件具体业务载荷。
+	Payload json.RawMessage `json:"payload"`
 }
 
 type FileCursor struct {
-	File   string `json:"file"`
-	Offset int64  `json:"offset"`
+	// File 是事件所在的日志文件路径。
+	File string `json:"file"`
+	// Offset 是事件在文件中的字节偏移。
+	Offset int64 `json:"offset"`
 }
 
 type ReadOptions struct {
-	StartTime  *time.Time
-	EndTime    *time.Time
-	Topics     map[string]struct{}
-	Sources    map[string]struct{}
+	// StartTime 是过滤事件的起始时间。
+	StartTime *time.Time
+	// EndTime 是过滤事件的结束时间。
+	EndTime *time.Time
+	// Topics 是允许保留的 topic 集合。
+	Topics map[string]struct{}
+	// Sources 是允许保留的 source 集合。
+	Sources map[string]struct{}
+	// FromCursor 是起始读取游标。
 	FromCursor *FileCursor
 }
 

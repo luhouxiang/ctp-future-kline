@@ -43,42 +43,69 @@ var exchangeCodeMap = map[string]string{
 }
 
 type UploadFile struct {
+	// Name 是上传文件名，通常包含交易所编码和来源信息。
 	Name string
+	// Data 是文件完整内容。
 	Data []byte
 }
 
 type Progress struct {
-	TotalFiles      int    `json:"total_files"`
-	ProcessedFiles  int    `json:"processed_files"`
-	TotalLines      int    `json:"total_lines"`
-	InsertedRows    int    `json:"inserted_rows"`
-	OverwrittenRows int    `json:"overwritten_rows"`
-	SkippedRows     int    `json:"skipped_rows"`
-	SkippedFiles    int    `json:"skipped_files"`
-	ErrorCount      int    `json:"error_count"`
-	Done            bool   `json:"done"`
-	Canceled        bool   `json:"canceled"`
-	LastError       string `json:"last_error,omitempty"`
+	// TotalFiles 是本次导入文件总数。
+	TotalFiles int `json:"total_files"`
+	// ProcessedFiles 是已处理文件数。
+	ProcessedFiles int `json:"processed_files"`
+	// TotalLines 是已扫描总行数。
+	TotalLines int `json:"total_lines"`
+	// InsertedRows 是新增写入行数。
+	InsertedRows int `json:"inserted_rows"`
+	// OverwrittenRows 是覆盖写入行数。
+	OverwrittenRows int `json:"overwritten_rows"`
+	// SkippedRows 是因重复或策略跳过的行数。
+	SkippedRows int `json:"skipped_rows"`
+	// SkippedFiles 是被整体跳过的文件数。
+	SkippedFiles int `json:"skipped_files"`
+	// ErrorCount 是累计错误数。
+	ErrorCount int `json:"error_count"`
+	// Done 表示导入是否已完成。
+	Done bool `json:"done"`
+	// Canceled 表示导入是否被取消。
+	Canceled bool `json:"canceled"`
+	// LastError 是最近一次错误信息。
+	LastError string `json:"last_error,omitempty"`
 }
 
 type ConflictRecord struct {
-	FileName       string           `json:"file_name"`
-	LineNumber     int              `json:"line_number"`
-	InstrumentID   string           `json:"instrument_id"`
-	Exchange       string           `json:"exchange"`
-	MinuteTime     string           `json:"minute_time"`
-	Existing       trader.MinuteBar `json:"existing"`
-	Incoming       trader.MinuteBar `json:"incoming"`
-	OverwriteScope string           `json:"overwrite_scope"`
-	Batch          bool             `json:"batch"`
-	NewCount       int              `json:"new_count"`
-	DuplicateCount int              `json:"duplicate_count"`
+	// FileName 是冲突来源文件名。
+	FileName string `json:"file_name"`
+	// LineNumber 是冲突所在源文件行号。
+	LineNumber int `json:"line_number"`
+	// InstrumentID 是冲突所属合约。
+	InstrumentID string `json:"instrument_id"`
+	// Exchange 是冲突所属交易所。
+	Exchange string `json:"exchange"`
+	// MinuteTime 是冲突分钟时间。
+	MinuteTime string `json:"minute_time"`
+	// Existing 是数据库中已有的 bar。
+	Existing trader.MinuteBar `json:"existing"`
+	// Incoming 是当前准备写入的 bar。
+	Incoming trader.MinuteBar `json:"incoming"`
+	// OverwriteScope 表示本次覆盖决策的作用范围。
+	OverwriteScope string `json:"overwrite_scope"`
+	// Batch 表示该冲突是否来自批量覆盖场景。
+	Batch bool `json:"batch"`
+	// NewCount 是批量场景下待新增记录数。
+	NewCount int `json:"new_count"`
+	// DuplicateCount 是批量场景下重复记录数。
+	DuplicateCount int `json:"duplicate_count"`
 }
 
 type DecisionRequest struct {
-	Action                string `json:"action"`
-	OverwriteInstrument   bool   `json:"overwrite_instrument"`
-	OverwriteAllContracts bool   `json:"overwrite_all_contracts"`
+	// Action 指定冲突处理动作，如 overwrite、skip、cancel。
+	Action string `json:"action"`
+	// OverwriteInstrument 表示是否对该合约后续冲突统一覆盖。
+	OverwriteInstrument bool `json:"overwrite_instrument"`
+	// OverwriteAllContracts 表示是否对所有合约后续冲突统一覆盖。
+	OverwriteAllContracts bool `json:"overwrite_all_contracts"`
 }
 
 type EventHandler interface {
@@ -96,30 +123,50 @@ func (noopHandler) OnDone(Progress)           {}
 func (noopHandler) OnError(error)             {}
 
 type TDXImportSession struct {
-	id      string
-	dbPath  string
-	files   []UploadFile
+	// id 是导入会话唯一标识。
+	id string
+	// dbPath 是目标数据库连接串。
+	dbPath string
+	// files 是本次导入的原始上传文件集合。
+	files []UploadFile
+	// handler 用于向外发送进度、冲突和结束事件。
 	handler EventHandler
 
-	mu            sync.Mutex
-	progress      Progress
+	// mu 保护进度、待决冲突和全局覆盖策略。
+	mu sync.Mutex
+	// progress 保存当前导入进度。
+	progress Progress
+	// globalReplace 表示是否对所有后续冲突都直接覆盖。
 	globalReplace bool
+	// replaceByInst 记录按合约维度的覆盖策略。
 	replaceByInst map[string]bool
-	pending       *ConflictRecord
-	decisionCh    chan DecisionRequest
+	// pending 保存当前等待用户决策的冲突。
+	pending *ConflictRecord
+	// decisionCh 接收前端提交的冲突处理决策。
+	decisionCh chan DecisionRequest
 }
 
 type rawTdxRow struct {
-	lineNumber   int
-	tradingDay   time.Time
-	hhmm         int
-	open         float64
-	high         float64
-	low          float64
-	closePrice   float64
-	volume       int64
+	// lineNumber 是该行在原文件中的行号。
+	lineNumber int
+	// tradingDay 是解析后的交易日。
+	tradingDay time.Time
+	// hhmm 是分钟时间标签。
+	hhmm int
+	// open 是开盘价。
+	open float64
+	// high 是最高价。
+	high float64
+	// low 是最低价。
+	low float64
+	// closePrice 是收盘价。
+	closePrice float64
+	// volume 是成交量。
+	volume int64
+	// openInterest 是持仓量。
 	openInterest float64
-	settlement   float64
+	// settlement 是结算价。
+	settlement float64
 }
 
 func NewTDXImportSession(id string, dbPath string, files []UploadFile, handler EventHandler) *TDXImportSession {

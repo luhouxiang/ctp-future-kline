@@ -23,18 +23,27 @@ import (
 const minQueryCallbacksWait = 15 * time.Second
 
 type Service struct {
+	// cfg 保存行情主链路运行所需的 CTP 配置。
 	cfg config.CTPConfig
+	// bus 延迟初始化 bus 文件日志，用于把 tick 和 bar 旁路输出给 replay 等消费者。
 	bus struct {
+		// once 确保 bus 只初始化一次。
 		once sync.Once
-		log  *bus.FileLog
-		err  error
+		// log 是已创建的 bus 文件日志实例。
+		log *bus.FileLog
+		// err 保存初始化 bus 时的错误。
+		err error
 	}
 }
 
 type instrumentInfo struct {
-	ID           string
-	ExchangeID   string
-	ProductID    string
+	// ID 是合约代码，例如 ag2605。
+	ID string
+	// ExchangeID 是交易所代码，例如 SHFE。
+	ExchangeID string
+	// ProductID 是品种代码，例如 ag。
+	ProductID string
+	// ProductClass 是 CTP 返回的产品类别枚举值。
 	ProductClass byte
 }
 
@@ -253,20 +262,6 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 				BidPrice1:       t.BidPrice1,
 				AskPrice1:       t.AskPrice1,
 			})
-			if busLog == nil {
-				return
-			}
-			payload, err := json.Marshal(t)
-			if err != nil {
-				return
-			}
-			_, _ = busLog.Append(bus.BusEvent{
-				EventID:    bus.NewEventID(),
-				Topic:      bus.TopicTick,
-				Source:     "trader.md",
-				OccurredAt: time.Now(),
-				Payload:    payload,
-			})
 		},
 		func(bar minuteBar) {
 			strategy.PublishRealtimeBar(strategy.BarEvent{
@@ -301,13 +296,13 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		},
 	)
 	options := mdSpiOptions{
-		tickDedupWindow:  time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
-		driftThreshold:   time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
-		driftResumeTicks: s.cfg.DriftResumeTicks,
+		tickDedupWindow:   time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
+		driftThreshold:    time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
+		driftResumeTicks:  s.cfg.DriftResumeTicks,
 		enableMultiMinute: s.cfg.IsMultiMinuteEnabled(),
-		flowPath:         s.cfg.FlowPath,
-		onTick:           sideEffects.PublishTick,
-		onBar:            sideEffects.PublishBar,
+		flowPath:          s.cfg.FlowPath,
+		onTick:            sideEffects.PublishTick,
+		onBar:             sideEffects.PublishBar,
 	}
 
 	var spi *mdSpi

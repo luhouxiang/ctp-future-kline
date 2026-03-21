@@ -19,11 +19,16 @@ type PrevTradingDayProvider interface {
 
 // CalendarResolver resolves previous trading day from sqlite trading_calendar with fallback.
 type CalendarResolver struct {
+	// db 用于查询 trading_calendar 表。
 	db *sql.DB
 
-	mu                  sync.Mutex
-	cache               map[string]time.Time
-	warnedMissingTable  bool
+	// mu 保护缓存和缺失告警状态。
+	mu sync.Mutex
+	// cache 缓存交易日到上一交易日的映射。
+	cache map[string]time.Time
+	// warnedMissingTable 用于避免重复打印“交易日历表不存在”告警。
+	warnedMissingTable bool
+	// warnedMissingRecord 用于避免重复打印“缺少上一交易日记录”告警。
 	warnedMissingRecord bool
 }
 

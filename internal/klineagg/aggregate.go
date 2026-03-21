@@ -8,61 +8,99 @@ import (
 )
 
 type SessionRange struct {
+	// Start 是交易时段起始分钟，按 HHMM 展开为分钟序号。
 	Start int
-	End   int
+	// End 是交易时段结束分钟，按 HHMM 展开为分钟序号。
+	End int
 }
 
 type MinuteBar struct {
+	// InstrumentID 是合约代码。
 	InstrumentID string
-	Exchange     string
-	DataTime     time.Time
+	// Exchange 是交易所代码。
+	Exchange string
+	// DataTime 是该分钟线的业务时间。
+	DataTime time.Time
+	// AdjustedTime 是跨夜修正后的时间轴。
 	AdjustedTime time.Time
-	Open         float64
-	High         float64
-	Low          float64
-	Close        float64
-	Volume       int64
+	// Open 是开盘价。
+	Open float64
+	// High 是最高价。
+	High float64
+	// Low 是最低价。
+	Low float64
+	// Close 是收盘价。
+	Close float64
+	// Volume 是该分钟成交量。
+	Volume int64
+	// OpenInterest 是该分钟结束时持仓量。
 	OpenInterest float64
 }
 
 type BucketStat struct {
-	TradingDay      string
-	BucketKey       string
+	// TradingDay 是该统计所属交易日。
+	TradingDay string
+	// BucketKey 是聚合桶唯一键。
+	BucketKey string
+	// ExpectedMinutes 是该桶理论应包含的分钟数。
 	ExpectedMinutes int
-	ActualMinutes   int
+	// ActualMinutes 是该桶实际聚合到的分钟数。
+	ActualMinutes int
 }
 
 type AggBar struct {
-	InstrumentID    string
-	Exchange        string
-	DataTime        time.Time
-	AdjustedTime    time.Time
-	Period          string
-	Open            float64
-	High            float64
-	Low             float64
-	Close           float64
-	Volume          int64
-	OpenInterest    float64
+	// InstrumentID 是合约代码。
+	InstrumentID string
+	// Exchange 是交易所代码。
+	Exchange string
+	// DataTime 是聚合后 bar 的业务时间标签。
+	DataTime time.Time
+	// AdjustedTime 是聚合后 bar 的跨夜修正时间标签。
+	AdjustedTime time.Time
+	// Period 是目标周期名称，例如 5m、15m。
+	Period string
+	// Open 是聚合后开盘价。
+	Open float64
+	// High 是聚合后最高价。
+	High float64
+	// Low 是聚合后最低价。
+	Low float64
+	// Close 是聚合后收盘价。
+	Close float64
+	// Volume 是聚合后总成交量。
+	Volume int64
+	// OpenInterest 是聚合结束时持仓量。
+	OpenInterest float64
+	// ExpectedMinutes 是该桶理论应包含的分钟数。
 	ExpectedMinutes int
-	ActualMinutes   int
+	// ActualMinutes 是该桶实际聚合到的分钟数。
+	ActualMinutes int
 }
 
 type Options struct {
+	// CrossSessionFor30m1h 控制 30m/60m 是否允许跨交易时段拼接。
 	CrossSessionFor30m1h bool
-	ClampToSessionEnd    bool
-	ComputeBucketStats   bool
+	// ClampToSessionEnd 控制是否将标签时间钳制到时段结束点。
+	ClampToSessionEnd bool
+	// ComputeBucketStats 控制是否返回每个聚合桶的完整度统计。
+	ComputeBucketStats bool
 }
 
 type minuteMeta struct {
-	globalSeq  int
-	sessionID  int
+	// globalSeq 是该分钟在整日交易分钟序列中的位置。
+	globalSeq int
+	// sessionID 是该分钟所属交易时段编号。
+	sessionID int
+	// sessionSeq 是该分钟在时段内部的顺序编号。
 	sessionSeq int
 }
 
 type bucketKey struct {
-	day      string
-	session  int
+	// day 是交易日字符串。
+	day string
+	// session 是交易时段编号。
+	session int
+	// bucketNo 是该时段内的桶编号。
 	bucketNo int
 }
 

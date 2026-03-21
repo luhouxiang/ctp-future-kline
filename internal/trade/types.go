@@ -14,152 +14,265 @@ const (
 )
 
 type TradeStatus struct {
-	Enabled             bool      `json:"enabled"`
-	AccountID           string    `json:"account_id"`
-	TraderFront         bool      `json:"trader_front"`
-	TraderLogin         bool      `json:"trader_login"`
-	SettlementConfirmed bool      `json:"settlement_confirmed"`
-	TradingDay          string    `json:"trading_day"`
-	FrontID             int       `json:"front_id"`
-	SessionID           int       `json:"session_id"`
-	LastError           string    `json:"last_error"`
-	LastQueryAt         time.Time `json:"last_query_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	// Enabled 表示实盘交易子系统是否启用。
+	Enabled bool `json:"enabled"`
+	// AccountID 是系统内部使用的交易账户标识。
+	AccountID string `json:"account_id"`
+	// TraderFront 表示交易前置是否已连通。
+	TraderFront bool `json:"trader_front"`
+	// TraderLogin 表示交易会话是否已登录。
+	TraderLogin bool `json:"trader_login"`
+	// SettlementConfirmed 表示结算确认是否已完成。
+	SettlementConfirmed bool `json:"settlement_confirmed"`
+	// TradingDay 是当前交易日。
+	TradingDay string `json:"trading_day"`
+	// FrontID 是登录会话返回的 FrontID。
+	FrontID int `json:"front_id"`
+	// SessionID 是登录会话返回的 SessionID。
+	SessionID int `json:"session_id"`
+	// LastError 是最近一次交易侧错误。
+	LastError string `json:"last_error"`
+	// LastQueryAt 是最近一次查询账户、持仓、委托或成交成功时间。
+	LastQueryAt time.Time `json:"last_query_at"`
+	// UpdatedAt 是状态对象最后更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type TradingAccountSnapshot struct {
-	AccountID      string    `json:"account_id"`
-	Balance        float64   `json:"balance"`
-	Available      float64   `json:"available"`
-	Margin         float64   `json:"margin"`
-	FrozenCash     float64   `json:"frozen_cash"`
-	Commission     float64   `json:"commission"`
-	CloseProfit    float64   `json:"close_profit"`
-	PositionProfit float64   `json:"position_profit"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// Balance 是动态权益。
+	Balance float64 `json:"balance"`
+	// Available 是可用资金。
+	Available float64 `json:"available"`
+	// Margin 是占用保证金。
+	Margin float64 `json:"margin"`
+	// FrozenCash 是冻结资金。
+	FrozenCash float64 `json:"frozen_cash"`
+	// Commission 是累计手续费。
+	Commission float64 `json:"commission"`
+	// CloseProfit 是平仓盈亏。
+	CloseProfit float64 `json:"close_profit"`
+	// PositionProfit 是持仓盈亏。
+	PositionProfit float64 `json:"position_profit"`
+	// UpdatedAt 是快照更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type PositionSnapshot struct {
-	AccountID     string    `json:"account_id"`
-	Symbol        string    `json:"symbol"`
-	Exchange      string    `json:"exchange"`
-	Direction     string    `json:"direction"`
-	HedgeFlag     string    `json:"hedge_flag"`
-	YdPosition    int       `json:"yd_position"`
-	TodayPosition int       `json:"today_position"`
-	Position      int       `json:"position"`
-	OpenCost      float64   `json:"open_cost"`
-	PositionCost  float64   `json:"position_cost"`
-	UseMargin     float64   `json:"use_margin"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// Symbol 是合约代码。
+	Symbol string `json:"symbol"`
+	// Exchange 是交易所代码。
+	Exchange string `json:"exchange"`
+	// Direction 是持仓方向，如 long 或 short。
+	Direction string `json:"direction"`
+	// HedgeFlag 是投保标志。
+	HedgeFlag string `json:"hedge_flag"`
+	// YdPosition 是昨仓数量。
+	YdPosition int `json:"yd_position"`
+	// TodayPosition 是今仓数量。
+	TodayPosition int `json:"today_position"`
+	// Position 是总持仓。
+	Position int `json:"position"`
+	// OpenCost 是开仓成本。
+	OpenCost float64 `json:"open_cost"`
+	// PositionCost 是持仓成本。
+	PositionCost float64 `json:"position_cost"`
+	// UseMargin 是该持仓占用保证金。
+	UseMargin float64 `json:"use_margin"`
+	// UpdatedAt 是快照更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type OrderRecord struct {
-	AccountID           string    `json:"account_id"`
-	CommandID           string    `json:"command_id"`
-	OrderRef            string    `json:"order_ref"`
-	FrontID             int       `json:"front_id"`
-	SessionID           int       `json:"session_id"`
-	ExchangeID          string    `json:"exchange_id"`
-	OrderSysID          string    `json:"order_sys_id"`
-	Symbol              string    `json:"symbol"`
-	Direction           string    `json:"direction"`
-	OffsetFlag          string    `json:"offset_flag"`
-	LimitPrice          float64   `json:"limit_price"`
-	VolumeTotalOriginal int       `json:"volume_total_original"`
-	VolumeTraded        int       `json:"volume_traded"`
-	VolumeCanceled      int       `json:"volume_canceled"`
-	OrderStatus         string    `json:"order_status"`
-	SubmitStatus        string    `json:"submit_status"`
-	StatusMsg           string    `json:"status_msg"`
-	InsertedAt          time.Time `json:"inserted_at"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// CommandID 是系统内部订单指令 ID。
+	CommandID string `json:"command_id"`
+	// OrderRef 是 CTP 本地报单引用。
+	OrderRef string `json:"order_ref"`
+	// FrontID 是报单所属前置编号。
+	FrontID int `json:"front_id"`
+	// SessionID 是报单所属会话编号。
+	SessionID int `json:"session_id"`
+	// ExchangeID 是交易所代码。
+	ExchangeID string `json:"exchange_id"`
+	// OrderSysID 是交易所返回的系统单号。
+	OrderSysID string `json:"order_sys_id"`
+	// Symbol 是合约代码。
+	Symbol string `json:"symbol"`
+	// Direction 是买卖方向。
+	Direction string `json:"direction"`
+	// OffsetFlag 是开平标志。
+	OffsetFlag string `json:"offset_flag"`
+	// LimitPrice 是限价价格。
+	LimitPrice float64 `json:"limit_price"`
+	// VolumeTotalOriginal 是原始委托手数。
+	VolumeTotalOriginal int `json:"volume_total_original"`
+	// VolumeTraded 是已成交手数。
+	VolumeTraded int `json:"volume_traded"`
+	// VolumeCanceled 是已撤手数。
+	VolumeCanceled int `json:"volume_canceled"`
+	// OrderStatus 是委托状态的业务映射值。
+	OrderStatus string `json:"order_status"`
+	// SubmitStatus 是报单提交状态。
+	SubmitStatus string `json:"submit_status"`
+	// StatusMsg 是交易所或柜台返回的状态描述。
+	StatusMsg string `json:"status_msg"`
+	// InsertedAt 是系统首次记录该委托的时间。
+	InsertedAt time.Time `json:"inserted_at"`
+	// UpdatedAt 是最近一次状态更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type TradeRecord struct {
-	AccountID  string    `json:"account_id"`
-	TradeID    string    `json:"trade_id"`
-	OrderRef   string    `json:"order_ref"`
-	OrderSysID string    `json:"order_sys_id"`
-	ExchangeID string    `json:"exchange_id"`
-	Symbol     string    `json:"symbol"`
-	Direction  string    `json:"direction"`
-	OffsetFlag string    `json:"offset_flag"`
-	Price      float64   `json:"price"`
-	Volume     int       `json:"volume"`
-	TradeTime  time.Time `json:"trade_time"`
-	TradingDay string    `json:"trading_day"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// TradeID 是成交编号。
+	TradeID string `json:"trade_id"`
+	// OrderRef 是关联的本地报单引用。
+	OrderRef string `json:"order_ref"`
+	// OrderSysID 是关联的交易所系统单号。
+	OrderSysID string `json:"order_sys_id"`
+	// ExchangeID 是交易所代码。
+	ExchangeID string `json:"exchange_id"`
+	// Symbol 是合约代码。
+	Symbol string `json:"symbol"`
+	// Direction 是买卖方向。
+	Direction string `json:"direction"`
+	// OffsetFlag 是开平标志。
+	OffsetFlag string `json:"offset_flag"`
+	// Price 是成交价。
+	Price float64 `json:"price"`
+	// Volume 是成交手数。
+	Volume int `json:"volume"`
+	// TradeTime 是成交发生时间。
+	TradeTime time.Time `json:"trade_time"`
+	// TradingDay 是成交所属交易日。
+	TradingDay string `json:"trading_day"`
+	// ReceivedAt 是系统接收到该成交回报的时间。
 	ReceivedAt time.Time `json:"received_at"`
 }
 
 type SubmitOrderRequest struct {
-	AccountID  string  `json:"account_id"`
-	Symbol     string  `json:"symbol"`
-	ExchangeID string  `json:"exchange_id"`
-	Direction  string  `json:"direction"`
-	OffsetFlag string  `json:"offset_flag"`
+	// AccountID 是目标账户标识。
+	AccountID string `json:"account_id"`
+	// Symbol 是下单合约。
+	Symbol string `json:"symbol"`
+	// ExchangeID 是交易所代码。
+	ExchangeID string `json:"exchange_id"`
+	// Direction 是买卖方向。
+	Direction string `json:"direction"`
+	// OffsetFlag 是开平标志。
+	OffsetFlag string `json:"offset_flag"`
+	// LimitPrice 是限价价格。
 	LimitPrice float64 `json:"limit_price"`
-	Volume     int     `json:"volume"`
-	ClientTag  string  `json:"client_tag"`
-	Reason     string  `json:"reason"`
+	// Volume 是下单手数。
+	Volume int `json:"volume"`
+	// ClientTag 是前端或调用方附带的标识。
+	ClientTag string `json:"client_tag"`
+	// Reason 记录这次下单的来源或原因。
+	Reason string `json:"reason"`
 }
 
 type CancelOrderRequest struct {
-	AccountID  string `json:"account_id"`
-	CommandID  string `json:"command_id"`
-	OrderRef   string `json:"order_ref"`
+	// AccountID 是目标账户标识。
+	AccountID string `json:"account_id"`
+	// CommandID 是系统内部指令 ID。
+	CommandID string `json:"command_id"`
+	// OrderRef 是本地报单引用。
+	OrderRef string `json:"order_ref"`
+	// ExchangeID 是交易所代码。
 	ExchangeID string `json:"exchange_id"`
+	// OrderSysID 是交易所系统单号。
 	OrderSysID string `json:"order_sys_id"`
-	FrontID    int    `json:"front_id"`
-	SessionID  int    `json:"session_id"`
-	Reason     string `json:"reason"`
+	// FrontID 是下单会话 FrontID。
+	FrontID int `json:"front_id"`
+	// SessionID 是下单会话 SessionID。
+	SessionID int `json:"session_id"`
+	// Reason 记录撤单来源或原因。
+	Reason string `json:"reason"`
 }
 
 type OrderCommandAudit struct {
-	ID          int64          `json:"id"`
-	AccountID   string         `json:"account_id"`
-	CommandID   string         `json:"command_id"`
-	CommandType string         `json:"command_type"`
-	Symbol      string         `json:"symbol"`
-	RiskStatus  string         `json:"risk_status"`
-	RiskReason  string         `json:"risk_reason"`
-	Request     map[string]any `json:"request"`
-	Response    map[string]any `json:"response"`
-	CreatedAt   time.Time      `json:"created_at"`
+	// ID 是数据库自增主键。
+	ID int64 `json:"id"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// CommandID 是系统内部订单命令 ID。
+	CommandID string `json:"command_id"`
+	// CommandType 表示 submit_order 或 cancel_order。
+	CommandType string `json:"command_type"`
+	// Symbol 是相关合约代码。
+	Symbol string `json:"symbol"`
+	// RiskStatus 表示风控是否放行。
+	RiskStatus string `json:"risk_status"`
+	// RiskReason 是风控拒绝或提示原因。
+	RiskReason string `json:"risk_reason"`
+	// Request 保存原始请求载荷。
+	Request map[string]any `json:"request"`
+	// Response 保存执行结果或回执快照。
+	Response map[string]any `json:"response"`
+	// CreatedAt 是审计记录创建时间。
+	CreatedAt time.Time `json:"created_at"`
 }
 
 type QueryAudit struct {
-	ID        int64     `json:"id"`
-	AccountID string    `json:"account_id"`
-	QueryType string    `json:"query_type"`
-	Status    string    `json:"status"`
-	Detail    string    `json:"detail"`
+	// ID 是数据库自增主键。
+	ID int64 `json:"id"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// QueryType 表示 account、positions、orders、trades 等查询种类。
+	QueryType string `json:"query_type"`
+	// Status 表示本次查询成功还是失败。
+	Status string `json:"status"`
+	// Detail 保存错误信息或 OK 说明。
+	Detail string `json:"detail"`
+	// CreatedAt 是查询审计时间。
 	CreatedAt time.Time `json:"created_at"`
 }
 
 type SessionState struct {
-	AccountID           string    `json:"account_id"`
-	FrontID             int       `json:"front_id"`
-	SessionID           int       `json:"session_id"`
-	NextOrderRef        int64     `json:"next_order_ref"`
-	Connected           bool      `json:"connected"`
-	Authenticated       bool      `json:"authenticated"`
-	LoggedIn            bool      `json:"logged_in"`
-	SettlementConfirmed bool      `json:"settlement_confirmed"`
-	TradingDay          string    `json:"trading_day"`
-	UpdatedAt           time.Time `json:"updated_at"`
+	// AccountID 是账户标识。
+	AccountID string `json:"account_id"`
+	// FrontID 是最近登录会话的 FrontID。
+	FrontID int `json:"front_id"`
+	// SessionID 是最近登录会话的 SessionID。
+	SessionID int `json:"session_id"`
+	// NextOrderRef 是下次分配给报单的本地引用序号。
+	NextOrderRef int64 `json:"next_order_ref"`
+	// Connected 表示前置是否已连接。
+	Connected bool `json:"connected"`
+	// Authenticated 表示认证是否成功。
+	Authenticated bool `json:"authenticated"`
+	// LoggedIn 表示登录是否成功。
+	LoggedIn bool `json:"logged_in"`
+	// SettlementConfirmed 表示结算确认是否已完成。
+	SettlementConfirmed bool `json:"settlement_confirmed"`
+	// TradingDay 是该会话对应交易日。
+	TradingDay string `json:"trading_day"`
+	// UpdatedAt 是会话状态更新时间。
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type EventEnvelope struct {
+	// Type 是广播事件类型，例如 trade_account_update。
 	Type string `json:"type"`
-	Data any    `json:"data"`
+	// Data 是事件负载，具体结构随 Type 变化。
+	Data any `json:"data"`
 }
 
 type GatewayEvent struct {
-	Type  string
+	// Type 是底层网关事件类型。
+	Type string
+	// Order 用于携带委托状态更新事件。
 	Order *OrderRecord
+	// Trade 用于携带成交事件。
 	Trade *TradeRecord
-	Err   error
+	// Err 用于携带底层网关错误。
+	Err error
 }
 
 type Gateway interface {

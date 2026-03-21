@@ -14,14 +14,22 @@ import (
 type traderSpi struct {
 	ctp.TraderSpi
 
-	lastReqID     atomic.Int64
+	// lastReqID 生成递增请求号，供认证、登录和查合约请求复用。
+	lastReqID atomic.Int64
+	// queryFinished 在合约查询回调收到最后一条时关闭，用于通知查询阶段完成。
 	queryFinished chan struct{}
+	// queryDoneOnce 保证 queryFinished 只关闭一次。
 	queryDoneOnce sync.Once
-	instruments   []instrumentInfo
+	// instruments 累积 Trader 查询回调返回的合约信息。
+	instruments []instrumentInfo
+	// instrumentsMu 保护 instruments 切片的并发访问。
 	instrumentsMu sync.Mutex
-	tradingDay    string
-	tradingDayMu  sync.Mutex
-	status        *RuntimeStatusCenter
+	// tradingDay 保存登录回调返回的当前交易日。
+	tradingDay string
+	// tradingDayMu 保护 tradingDay 字段。
+	tradingDayMu sync.Mutex
+	// status 用于把前置连接、登录和交易日同步到全局状态中心。
+	status *RuntimeStatusCenter
 }
 
 func newTraderSpi() *traderSpi {
@@ -185,11 +193,16 @@ func (p *traderSpi) getTradingDay() string {
 }
 
 type instrumentSnapshot struct {
-	ID           string
-	ExchangeID   string
-	ProductID    string
+	// ID 是回调里读取到的合约代码。
+	ID string
+	// ExchangeID 是交易所代码。
+	ExchangeID string
+	// ProductID 是品种代码。
+	ProductID string
+	// ProductClass 是 CTP 产品类别。
 	ProductClass byte
-	PriceTick    float64
+	// PriceTick 是该合约最小变动价位。
+	PriceTick float64
 }
 
 func safeRspErrorID(pRspInfo ctp.CThostFtdcRspInfoField) (errorID int) {

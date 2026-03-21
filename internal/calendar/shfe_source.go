@@ -1,4 +1,4 @@
-﻿package calendar
+package calendar
 
 import (
 	"context"
@@ -22,15 +22,21 @@ import (
 const wafMarker = "WEB 应用防火墙"
 
 type AnnouncementMeta struct {
-	Title       string
-	URL         string
+	// Title 是公告标题。
+	Title string
+	// URL 是公告页面地址。
+	URL string
+	// PublishedAt 是公告发布时间。
 	PublishedAt time.Time
 }
 
 type Announcement struct {
-	Year       int
+	// Year 是该公告对应的年份。
+	Year int
+	// ClosedDays 是公告中识别出的休市日期列表。
 	ClosedDays []time.Time
-	Meta       AnnouncementMeta
+	// Meta 是公告元数据。
+	Meta AnnouncementMeta
 }
 
 type SHFESource interface {
@@ -38,23 +44,34 @@ type SHFESource interface {
 }
 
 type SourceOptions struct {
+	// EnableBrowserFallback 控制网页抓取遇到 WAF 时是否使用浏览器兜底。
 	EnableBrowserFallback bool
-	BrowserPath           string
-	BrowserHeadless       bool
+	// BrowserPath 指定浏览器可执行文件。
+	BrowserPath string
+	// BrowserHeadless 控制是否使用无头浏览器。
+	BrowserHeadless bool
 }
 
 type shfeSource struct {
+	// entryURL 是抓取入口地址。
 	entryURL string
-	client   *http.Client
-	opts     SourceOptions
+	// client 是 HTTP 抓取客户端。
+	client *http.Client
+	// opts 保存抓取策略配置。
+	opts SourceOptions
 
-	mu       sync.Mutex
+	// mu 保护页面缓存和 hostWAF 统计。
+	mu sync.Mutex
+	// pageCache 缓存已经抓取过的页面内容。
 	pageCache map[string]cachedPage
-	hostWAF   map[string]int
+	// hostWAF 记录各 host 遇到 WAF 的次数。
+	hostWAF map[string]int
 }
 
 type cachedPage struct {
-	body     string
+	// body 是缓存页面正文。
+	body string
+	// finalURL 是请求跳转后的最终 URL。
 	finalURL string
 }
 
@@ -75,9 +92,9 @@ func NewSHFESourceWithOptions(entryURL string, opts SourceOptions) SHFESource {
 		opts.BrowserHeadless = true
 	}
 	return &shfeSource{
-		entryURL: entryURL,
-		client:   &http.Client{Timeout: 20 * time.Second, Jar: jar},
-		opts:     opts,
+		entryURL:  entryURL,
+		client:    &http.Client{Timeout: 20 * time.Second, Jar: jar},
+		opts:      opts,
 		pageCache: make(map[string]cachedPage),
 		hostWAF:   make(map[string]int),
 	}
