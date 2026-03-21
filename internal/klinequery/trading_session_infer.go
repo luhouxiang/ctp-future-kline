@@ -5,7 +5,7 @@ import (
 	"sort"
 	"time"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 )
 
 func tryInferTradingSessionFromL9Bars(db *sql.DB, variety string, bars []KlineBar) error {

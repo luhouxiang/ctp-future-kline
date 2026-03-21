@@ -5,7 +5,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"ctp-go-demo/internal/bus"
+	"ctp-future-kline/internal/bus"
 	_ "modernc.org/sqlite"
 )
 

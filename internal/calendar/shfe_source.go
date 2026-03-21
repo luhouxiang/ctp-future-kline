@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 	"github.com/chromedp/chromedp"
 )
 

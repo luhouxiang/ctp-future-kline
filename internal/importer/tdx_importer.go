@@ -17,10 +17,10 @@ import (
 	"sync"
 	"time"
 
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/klineclock"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/trader"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/quotes"
 
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
@@ -43,68 +43,68 @@ var exchangeCodeMap = map[string]string{
 }
 
 type UploadFile struct {
-	// Name 是上传文件名，通常包含交易所编码和来源信息。
+	// Name 是上传文件名，通常形如 `30#ag2605.txt`。
 	Name string
-	// Data 是文件完整内容。
+	// Data 是文件原始字节内容，通常为通达信导出的 GBK 文本。
 	Data []byte
 }
 
 type Progress struct {
-	// TotalFiles 是本次导入文件总数。
+	// TotalFiles 是本次导入任务接收到的文件总数。
 	TotalFiles int `json:"total_files"`
-	// ProcessedFiles 是已处理文件数。
+	// ProcessedFiles 是已经完成处理的文件数，无论成功、跳过还是失败都会计入。
 	ProcessedFiles int `json:"processed_files"`
-	// TotalLines 是已扫描总行数。
+	// TotalLines 是已经解析成分钟线的数据总条数。
 	TotalLines int `json:"total_lines"`
-	// InsertedRows 是新增写入行数。
+	// InsertedRows 是新写入数据库的分钟线条数。
 	InsertedRows int `json:"inserted_rows"`
-	// OverwrittenRows 是覆盖写入行数。
+	// OverwrittenRows 是发生覆盖写入的数据条数。
 	OverwrittenRows int `json:"overwritten_rows"`
-	// SkippedRows 是因重复或策略跳过的行数。
+	// SkippedRows 是因冲突处理策略或重复数据而被跳过的数据条数。
 	SkippedRows int `json:"skipped_rows"`
-	// SkippedFiles 是被整体跳过的文件数。
+	// SkippedFiles 是因文件名不合法、无有效数据等原因被跳过的文件数。
 	SkippedFiles int `json:"skipped_files"`
-	// ErrorCount 是累计错误数。
+	// ErrorCount 是导入过程中记录的错误次数。
 	ErrorCount int `json:"error_count"`
-	// Done 表示导入是否已完成。
+	// Done 表示导入任务是否已经结束。
 	Done bool `json:"done"`
-	// Canceled 表示导入是否被取消。
+	// Canceled 表示任务是否因用户取消而结束。
 	Canceled bool `json:"canceled"`
-	// LastError 是最近一次错误信息。
+	// LastError 保存最近一次错误的摘要，便于前端展示。
 	LastError string `json:"last_error,omitempty"`
 }
 
 type ConflictRecord struct {
-	// FileName 是冲突来源文件名。
+	// FileName 是发生冲突的数据所在文件名。
 	FileName string `json:"file_name"`
-	// LineNumber 是冲突所在源文件行号。
+	// LineNumber 是冲突数据在源文件中的原始行号。
 	LineNumber int `json:"line_number"`
-	// InstrumentID 是冲突所属合约。
+	// InstrumentID 是冲突分钟线所属合约代码。
 	InstrumentID string `json:"instrument_id"`
-	// Exchange 是冲突所属交易所。
+	// Exchange 是冲突分钟线所属交易所代码。
 	Exchange string `json:"exchange"`
-	// MinuteTime 是冲突分钟时间。
+	// MinuteTime 是冲突分钟线对应的分钟时间戳。
 	MinuteTime string `json:"minute_time"`
-	// Existing 是数据库中已有的 bar。
-	Existing trader.MinuteBar `json:"existing"`
-	// Incoming 是当前准备写入的 bar。
-	Incoming trader.MinuteBar `json:"incoming"`
-	// OverwriteScope 表示本次覆盖决策的作用范围。
+	// Existing 是数据库中已存在的分钟线。
+	Existing quotes.MinuteBar `json:"existing"`
+	// Incoming 是当前导入文件中准备写入的新分钟线。
+	Incoming quotes.MinuteBar `json:"incoming"`
+	// OverwriteScope 记录本次冲突最终采用的覆盖范围。
 	OverwriteScope string `json:"overwrite_scope"`
-	// Batch 表示该冲突是否来自批量覆盖场景。
+	// Batch 表示这次决策是否对整批文件统一生效。
 	Batch bool `json:"batch"`
-	// NewCount 是批量场景下待新增记录数。
+	// NewCount 是本次比较后待写入的新记录数。
 	NewCount int `json:"new_count"`
-	// DuplicateCount 是批量场景下重复记录数。
+	// DuplicateCount 是本次比较后判定为重复或冲突的记录数。
 	DuplicateCount int `json:"duplicate_count"`
 }
 
 type DecisionRequest struct {
-	// Action 指定冲突处理动作，如 overwrite、skip、cancel。
+	// Action 是本次冲突处理动作，可取 overwrite、skip 或 cancel。
 	Action string `json:"action"`
-	// OverwriteInstrument 表示是否对该合约后续冲突统一覆盖。
+	// OverwriteInstrument 表示是否对当前合约后续冲突统一采用覆盖策略。
 	OverwriteInstrument bool `json:"overwrite_instrument"`
-	// OverwriteAllContracts 表示是否对所有合约后续冲突统一覆盖。
+	// OverwriteAllContracts 表示是否对本次任务后续所有合约统一采用覆盖策略。
 	OverwriteAllContracts bool `json:"overwrite_all_contracts"`
 }
 
@@ -123,35 +123,35 @@ func (noopHandler) OnDone(Progress)           {}
 func (noopHandler) OnError(error)             {}
 
 type TDXImportSession struct {
-	// id 是导入会话唯一标识。
+	// id 是导入会话的唯一标识，用于前端轮询和日志关联。
 	id string
-	// dbPath 是目标数据库连接串。
+	// dbPath 是导入目标数据库连接串或数据库路径。
 	dbPath string
-	// files 是本次导入的原始上传文件集合。
+	// files 是当前任务待处理的上传文件列表。
 	files []UploadFile
-	// handler 用于向外发送进度、冲突和结束事件。
+	// handler 用于向外部回调进度、冲突、完成和错误事件。
 	handler EventHandler
 
-	// mu 保护进度、待决冲突和全局覆盖策略。
+	// mu 保护会话内部可变状态，避免导入协程和外部决策并发读写冲突。
 	mu sync.Mutex
-	// progress 保存当前导入进度。
+	// progress 保存任务当前累计进度快照。
 	progress Progress
-	// globalReplace 表示是否对所有后续冲突都直接覆盖。
+	// globalReplace 表示用户已选择对后续所有冲突统一执行覆盖。
 	globalReplace bool
-	// replaceByInst 记录按合约维度的覆盖策略。
+	// replaceByInst 记录已选择“按合约统一覆盖”的合约集合。
 	replaceByInst map[string]bool
-	// pending 保存当前等待用户决策的冲突。
+	// pending 指向当前等待用户决策的冲突记录，没有待决冲突时为 nil。
 	pending *ConflictRecord
-	// decisionCh 接收前端提交的冲突处理决策。
+	// decisionCh 用于把前端提交的冲突处理决策传回导入协程。
 	decisionCh chan DecisionRequest
 }
 
 type rawTdxRow struct {
-	// lineNumber 是该行在原文件中的行号。
+	// lineNumber 是该记录在源文件中的行号。
 	lineNumber int
-	// tradingDay 是解析后的交易日。
+	// tradingDay 是该行记录解析出的交易日期。
 	tradingDay time.Time
-	// hhmm 是分钟时间标签。
+	// hhmm 是以 HHMM 表示的分钟时间。
 	hhmm int
 	// open 是开盘价。
 	open float64
@@ -342,7 +342,8 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		if line == "" || i <= 1 {
 			continue
 		}
-		if strings.HasPrefix(line, "#数据来源") {
+		// 遇到尾部元信息行后停止继续解析数据体。
+		if strings.HasPrefix(line, "#") {
 			break
 		}
 		row, ok, err := parseRawDataLine(line, i+1)
@@ -365,7 +366,7 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		return fileTradingDays[i].Before(fileTradingDays[j])
 	})
 
-	bars := make([]trader.MinuteBar, 0, len(rawRows))
+	bars := make([]quotes.MinuteBar, 0, len(rawRows))
 	for _, row := range rawRows {
 		bar, err := buildMinuteBarFromRawRow(row, instrumentID, exchange, fileTradingDays, timeResolver)
 		if err != nil {
@@ -437,13 +438,13 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 	return nil
 }
 
-func (s *TDXImportSession) batchCompareAndWrite(db *sql.DB, fileName string, bars []trader.MinuteBar, isL9 bool) error {
+func (s *TDXImportSession) batchCompareAndWrite(db *sql.DB, fileName string, bars []quotes.MinuteBar, isL9 bool) error {
 	var tableName string
 	var err error
 	if isL9 {
-		tableName, err = trader.TableNameForL9Variety(bars[0].Variety)
+		tableName, err = quotes.TableNameForL9Variety(bars[0].Variety)
 	} else {
-		tableName, err = trader.TableNameForVariety(bars[0].Variety)
+		tableName, err = quotes.TableNameForVariety(bars[0].Variety)
 	}
 	if err != nil {
 		return err
@@ -463,8 +464,8 @@ func (s *TDXImportSession) batchCompareAndWrite(db *sql.DB, fileName string, bar
 		return err
 	}
 
-	newBars := make([]trader.MinuteBar, 0, len(bars))
-	dupBars := make([]trader.MinuteBar, 0, len(bars))
+	newBars := make([]quotes.MinuteBar, 0, len(bars))
+	dupBars := make([]quotes.MinuteBar, 0, len(bars))
 	for _, bar := range bars {
 		key := bar.MinuteTime.Format("2006-01-02 15:04:00")
 		if dupSet[key] {
@@ -705,18 +706,18 @@ func buildMinuteBarFromRawRow(
 	exchange string,
 	fileTradingDays []time.Time,
 	resolver *klineclock.CalendarResolver,
-) (trader.MinuteBar, error) {
+) (quotes.MinuteBar, error) {
 	minuteTime, adjustedTime, err := buildBarTimesWithFileDays(row.tradingDay, row.hhmm, fileTradingDays, resolver)
 	if err != nil {
-		return trader.MinuteBar{}, err
+		return quotes.MinuteBar{}, err
 	}
 	instrumentID = strings.ToLower(strings.TrimSpace(instrumentID))
 	varietySource := instrumentID
 	if strings.HasSuffix(varietySource, "l9") {
 		varietySource = strings.TrimSuffix(varietySource, "l9")
 	}
-	return trader.MinuteBar{
-		Variety:         trader.NormalizeVariety(varietySource),
+	return quotes.MinuteBar{
+		Variety:         quotes.NormalizeVariety(varietySource),
 		InstrumentID:    instrumentID,
 		Exchange:        exchange,
 		MinuteTime:      minuteTime.Truncate(time.Minute),
@@ -791,7 +792,7 @@ func normalizeDay(day time.Time) time.Time {
 	return time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.Local)
 }
 
-func loadExistingTimeSet(db *sql.DB, tableName, instrumentID, exchange, period string, bars []trader.MinuteBar) (map[string]bool, error) {
+func loadExistingTimeSet(db *sql.DB, tableName, instrumentID, exchange, period string, bars []quotes.MinuteBar) (map[string]bool, error) {
 	minT := bars[0].MinuteTime
 	maxT := bars[0].MinuteTime
 	for _, bar := range bars[1:] {
@@ -861,19 +862,19 @@ CREATE TABLE IF NOT EXISTS "%s" (
   PRIMARY KEY ("%s", "%s", "%s", "%s")
 )`,
 		tableName,
-		trader.ColInstrumentID,
-		trader.ColExchange,
-		trader.ColTime,
-		trader.ColAdjustedTime,
-		trader.ColPeriod,
-		trader.ColOpen,
-		trader.ColHigh,
-		trader.ColLow,
-		trader.ColClose,
-		trader.ColVolume,
-		trader.ColOpenInterest,
-		trader.ColSettlement,
-		trader.ColTime, trader.ColInstrumentID, trader.ColExchange, trader.ColPeriod,
+		quotes.ColInstrumentID,
+		quotes.ColExchange,
+		quotes.ColTime,
+		quotes.ColAdjustedTime,
+		quotes.ColPeriod,
+		quotes.ColOpen,
+		quotes.ColHigh,
+		quotes.ColLow,
+		quotes.ColClose,
+		quotes.ColVolume,
+		quotes.ColOpenInterest,
+		quotes.ColSettlement,
+		quotes.ColTime, quotes.ColInstrumentID, quotes.ColExchange, quotes.ColPeriod,
 	)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure kline table failed: %w", err)
@@ -881,29 +882,29 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if err := ensureDataTimeColumn(db, tableName); err != nil {
 		return err
 	}
-	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME`, tableName, trader.ColAdjustedTime)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME`, tableName, quotes.ColAdjustedTime)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
 		// modernc sqlite returns "duplicate column name"
 		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
 			return fmt.Errorf("add AdjustedTime column failed: %w", err)
 		}
 	}
 	if _, err := db.Exec(fmt.Sprintf(`UPDATE "%s" SET "%s"="%s" WHERE "%s" IS NULL`,
-		tableName, trader.ColAdjustedTime, trader.ColTime, trader.ColAdjustedTime)); err != nil {
+		tableName, quotes.ColAdjustedTime, quotes.ColTime, quotes.ColAdjustedTime)); err != nil {
 		return fmt.Errorf("backfill AdjustedTime failed: %w", err)
 	}
 	if _, err := db.Exec(fmt.Sprintf(`CREATE INDEX "idx_%s_inst_period_adj" ON "%s"("%s","%s","%s" DESC)`,
-		tableName, tableName, trader.ColInstrumentID, trader.ColPeriod, trader.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
+		tableName, tableName, quotes.ColInstrumentID, quotes.ColPeriod, quotes.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
 	}
 	if _, err := db.Exec(fmt.Sprintf(`CREATE INDEX "idx_%s_adj" ON "%s"("%s" DESC)`,
-		tableName, tableName, trader.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
+		tableName, tableName, quotes.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
 	}
 	return nil
 }
 
 func ensureDataTimeColumn(db *sql.DB, tableName string) error {
-	hasDataTime, err := tableHasColumn(db, tableName, trader.ColDataTime)
+	hasDataTime, err := tableHasColumn(db, tableName, quotes.ColDataTime)
 	if err != nil {
 		return err
 	}
@@ -915,21 +916,21 @@ func ensureDataTimeColumn(db *sql.DB, tableName string) error {
 		return err
 	}
 	if !hasLegacyTime {
-		return fmt.Errorf("table %s missing both %s and Time columns", tableName, trader.ColDataTime)
+		return fmt.Errorf("table %s missing both %s and Time columns", tableName, quotes.ColDataTime)
 	}
-	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE "%s" RENAME COLUMN "Time" TO "%s"`, tableName, trader.ColDataTime)); err != nil {
-		return fmt.Errorf("rename Time to %s failed: %w", trader.ColDataTime, err)
+	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE "%s" RENAME COLUMN "Time" TO "%s"`, tableName, quotes.ColDataTime)); err != nil {
+		return fmt.Errorf("rename Time to %s failed: %w", quotes.ColDataTime, err)
 	}
 	return nil
 }
 
 func resolveDataTimeColumn(db *sql.DB, tableName string) (string, error) {
-	hasDataTime, err := tableHasColumn(db, tableName, trader.ColDataTime)
+	hasDataTime, err := tableHasColumn(db, tableName, quotes.ColDataTime)
 	if err != nil {
 		return "", err
 	}
 	if hasDataTime {
-		return trader.ColDataTime, nil
+		return quotes.ColDataTime, nil
 	}
 	hasLegacyTime, err := tableHasColumn(db, tableName, "Time")
 	if err != nil {
@@ -938,7 +939,7 @@ func resolveDataTimeColumn(db *sql.DB, tableName string) (string, error) {
 	if hasLegacyTime {
 		return "Time", nil
 	}
-	return "", fmt.Errorf("table %s missing both %s and Time columns", tableName, trader.ColDataTime)
+	return "", fmt.Errorf("table %s missing both %s and Time columns", tableName, quotes.ColDataTime)
 }
 
 func tableHasColumn(db *sql.DB, tableName string, column string) (bool, error) {
@@ -963,7 +964,7 @@ WHERE table_schema = DATABASE()
 	return false, rows.Err()
 }
 
-func upsertBarsInTx(db *sql.DB, tableName string, bars []trader.MinuteBar) error {
+func upsertBarsInTx(db *sql.DB, tableName string, bars []quotes.MinuteBar) error {
 	if len(bars) == 0 {
 		return nil
 	}
@@ -994,15 +995,15 @@ ON DUPLICATE KEY UPDATE
   "%s" = VALUES("%s"),
   "%s" = VALUES("%s")`,
 		tableName,
-		trader.ColInstrumentID, trader.ColExchange, trader.ColTime, trader.ColAdjustedTime, trader.ColPeriod, trader.ColOpen, trader.ColHigh, trader.ColLow, trader.ColClose, trader.ColVolume, trader.ColOpenInterest, trader.ColSettlement,
-		trader.ColAdjustedTime, trader.ColAdjustedTime,
-		trader.ColOpen, trader.ColOpen,
-		trader.ColHigh, trader.ColHigh,
-		trader.ColLow, trader.ColLow,
-		trader.ColClose, trader.ColClose,
-		trader.ColVolume, trader.ColVolume,
-		trader.ColOpenInterest, trader.ColOpenInterest,
-		trader.ColSettlement, trader.ColSettlement,
+		quotes.ColInstrumentID, quotes.ColExchange, quotes.ColTime, quotes.ColAdjustedTime, quotes.ColPeriod, quotes.ColOpen, quotes.ColHigh, quotes.ColLow, quotes.ColClose, quotes.ColVolume, quotes.ColOpenInterest, quotes.ColSettlement,
+		quotes.ColAdjustedTime, quotes.ColAdjustedTime,
+		quotes.ColOpen, quotes.ColOpen,
+		quotes.ColHigh, quotes.ColHigh,
+		quotes.ColLow, quotes.ColLow,
+		quotes.ColClose, quotes.ColClose,
+		quotes.ColVolume, quotes.ColVolume,
+		quotes.ColOpenInterest, quotes.ColOpenInterest,
+		quotes.ColSettlement, quotes.ColSettlement,
 	)
 	prep, err := tx.Prepare(stmt)
 	if err != nil {
@@ -1060,7 +1061,7 @@ func parseInstrumentIDFromHeaderLine(data []byte) string {
 	return strings.ToUpper(strings.TrimSpace(fields[0]))
 }
 
-func chooseAdjustedTime(bar trader.MinuteBar) time.Time {
+func chooseAdjustedTime(bar quotes.MinuteBar) time.Time {
 	if !bar.AdjustedTime.IsZero() {
 		return bar.AdjustedTime
 	}

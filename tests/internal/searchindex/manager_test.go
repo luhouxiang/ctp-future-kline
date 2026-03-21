@@ -4,8 +4,8 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/searchindex"
-	"ctp-go-demo/tests/internal/testmysql"
+	"ctp-future-kline/internal/searchindex"
+	"ctp-future-kline/tests/internal/testmysql"
 )
 
 func TestSearchAndLookup(t *testing.T) {

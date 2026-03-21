@@ -1,7 +1,7 @@
 // market_data_runtime.go 是实时行情处理核心。
 // 它将 tick 按合约分片串行处理，在 shard 内完成时间规整、去重、漂移检测、1m/mm 聚合，
 // 并把结果交给落库、文件输出、L9 计算和旁路分发模块。
-package trader
+package quotes
 
 import (
 	"fmt"
@@ -13,10 +13,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ctp-go-demo/internal/klineagg"
-	"ctp-go-demo/internal/klineclock"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/sessiontime"
+	"ctp-future-kline/internal/klineagg"
+	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 const (

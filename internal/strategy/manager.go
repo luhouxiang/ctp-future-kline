@@ -13,8 +13,8 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/logger"
 )
 
 type Manager struct {

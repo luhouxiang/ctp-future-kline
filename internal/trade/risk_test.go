@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/order"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/order"
 )
 
 func TestValidateSubmitAllowsManualOrder(t *testing.T) {

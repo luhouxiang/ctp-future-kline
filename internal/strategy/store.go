@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	dbx "ctp-go-demo/internal/db"
+	dbx "ctp-future-kline/internal/db"
 )
 
 type Store struct {

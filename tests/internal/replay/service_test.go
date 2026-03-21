@@ -13,8 +13,8 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/replay"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/replay"
 	_ "modernc.org/sqlite"
 )
 
@@ -204,7 +204,7 @@ func TestReplayServiceTickDirIgnoresWrongSourcesByAutoIncludingTickCSV(t *testin
 	task, err := svc.Start(replay.StartRequest{
 		Mode:    "fast",
 		TickDir: tickDir,
-		Sources: []string{"trader.md"},
+		Sources: []string{"quotes.md"},
 	})
 	if err != nil {
 		t.Fatalf("start tick dir replay failed: %v", err)

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"time"
 
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/sessiontime"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 func aggregateBarsByTimeframe(bars []KlineBar, timeframe string, timeframeMinutes int, sessions []sessionMinuteRange) []KlineBar {

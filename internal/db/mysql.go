@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"ctp-go-demo/internal/config"
+	"ctp-future-kline/internal/config"
 	_ "github.com/go-sql-driver/mysql"
 )
 

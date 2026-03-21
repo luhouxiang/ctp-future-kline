@@ -1,7 +1,7 @@
 // runtime_status.go 提供行情运行时的统一状态中心。
 // 所有连接状态、订阅状态、tick 延迟、队列深度、去重计数等指标都汇总到这里，
 // 再由 /api/status 和 WebSocket 对外暴露。
-package trader
+package quotes
 
 import (
 	"sync"
@@ -18,10 +18,10 @@ const (
 type RuntimeSnapshot struct {
 	// State 描述行情主链路的整体状态，如 idle、starting、running、error。
 	State string `json:"state"`
-	// TraderFront 表示 Trader 前置是否已连通。
-	TraderFront bool `json:"trader_front"`
-	// TraderLogin 表示 Trader 会话是否已登录成功。
-	TraderLogin bool `json:"trader_login"`
+	// QueryFront 表示查询前置是否已连通。
+	QueryFront bool `json:"query_front"`
+	// QueryLogin 表示查询会话是否已登录成功。
+	QueryLogin bool `json:"query_login"`
 	// MdFront 表示行情前置是否已连通。
 	MdFront bool `json:"md_front"`
 	// MdLogin 表示行情会话是否已登录成功。
@@ -199,15 +199,15 @@ func (c *RuntimeStatusCenter) SetError(err error) {
 	})
 }
 
-func (c *RuntimeStatusCenter) MarkTraderFrontConnected() {
+func (c *RuntimeStatusCenter) MarkQueryFrontConnected() {
 	c.mutate(func(s *RuntimeSnapshot) {
-		s.TraderFront = true
+		s.QueryFront = true
 	})
 }
 
-func (c *RuntimeStatusCenter) MarkTraderLogin(loginTime string, tradingDay string) {
+func (c *RuntimeStatusCenter) MarkQueryLogin(loginTime string, tradingDay string) {
 	c.mutate(func(s *RuntimeSnapshot) {
-		s.TraderLogin = true
+		s.QueryLogin = true
 		if loginTime != "" {
 			s.ServerTime = loginTime
 		}

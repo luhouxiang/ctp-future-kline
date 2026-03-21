@@ -1,17 +1,17 @@
-// spi.go 实现 Trader API 的回调适配层。
+// spi.go 实现查询前置的回调适配层。
 // 它主要处理认证、登录和合约查询回调，并把交易日、连接状态、合约列表等信息反馈给上层服务。
-package trader
+package quotes
 
 import (
 	"sync"
 	"sync/atomic"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 
 	ctp "github.com/kkqy/ctp-go"
 )
 
-type traderSpi struct {
+type querySpi struct {
 	ctp.TraderSpi
 
 	// lastReqID 生成递增请求号，供认证、登录和查合约请求复用。
@@ -20,7 +20,7 @@ type traderSpi struct {
 	queryFinished chan struct{}
 	// queryDoneOnce 保证 queryFinished 只关闭一次。
 	queryDoneOnce sync.Once
-	// instruments 累积 Trader 查询回调返回的合约信息。
+	// instruments 累积查询阶段回调返回的合约信息。
 	instruments []instrumentInfo
 	// instrumentsMu 保护 instruments 切片的并发访问。
 	instrumentsMu sync.Mutex
@@ -32,29 +32,29 @@ type traderSpi struct {
 	status *RuntimeStatusCenter
 }
 
-func newTraderSpi() *traderSpi {
-	return &traderSpi{queryFinished: make(chan struct{})}
+func newQuerySpi() *querySpi {
+	return &querySpi{queryFinished: make(chan struct{})}
 }
 
-func newTraderSpiWithStatus(status *RuntimeStatusCenter) *traderSpi {
-	return &traderSpi{
+func newQuerySpiWithStatus(status *RuntimeStatusCenter) *querySpi {
+	return &querySpi{
 		queryFinished: make(chan struct{}),
 		status:        status,
 	}
 }
 
-func (p *traderSpi) nextReqID() int {
+func (p *querySpi) nextReqID() int {
 	return int(p.lastReqID.Add(1))
 }
 
-func (p *traderSpi) OnFrontConnected() {
-	logger.Info("trader front connected")
+func (p *querySpi) OnFrontConnected() {
+	logger.Info("query front connected")
 	if p.status != nil {
-		p.status.MarkTraderFrontConnected()
+		p.status.MarkQueryFrontConnected()
 	}
 }
 
-func (p *traderSpi) OnRspAuthenticate(
+func (p *querySpi) OnRspAuthenticate(
 	_ ctp.CThostFtdcRspAuthenticateField,
 	pRspInfo ctp.CThostFtdcRspInfoField,
 	nRequestID int,
@@ -62,7 +62,7 @@ func (p *traderSpi) OnRspAuthenticate(
 ) {
 	logger.Info(
 		"ctp response",
-		"api", "trader",
+		"api", "query",
 		"callback", "OnRspAuthenticate",
 		"req_id", nRequestID,
 		"is_last", bIsLast,
@@ -75,7 +75,7 @@ func (p *traderSpi) OnRspAuthenticate(
 	logger.Error("authenticate failed", "error_id", pRspInfo.GetErrorID())
 }
 
-func (p *traderSpi) OnRspUserLogin(
+func (p *querySpi) OnRspUserLogin(
 	loginField ctp.CThostFtdcRspUserLoginField,
 	pRspInfo ctp.CThostFtdcRspInfoField,
 	nRequestID int,
@@ -83,7 +83,7 @@ func (p *traderSpi) OnRspUserLogin(
 ) {
 	logger.Info(
 		"ctp response",
-		"api", "trader",
+		"api", "query",
 		"callback", "OnRspUserLogin",
 		"req_id", nRequestID,
 		"is_last", bIsLast,
@@ -95,14 +95,14 @@ func (p *traderSpi) OnRspUserLogin(
 		logger.Info("user login success")
 		p.setTradingDay(loginField.GetTradingDay())
 		if p.status != nil {
-			p.status.MarkTraderLogin(loginField.GetLoginTime(), loginField.GetTradingDay())
+			p.status.MarkQueryLogin(loginField.GetLoginTime(), loginField.GetTradingDay())
 		}
 		return
 	}
 	logger.Error("user login failed", "error_id", pRspInfo.GetErrorID())
 }
 
-func (p *traderSpi) OnRspQryInstrument(
+func (p *querySpi) OnRspQryInstrument(
 	pInstrument ctp.CThostFtdcInstrumentField,
 	pRspInfo ctp.CThostFtdcRspInfoField,
 	nRequestID int,
@@ -131,7 +131,7 @@ func (p *traderSpi) OnRspQryInstrument(
 	}
 	logger.Info(
 		"ctp response",
-		"api", "trader",
+		"api", "query",
 		"callback", "OnRspQryInstrument",
 		"req_id", nRequestID,
 		"is_last", bIsLast,
@@ -171,7 +171,7 @@ func (p *traderSpi) OnRspQryInstrument(
 	finishQuery()
 }
 
-func (p *traderSpi) instrumentInfos() []instrumentInfo {
+func (p *querySpi) instrumentInfos() []instrumentInfo {
 	p.instrumentsMu.Lock()
 	defer p.instrumentsMu.Unlock()
 
@@ -180,13 +180,13 @@ func (p *traderSpi) instrumentInfos() []instrumentInfo {
 	return out
 }
 
-func (p *traderSpi) setTradingDay(day string) {
+func (p *querySpi) setTradingDay(day string) {
 	p.tradingDayMu.Lock()
 	defer p.tradingDayMu.Unlock()
 	p.tradingDay = day
 }
 
-func (p *traderSpi) getTradingDay() string {
+func (p *querySpi) getTradingDay() string {
 	p.tradingDayMu.Lock()
 	defer p.tradingDayMu.Unlock()
 	return p.tradingDay

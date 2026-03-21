@@ -1,6 +1,6 @@
 // replay_sink.go 是 replay.Service 和行情处理链之间的桥接层。
 // 它把回放源里的 tick 事件重新还原成 tickEvent，再复用 mdSpi 和 marketDataRuntime 的实时处理逻辑。
-package trader
+package quotes
 
 import (
 	"context"
@@ -10,14 +10,14 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/replay"
-	"ctp-go-demo/internal/strategy"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/replay"
+	"ctp-future-kline/internal/strategy"
 )
 
-// ReplaySink 是 replay 事件到 trader 行情处理器之间的桥接层。
+// ReplaySink 是 replay 事件到 quotes 行情处理器之间的桥接层。
 //
 // replay service 只负责把事件分发给 consumer，并不知道如何把 tick 真正写成分钟线。
 // ReplaySink 的职责就是把 bus.BusEvent 还原成 tickEvent，再交给 mdSpi 复用实时链路逻辑。
@@ -43,11 +43,11 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		l9Calc = newL9AsyncCalculator(store, true, 1, nil)
 	}
 	spi := newMdSpiWithStatusAndOptions(store, l9Calc, status, mdSpiOptions{
-		tickDedupWindow:  time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
-		driftThreshold:   time.Duration(cfg.DriftThresholdSeconds) * time.Second,
-		driftResumeTicks: cfg.DriftResumeTicks,
+		tickDedupWindow:   time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
+		driftThreshold:    time.Duration(cfg.DriftThresholdSeconds) * time.Second,
+		driftResumeTicks:  cfg.DriftResumeTicks,
 		enableMultiMinute: cfg.IsMultiMinuteEnabled(),
-		flowPath:         cfg.FlowPath,
+		flowPath:          cfg.FlowPath,
 		onTick: func(t tickEvent) {
 			strategy.PublishReplayTick(strategy.TickEvent{
 				InstrumentID:    t.InstrumentID,

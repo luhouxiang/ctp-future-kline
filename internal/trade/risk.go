@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/order"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/order"
 )
 
 var (

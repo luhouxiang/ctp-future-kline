@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/klinequery"
-	"ctp-go-demo/internal/mmkline"
-	"ctp-go-demo/internal/searchindex"
-	"ctp-go-demo/tests/internal/testmysql"
+	"ctp-future-kline/internal/klinequery"
+	"ctp-future-kline/internal/mmkline"
+	"ctp-future-kline/internal/searchindex"
+	"ctp-future-kline/tests/internal/testmysql"
 )
 
 func TestBarsAndSearch(t *testing.T) {

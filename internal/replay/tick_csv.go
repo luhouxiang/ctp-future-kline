@@ -13,8 +13,8 @@ import (
 	"strings"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/logger"
 )
 
 const (

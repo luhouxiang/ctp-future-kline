@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/logger"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/logger"
 )
 
 const timeLayout = "2006-01-02 15:04:05"

@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/importer"
-	"ctp-go-demo/internal/trader"
-	"ctp-go-demo/tests/internal/testmysql"
+	"ctp-future-kline/internal/importer"
+	"ctp-future-kline/internal/quotes"
+	"ctp-future-kline/tests/internal/testmysql"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 
@@ -38,7 +38,7 @@ func TestTDXImportSessionImportsContractAndL9(t *testing.T) {
 		t.Fatalf("SkippedFiles = %d, want 0", done.SkippedFiles)
 	}
 
-	store, err := trader.NewKlineStore(dbPath)
+	store, err := quotes.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewKlineStore() error = %v", err)
 	}
@@ -82,7 +82,7 @@ func TestTDXImportSessionImportsWhenHeaderMarkerMissing(t *testing.T) {
 		t.Fatalf("InsertedRows = %d, want 1", done.InsertedRows)
 	}
 
-	store, err := trader.NewKlineStore(dbPath)
+	store, err := quotes.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewKlineStore() error = %v", err)
 	}
@@ -140,7 +140,7 @@ func TestTDXImportSessionConflictAndOverwriteAll(t *testing.T) {
 		t.Fatalf("OverwrittenRows = %d, want 2", done.OverwrittenRows)
 	}
 
-	store, err := trader.NewKlineStore(dbPath)
+	store, err := quotes.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewKlineStore() error = %v", err)
 	}
@@ -246,7 +246,7 @@ func sampleTdxContent(instrument string, rows []string) string {
 		body += row + "\n"
 	}
 	return fmt.Sprintf(
-		"%s 示例 1分钟线 不复权\n      日期\t时间\t开盘\t最高\t最低\t收盘\t成交量\t持仓量\t结算价\n%s#数据来源:通达信\n",
+		"%s sample 1m export\nDate\tTime\tOpen\tHigh\tLow\tClose\tVolume\tOI\tSettle\n%s#source:tdx\n",
 		instrument,
 		body,
 	)
@@ -314,7 +314,7 @@ ON DUPLICATE KEY UPDATE
 
 func queryAdjustedTimeByDataTime(t *testing.T, dbPath string, dataTime string) string {
 	t.Helper()
-	store, err := trader.NewKlineStore(dbPath)
+	store, err := quotes.NewKlineStore(dbPath)
 	if err != nil {
 		t.Fatalf("NewKlineStore() error = %v", err)
 	}

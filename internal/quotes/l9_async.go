@@ -1,15 +1,15 @@
 // l9_async.go 负责主连/L9 的异步计算。
 // 它在不阻塞实时 1m 聚合主路径的前提下，根据品种内多合约分钟线计算加权结果并回写存储层。
-package trader
+package quotes
 
 import (
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"ctp-go-demo/internal/klineclock"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/sessiontime"
+	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 type l9Task struct {

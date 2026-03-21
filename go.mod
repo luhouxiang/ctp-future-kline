@@ -1,4 +1,4 @@
-module ctp-go-demo
+module ctp-future-kline
 
 go 1.25.7
 

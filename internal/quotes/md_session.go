@@ -1,14 +1,14 @@
 // md_session.go 管理行情订阅会话的保活逻辑。
 // 它负责断线后的指数退避重连、重新登录与重订阅，以及长时间无 tick 的网络异常告警。
-package trader
+package quotes
 
 import (
 	"math/rand"
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/logger"
 )
 
 type mdSessionOps struct {

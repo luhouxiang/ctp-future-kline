@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 )
 
 const dayLayout = "2006-01-02"

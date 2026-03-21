@@ -10,8 +10,8 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/calendar"
-	"ctp-go-demo/tests/internal/testmysql"
+	"ctp-future-kline/internal/calendar"
+	"ctp-future-kline/tests/internal/testmysql"
 	"golang.org/x/text/encoding/simplifiedchinese"
 )
 

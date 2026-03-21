@@ -1,6 +1,6 @@
 // market_data_file_writer.go 负责行情处理链路中的文件侧输出。
 // 它按 shard 异步落盘调试/追踪文件，避免文件 I/O 直接阻塞实时 tick 处理线程。
-package trader
+package quotes
 
 import (
 	"bufio"
@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 )
 
 type fileFlushRequest struct {

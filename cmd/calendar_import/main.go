@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"os"
 
-	"ctp-go-demo/internal/calendar"
-	"ctp-go-demo/internal/config"
-	dbx "ctp-go-demo/internal/db"
+	"ctp-future-kline/internal/calendar"
+	"ctp-future-kline/internal/config"
+	dbx "ctp-future-kline/internal/db"
 )
 
 func main() {

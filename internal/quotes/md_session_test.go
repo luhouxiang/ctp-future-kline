@@ -1,11 +1,11 @@
-package trader
+package quotes
 
 import (
 	"errors"
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/config"
+	"ctp-future-kline/internal/config"
 )
 
 func TestMDSessionBackoffGrowsAndCapsWithoutJitter(t *testing.T) {

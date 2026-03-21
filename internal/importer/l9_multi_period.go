@@ -5,13 +5,13 @@ import (
 	"errors"
 	"fmt"
 
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/mmkline"
-	"ctp-go-demo/internal/trader"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/mmkline"
+	"ctp-future-kline/internal/quotes"
 )
 
-func (s *TDXImportSession) aggregateMultiPeriodsAfterImport(db *sql.DB, bar trader.MinuteBar, isL9 bool) error {
-	variety := trader.NormalizeVariety(bar.Variety)
+func (s *TDXImportSession) aggregateMultiPeriodsAfterImport(db *sql.DB, bar quotes.MinuteBar, isL9 bool) error {
+	variety := quotes.NormalizeVariety(bar.Variety)
 	instrumentID := bar.InstrumentID
 
 	written, stats, err := mmkline.RebuildAndUpsert(db, mmkline.RebuildRequest{

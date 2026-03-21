@@ -1,4 +1,4 @@
-﻿# ctp-future-kline
+# ctp-future-kline
 
 一个基于 Go 的 CTP 期货分钟线采集与历史导入工具，提供 Web 控制台。
 
@@ -15,7 +15,7 @@
 ## 目录结构
 
 - `main.go`: 程序入口
-- `internal/trader`: CTP 连接、行情聚合、L9 计算、状态管理
+- `internal/quotes`: CTP 连接、行情聚合、L9 计算、状态管理
 - `internal/strategy`: Python 策略服务管理、gRPC 调用、策略实例、模拟执行与审计
 - `internal/web`: HTTP API、WebSocket、静态资源服务
 - `internal/importer`: 通达信历史数据导入
@@ -286,7 +286,7 @@ go run ./cmd/rename_mm_tables \
 
 `/api/status` 与 `status_update` 中 `status` 包含（节选）：
 
-- 基础连接：`state`、`trader_front`、`trader_login`、`md_front`、`md_login`、`md_subscribed`
+- 基础连接：`state`、`query_front`、`query_login`、`md_front`、`md_login`、`md_subscribed`
 - 订阅与时间：`subscribe_count`、`server_time`、`trading_day`、`last_tick_time`
 - 市场活跃：`is_market_open`
 - 错误：`last_error`
@@ -321,7 +321,7 @@ npm run dev
 go test ./tests/internal/config ./tests/internal/importer ./tests/internal/searchindex ./tests/internal/klinequery
 ```
 
-说明：`internal/trader` 与 `tests/internal/trader` 在部分环境下运行测试可能依赖本机 CTP DLL。
+说明：`internal/quotes` 与 `tests/internal/quotes` 在部分环境下运行测试可能依赖本机 CTP DLL。
 
 ## 依赖
 

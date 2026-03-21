@@ -1,12 +1,12 @@
 // market_data_side_effects.go 负责实时行情的旁路分发。
 // 它把 tick/bar 事件异步推送到策略模块、总线日志等外部消费者，并记录 side effect 阶段的队列延迟。
-package trader
+package quotes
 
 import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 )
 
 type marketDataSideEffects struct {

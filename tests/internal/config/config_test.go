@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"ctp-go-demo/internal/config"
+	"ctp-future-kline/internal/config"
 )
 
 func TestLoadSuccessAndDefaults(t *testing.T) {

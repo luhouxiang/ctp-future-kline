@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"ctp-go-demo/internal/klineagg"
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/klineagg"
+	"ctp-future-kline/internal/logger"
 )
 
 const (

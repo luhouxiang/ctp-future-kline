@@ -12,9 +12,9 @@ import (
 	"strings"
 	"time"
 
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/klineclock"
-	"ctp-go-demo/internal/sessiontime"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 type tickRow struct {

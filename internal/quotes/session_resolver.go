@@ -1,11 +1,11 @@
-package trader
+package quotes
 
 import (
 	"database/sql"
 	"fmt"
 	"sync"
 
-	"ctp-go-demo/internal/sessiontime"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 type sessionResolver struct {

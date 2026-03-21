@@ -12,9 +12,9 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/logger"
 )
 
 type Service struct {
@@ -43,7 +43,12 @@ type Service struct {
 	// subsMu 保护 subs 集合。
 	subsMu sync.Mutex
 	// busLog 用于把订单指令等事件旁路写到 bus，总线可选。
-	busLog *bus.FileLog
+	busLog    *bus.FileLog
+	ctx       context.Context
+	cancel    context.CancelFunc
+	startMu   sync.Mutex
+	started   bool
+	closeOnce sync.Once
 }
 
 func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string) (*Service, error) {
@@ -54,6 +59,7 @@ func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string) (*S
 	if err := store.UpsertTradeAccount(cfg.AccountID, ctpCfg.BrokerID, ctpCfg.UserID); err != nil {
 		return nil, err
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	s := &Service{
 		cfg:       cfg,
 		ctpCfg:    ctpCfg,
@@ -62,6 +68,8 @@ func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string) (*S
 		accountID: cfg.AccountID,
 		subs:      make(map[chan EventEnvelope]struct{}),
 		status:    TradeStatus{Enabled: cfg.IsEnabled(), AccountID: cfg.AccountID, UpdatedAt: time.Now()},
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 	if ctpCfg.IsBusEnabled() {
 		busPath := strings.TrimSpace(ctpCfg.BusLogPath)
@@ -88,20 +96,48 @@ func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string) (*S
 }
 
 func (s *Service) Close() error {
-	if s.gateway != nil {
-		_ = s.gateway.Close()
-	}
-	if s.store != nil {
-		return s.store.Close()
-	}
-	return nil
+	var err error
+	s.closeOnce.Do(func() {
+		if s.cancel != nil {
+			s.cancel()
+		}
+		s.startMu.Lock()
+		s.started = false
+		s.startMu.Unlock()
+		s.subsMu.Lock()
+		for ch := range s.subs {
+			close(ch)
+			delete(s.subs, ch)
+		}
+		s.subsMu.Unlock()
+		if s.gateway != nil {
+			_ = s.gateway.Close()
+		}
+		if s.store != nil {
+			err = s.store.Close()
+		}
+	})
+	return err
 }
 
 func (s *Service) Start() error {
+	s.startMu.Lock()
+	if s.started {
+		s.startMu.Unlock()
+		return nil
+	}
+	s.startMu.Unlock()
 	if err := s.gateway.Start(); err != nil {
 		s.setStatus(func(st *TradeStatus) { st.LastError = err.Error() })
 		return err
 	}
+	s.startMu.Lock()
+	if s.started {
+		s.startMu.Unlock()
+		return nil
+	}
+	s.started = true
+	s.startMu.Unlock()
 	s.setStatusFromGateway()
 	if err := s.saveSessionState(); err != nil {
 		logger.Warn("save trade session state failed", "error", err)
@@ -352,6 +388,11 @@ func (s *Service) Subscribe() (<-chan EventEnvelope, func()) {
 
 func (s *Service) forwardGatewayEvents(ch <-chan GatewayEvent) {
 	for ev := range ch {
+		select {
+		case <-s.ctx.Done():
+			return
+		default:
+		}
 		if ev.Order != nil {
 			if ev.Order.AccountID == "" {
 				ev.Order.AccountID = s.accountID
@@ -394,6 +435,8 @@ func (s *Service) pollQueries() {
 	defer positionTicker.Stop()
 	for {
 		select {
+		case <-s.ctx.Done():
+			return
 		case <-queryTicker.C:
 			s.setStatusFromGateway()
 			_, _ = s.RefreshAccount()
@@ -464,10 +507,15 @@ func (s *Service) broadcast(eventType string, data any) {
 	}
 	s.subsMu.Unlock()
 	for _, ch := range subs {
-		select {
-		case ch <- payload:
-		default:
-		}
+		func(out chan EventEnvelope) {
+			defer func() {
+				_ = recover()
+			}()
+			select {
+			case out <- payload:
+			default:
+			}
+		}(ch)
 	}
 }
 

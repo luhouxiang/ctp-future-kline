@@ -1,7 +1,7 @@
 // service.go 负责装配实时行情链路。
-// 它先通过 Trader API 完成认证、登录和合约查询，再启动 MD 订阅链路，
+// 它先通过查询前置完成认证、登录和合约查询，再启动 MD 订阅链路，
 // 把 mdSpi、marketDataRuntime、klineStore、L9 计算、bus、CSV 录制等模块串成完整处理管道。
-package trader
+package quotes
 
 import (
 	"encoding/json"
@@ -12,10 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/config"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/strategy"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/strategy"
 
 	ctp "github.com/kkqy/ctp-go"
 )
@@ -73,12 +73,12 @@ func (s *Service) Run() error {
 	}
 	logger.Info("flow directory ready", "flow_path", s.cfg.FlowPath)
 
-	instruments, err := s.runTraderQuery(nil)
+	instruments, err := s.runQueryStage(nil)
 	if err != nil {
-		logger.Error("trader query stage failed", "error", err)
+		logger.Error("query stage failed", "error", err)
 		return err
 	}
-	logger.Info("trader query stage completed", "instrument_count", len(instruments))
+	logger.Info("query stage completed", "instrument_count", len(instruments))
 
 	if err := s.runMarketDataOnce(instruments, nil); err != nil {
 		logger.Error("market data stage failed", "error", err)
@@ -96,20 +96,20 @@ func (s *Service) RunContinuous(status *RuntimeStatusCenter) error {
 		return fmt.Errorf("create flow directory failed: %w", err)
 	}
 
-	instruments, err := s.runTraderQuery(status)
+	instruments, err := s.runQueryStage(status)
 	if err != nil {
 		return err
 	}
 	return s.runMarketDataContinuous(instruments, status)
 }
 
-func (s *Service) runTraderQuery(status *RuntimeStatusCenter) ([]instrumentInfo, error) {
-	logger.Info("trader query stage start")
-	var spi *traderSpi
+func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, error) {
+	logger.Info("query stage start")
+	var spi *querySpi
 	if status != nil {
-		spi = newTraderSpiWithStatus(status)
+		spi = newQuerySpiWithStatus(status)
 	} else {
-		spi = newTraderSpi()
+		spi = newQuerySpi()
 	}
 
 	api := ctp.CThostFtdcTraderApiCreateFtdcTraderApi(s.cfg.FlowPath)
@@ -120,7 +120,7 @@ func (s *Service) runTraderQuery(status *RuntimeStatusCenter) ([]instrumentInfo,
 	api.SubscribePrivateTopic(ctp.THOST_TERT_RESTART)
 	api.SubscribePublicTopic(ctp.THOST_TERT_RESTART)
 	api.Init()
-	logger.Info("trader api init done")
+	logger.Info("query api init done")
 
 	time.Sleep(time.Duration(s.cfg.ConnectWaitSeconds) * time.Second)
 
@@ -164,7 +164,7 @@ func (s *Service) runTraderQuery(status *RuntimeStatusCenter) ([]instrumentInfo,
 		instrumentIDs = append(instrumentIDs, item.ID)
 	}
 	logger.Info(
-		"trader query result summary",
+		"query result summary",
 		"trading_day", spi.getTradingDay(),
 		"instrument_count", len(instrumentIDs),
 		"instruments", instrumentIDs,
@@ -289,7 +289,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 			_, _ = busLog.Append(bus.BusEvent{
 				EventID:    bus.NewEventID(),
 				Topic:      bus.TopicBar,
-				Source:     "trader.bar",
+				Source:     "quotes.bar",
 				OccurredAt: bar.MinuteTime,
 				Payload:    payload,
 			})
@@ -385,7 +385,7 @@ func (s *Service) authenticate(api ctp.CThostFtdcTraderApi, reqID int) error {
 	field.SetAppID(s.cfg.AppID)
 	logger.Info(
 		"trade ctp request",
-		"api", "trader",
+		"api", "query",
 		"method", "ReqAuthenticate",
 		"req_id", reqID,
 		"broker_id", s.cfg.BrokerID,
@@ -411,7 +411,7 @@ func (s *Service) login(api ctp.CThostFtdcTraderApi, reqID int) error {
 	field.SetProtocolInfo(s.cfg.UserProductInfo)
 	logger.Info(
 		"trade ctp request",
-		"api", "trader",
+		"api", "query",
 		"method", "ReqUserLogin",
 		"req_id", reqID,
 		"broker_id", s.cfg.BrokerID,
@@ -454,7 +454,7 @@ func (s *Service) queryInstrument(api ctp.CThostFtdcTraderApi, reqID int) error 
 	defer ctp.DeleteCThostFtdcQryInstrumentField(field)
 	logger.Info(
 		"ctp request",
-		"api", "trader",
+		"api", "query",
 		"method", "ReqQryInstrument",
 		"req_id", reqID,
 		"broker_id", s.cfg.BrokerID,

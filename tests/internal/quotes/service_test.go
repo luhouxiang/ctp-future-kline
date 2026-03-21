@@ -1,10 +1,10 @@
-package trader_test
+package quotes_test
 
 import (
 	"reflect"
 	"testing"
 
-	"ctp-go-demo/tests/internal/trader/testkit"
+	"ctp-future-kline/tests/internal/quotes/testkit"
 )
 
 const (

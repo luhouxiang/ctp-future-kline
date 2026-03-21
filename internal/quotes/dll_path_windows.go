@@ -1,6 +1,6 @@
 //go:build windows
 
-package trader
+package quotes
 
 import (
 	"os"

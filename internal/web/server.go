@@ -19,19 +19,20 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/calendar"
-	"ctp-go-demo/internal/chartlayout"
-	"ctp-go-demo/internal/config"
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/importer"
-	"ctp-go-demo/internal/klinequery"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/replay"
-	"ctp-go-demo/internal/searchindex"
-	"ctp-go-demo/internal/strategy"
-	"ctp-go-demo/internal/trade"
-	"ctp-go-demo/internal/trader"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/calendar"
+	"ctp-future-kline/internal/chartlayout"
+	"ctp-future-kline/internal/config"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/importer"
+	"ctp-future-kline/internal/klinequery"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/quotes"
+	"ctp-future-kline/internal/replay"
+	"ctp-future-kline/internal/searchindex"
+	"ctp-future-kline/internal/strategy"
+	"ctp-future-kline/internal/trade"
+	"ctp-future-kline/internal/userconfig"
 
 	"github.com/gorilla/websocket"
 )
@@ -40,8 +41,8 @@ type Server struct {
 	// cfg 保存整个应用配置，供路由和子模块装配时使用。
 	cfg config.AppConfig
 	// status 是行情运行时统一状态中心，对应 /api/status 中的 status 字段。
-	status *trader.RuntimeStatusCenter
-	// runtime 是行情主链路启动入口，通常为 trader.RuntimeManager。
+	status *quotes.RuntimeStatusCenter
+	// runtime 是行情主链路启动入口，通常为 quotes.RuntimeManager。
 	runtime runtimeStarter
 	// search 是搜索索引管理器，用于关键字检索 K 线记录。
 	search *searchindex.Manager
@@ -57,6 +58,10 @@ type Server struct {
 	strategy *strategy.Manager
 	// trade 是实盘交易服务，可为空表示未启用。
 	trade *trade.Service
+	// dsn 是应用主数据库连接串，供运行期创建附加服务使用。
+	dsn string
+	// userConfig 保存用户级配置覆盖项。
+	userConfig *userconfig.Store
 
 	// mu 保护导入会话和 websocket 连接集合等共享状态。
 	mu sync.Mutex
@@ -73,14 +78,15 @@ type runtimeStarter interface {
 }
 
 func NewServer(cfg config.AppConfig) *Server {
-	status := trader.NewRuntimeStatusCenter(time.Duration(cfg.Web.MarketOpenStaleSeconds) * time.Second)
+	status := quotes.NewRuntimeStatusCenter(time.Duration(cfg.Web.MarketOpenStaleSeconds) * time.Second)
 	dsn := dbx.BuildDSN(cfg.DB)
 	cfg.CTP.DBDSN = dsn
 	search := searchindex.NewManager(dsn, 30*time.Second)
 	s := &Server{
 		cfg:      cfg,
+		dsn:      dsn,
 		status:   status,
-		runtime:  trader.NewRuntimeManager(cfg.CTP, status),
+		runtime:  quotes.NewRuntimeManager(cfg.CTP, status),
 		search:   search,
 		query:    klinequery.NewService(dsn, search),
 		calendar: calendar.NewManager(dsn),
@@ -112,12 +118,12 @@ func NewServer(cfg config.AppConfig) *Server {
 				logger.Error("init replay dedup store failed", "error", err)
 			} else {
 				s.replay = replay.NewService(busLog, store, cfg.CTP.IsReplayAllowOrderCommandDispatch())
-				replaySink, sinkErr := trader.NewReplaySink(cfg.CTP, status)
+				replaySink, sinkErr := quotes.NewReplaySink(cfg.CTP, status)
 				if sinkErr != nil {
-					logger.Error("init replay trader sink failed", "error", sinkErr)
+					logger.Error("init replay quotes sink failed", "error", sinkErr)
 				} else {
-					s.replay.RegisterConsumer("trader.replay_sink", replaySink.ConsumeBusEvent)
-					s.replay.RegisterTaskLifecycle("trader.replay_sink", replaySink)
+					s.replay.RegisterConsumer("quotes.replay_sink", replaySink.ConsumeBusEvent)
+					s.replay.RegisterTaskLifecycle("quotes.replay_sink", replaySink)
 				}
 			}
 		}
@@ -132,6 +138,11 @@ func NewServer(cfg config.AppConfig) *Server {
 			s.chart = chartlayout.NewService(store)
 		}
 	}
+	if store, err := userconfig.NewStore(dsn); err != nil {
+		logger.Error("init user config store failed", "error", err)
+	} else {
+		s.userConfig = store
+	}
 	if cfg.Strategy.IsEnabled() {
 		manager, err := strategy.NewManager(cfg.Strategy, dsn)
 		if err != nil {
@@ -141,11 +152,8 @@ func NewServer(cfg config.AppConfig) *Server {
 		}
 	}
 	if cfg.Trade.IsEnabled() {
-		svc, err := trade.NewService(cfg.Trade, cfg.CTP, dsn)
-		if err != nil {
+		if err := s.startTradeService(); err != nil {
 			logger.Error("init trade service failed", "error", err)
-		} else {
-			s.trade = svc
 		}
 	}
 	return s
@@ -164,11 +172,11 @@ func (s *Server) Run() error {
 		}
 		go s.forwardStrategyEvents()
 	}
-	if s.trade != nil {
-		if err := s.trade.Start(); err != nil {
+	if svc := s.getTradeService(); svc != nil {
+		if err := svc.Start(); err != nil {
 			logger.Error("start trade service failed", "error", err)
 		} else {
-			go s.forwardTradeEvents()
+			go s.forwardTradeEvents(svc)
 		}
 	}
 	logger.Info("web server listening", "addr", s.cfg.Web.ListenAddr)
@@ -207,6 +215,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/orders/status", s.handleOrdersStatus)
 	mux.HandleFunc("/api/orders/audit", s.handleOrdersAudit)
 	mux.HandleFunc("/api/trade/status", s.handleTradeStatus)
+	mux.HandleFunc("/api/trade/config", s.handleTradeConfig)
 	mux.HandleFunc("/api/trade/account", s.handleTradeAccount)
 	mux.HandleFunc("/api/trade/positions", s.handleTradePositions)
 	mux.HandleFunc("/api/trade/orders", s.handleTradeOrders)
@@ -269,7 +278,7 @@ func (s *Server) handleClientLog(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func (s *Server) CurrentStatus() trader.RuntimeSnapshot {
+func (s *Server) CurrentStatus() quotes.RuntimeSnapshot {
 	return s.status.Snapshot(time.Now())
 }
 
@@ -281,9 +290,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.strategy != nil {
 		resp["strategy"] = s.strategy.Status()
 	}
-	if s.trade != nil {
-		resp["trade"] = s.trade.Status()
-	}
+	resp["trade"] = s.tradeStatusSnapshot()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -1204,11 +1211,65 @@ func (s *Server) handleOrdersAudit(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) requireTrade(w http.ResponseWriter) *trade.Service {
-	if s.trade == nil {
+	svc := s.getTradeService()
+	if svc == nil {
 		http.Error(w, "trade service unavailable", http.StatusNotFound)
 		return nil
 	}
+	return svc
+}
+
+func (s *Server) currentOwner() string {
+	return userconfig.DefaultOwner
+}
+
+func (s *Server) getTradeService() *trade.Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.trade
+}
+
+func (s *Server) tradeStatusSnapshot() trade.TradeStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trade != nil {
+		return s.trade.Status()
+	}
+	return trade.TradeStatus{
+		Enabled:   s.cfg.Trade.IsEnabled(),
+		AccountID: s.cfg.Trade.AccountID,
+		UpdatedAt: time.Now(),
+	}
+}
+
+func (s *Server) startTradeService() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.trade != nil {
+		return nil
+	}
+	svc, err := trade.NewService(s.cfg.Trade, s.cfg.CTP, s.dsn)
+	if err != nil {
+		return err
+	}
+	if err := svc.Start(); err != nil {
+		_ = svc.Close()
+		return err
+	}
+	s.trade = svc
+	go s.forwardTradeEvents(svc)
+	return nil
+}
+
+func (s *Server) stopTradeService() error {
+	s.mu.Lock()
+	svc := s.trade
+	s.trade = nil
+	s.mu.Unlock()
+	if svc == nil {
+		return nil
+	}
+	return svc.Close()
 }
 
 func (s *Server) handleTradeStatus(w http.ResponseWriter, r *http.Request) {
@@ -1216,11 +1277,59 @@ func (s *Server) handleTradeStatus(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	svc := s.requireTrade(w)
-	if svc == nil {
-		return
+	writeJSON(w, http.StatusOK, map[string]any{"status": s.tradeStatusSnapshot()})
+}
+
+func (s *Server) handleTradeConfig(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"owner":  s.currentOwner(),
+			"status": s.tradeStatusSnapshot(),
+		})
+	case http.MethodPost:
+		if s.userConfig == nil {
+			http.Error(w, "user config store unavailable", http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			Enabled bool `json:"enabled"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if err := s.userConfig.SaveTradeEnabled(s.currentOwner(), req.Enabled); err != nil {
+			http.Error(w, "save user config failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.mu.Lock()
+		s.cfg.Trade.Enabled = &req.Enabled
+		s.mu.Unlock()
+		var actionErr error
+		if req.Enabled {
+			actionErr = s.startTradeService()
+		} else {
+			actionErr = s.stopTradeService()
+		}
+		status := s.tradeStatusSnapshot()
+		if actionErr != nil {
+			status.LastError = actionErr.Error()
+			writeJSON(w, http.StatusBadGateway, map[string]any{
+				"owner":  s.currentOwner(),
+				"status": status,
+			})
+			return
+		}
+		s.broadcastEvent("trade_status_update", status)
+		s.broadcastEvent("status_update", s.statusPayload())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"owner":  s.currentOwner(),
+			"status": status,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"status": svc.Status()})
 }
 
 func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
@@ -1376,11 +1485,11 @@ func (s *Server) forwardStrategyEvents() {
 	}
 }
 
-func (s *Server) forwardTradeEvents() {
-	if s.trade == nil {
+func (s *Server) forwardTradeEvents(svc *trade.Service) {
+	if svc == nil {
 		return
 	}
-	ch, cancel := s.trade.Subscribe()
+	ch, cancel := svc.Subscribe()
 	defer cancel()
 	for ev := range ch {
 		s.broadcastEvent(ev.Type, ev.Data)
@@ -1405,9 +1514,7 @@ func (s *Server) statusPayload() map[string]any {
 	if s.strategy != nil {
 		out["strategy"] = s.strategy.Status()
 	}
-	if s.trade != nil {
-		out["trade"] = s.trade.Status()
-	}
+	out["trade"] = s.tradeStatusSnapshot()
 	return out
 }
 

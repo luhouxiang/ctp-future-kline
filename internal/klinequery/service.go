@@ -7,10 +7,10 @@ import (
 	"strings"
 	"time"
 
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/mmkline"
-	"ctp-go-demo/internal/searchindex"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/mmkline"
+	"ctp-future-kline/internal/searchindex"
 )
 
 type SearchItem struct {

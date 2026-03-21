@@ -1,4 +1,4 @@
-﻿<script setup>
+<script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FRONTEND_VERSION } from './version'
 
@@ -6,8 +6,8 @@ const APP_VERSION = FRONTEND_VERSION
 
 const status = reactive({
   state: 'idle',
-  trader_front: false,
-  trader_login: false,
+  query_front: false,
+  query_login: false,
   md_front: false,
   md_login: false,
   md_subscribed: false,
@@ -201,6 +201,7 @@ const logs = ref([])
 const wsConnected = ref(false)
 const loadingImport = ref(false)
 const loadingTradingDayImport = ref(false)
+const tradeConfigSaving = ref(false)
 const conflict = ref(null)
 const replaySupported = ref(false)
 let ws
@@ -434,6 +435,42 @@ async function refreshTradeData() {
   }
   addLog('已刷新交易查询')
   await fetchTradeBundle()
+}
+
+async function toggleTradeEnabled(enabled) {
+  tradeConfigSaving.value = true
+  try {
+    const resp = await fetch('/api/trade/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    })
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      if (data?.status) {
+        applyTradeStatus(data.status)
+      }
+      addLog(`更新实盘交易启用状态失败: ${data?.status?.last_error || `http ${resp.status}`}`)
+      await fetchTradeBundle()
+      return
+    }
+    applyTradeStatus(data.status || {})
+    if (enabled) {
+      addLog('实盘交易已启用')
+      await fetchTradeBundle()
+    } else {
+      addLog('实盘交易已禁用')
+      tradeState.account = null
+      tradeState.positions = []
+      tradeState.orders = []
+      tradeState.trades = []
+    }
+  } catch (err) {
+    addLog(`更新实盘交易启用状态失败: ${err?.message || err}`)
+    await fetchTradeBundle()
+  } finally {
+    tradeConfigSaving.value = false
+  }
 }
 
 async function submitTradeOrder() {
@@ -1021,8 +1058,8 @@ onUnmounted(() => {
       <h3>连接状态</h3>
       <div class="status-grid">
         <div class="status-item">状态: {{ status.state }}</div>
-        <div class="status-item">Trader 前置: {{ status.trader_front ? '已连接' : '未连接' }}</div>
-        <div class="status-item">Trader 登录: {{ status.trader_login ? '已登录' : '未登录' }}</div>
+        <div class="status-item">查询前置: {{ status.query_front ? '已连接' : '未连接' }}</div>
+        <div class="status-item">查询登录: {{ status.query_login ? '已登录' : '未登录' }}</div>
         <div class="status-item">MD 前置: {{ status.md_front ? '已连接' : '未连接' }}</div>
         <div class="status-item">MD 登录: {{ status.md_login ? '已登录' : '未登录' }}</div>
         <div class="status-item">订阅状态: {{ status.md_subscribed ? '已订阅' : '未订阅' }}</div>
@@ -1280,6 +1317,15 @@ onUnmounted(() => {
       <h3>实盘交易</h3>
       <div class="row">
         <button class="secondary" @click="refreshTradeData">刷新查询</button>
+        <label class="checkbox-inline">
+          <input
+            type="checkbox"
+            :checked="tradeStatus.enabled"
+            :disabled="tradeConfigSaving"
+            @change="toggleTradeEnabled($event.target.checked)"
+          />
+          启用实盘交易
+        </label>
       </div>
       <div class="status-grid">
         <div class="status-item">启用: {{ tradeStatus.enabled ? '是' : '否' }}</div>

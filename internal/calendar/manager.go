@@ -15,8 +15,8 @@ import (
 	"strings"
 	"time"
 
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/logger"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/logger"
 	"golang.org/x/text/encoding/simplifiedchinese"
 	"golang.org/x/text/transform"
 )

@@ -48,7 +48,7 @@ type DBConfig struct {
 type CTPConfig struct {
 	// FlowPath 是 CTP 流文件、tick CSV、bus 日志等本地落盘目录的根路径。
 	FlowPath string `json:"flow_path"`
-	// TraderFrontAddr 是 Trader API 前置地址，用于认证、查合约及交易侧操作。
+	// TraderFrontAddr 是 CTP 查询/交易共用前置地址；在行情链路中主要用于查询前置认证、登录和查合约。
 	TraderFrontAddr string `json:"trader_front_addr"`
 	// MdFrontAddr 是 Market Data API 前置地址，用于订阅和接收实时行情。
 	MdFrontAddr string `json:"md_front_addr"`
@@ -70,11 +70,11 @@ type CTPConfig struct {
 	EnableL9Async *bool `json:"enable_l9_async"`
 	// EnableMultiMinute 控制是否继续聚合 mm 周期分钟线。
 	EnableMultiMinute *bool `json:"enable_multi_minute"`
-	// ConnectWaitSeconds 是 Trader 前置连接后的等待时长。
+	// ConnectWaitSeconds 是查询阶段前置连接后的等待时长。
 	ConnectWaitSeconds int `json:"connect_wait_seconds"`
 	// AuthenticateWaitSeconds 是发送认证请求后的等待时长。
 	AuthenticateWaitSeconds int `json:"authenticate_wait_seconds"`
-	// LoginWaitSeconds 是 Trader 登录后的等待时长。
+	// LoginWaitSeconds 是查询阶段登录后的等待时长。
 	LoginWaitSeconds int `json:"login_wait_seconds"`
 	// MdConnectWaitSeconds 是 MD 前置连接后的等待时长。
 	MdConnectWaitSeconds int `json:"md_connect_wait_seconds"`
@@ -467,7 +467,7 @@ func (c *AppConfig) Validate() error {
 
 func (c CTPConfig) IsL9AsyncEnabled() bool {
 	if c.EnableL9Async == nil {
-		return false
+		return true
 	}
 	return *c.EnableL9Async
 }

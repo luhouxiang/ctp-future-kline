@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/config"
-	dbx "ctp-go-demo/internal/db"
+	"ctp-future-kline/internal/config"
+	dbx "ctp-future-kline/internal/db"
 )
 
 const dbNamePrefix = "codex_test_"

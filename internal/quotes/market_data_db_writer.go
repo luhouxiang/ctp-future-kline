@@ -1,6 +1,6 @@
 // market_data_db_writer.go 负责把聚合后的 bar 批量写入数据库。
 // 它将 shard 生成的持久化任务汇总、分批 flush，降低逐条写库的开销并同步持久化延迟指标。
-package trader
+package quotes
 
 import (
 	"database/sql"
@@ -11,7 +11,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 )
 
 type dbWriterWorker struct {

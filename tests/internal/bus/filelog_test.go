@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/bus"
+	"ctp-future-kline/internal/bus"
 )
 
 func TestFileLogAppendAndIterate(t *testing.T) {

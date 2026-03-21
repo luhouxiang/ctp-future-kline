@@ -1,9 +1,9 @@
-package trader
+package quotes
 
 import (
 	"database/sql"
 
-	"ctp-go-demo/internal/mmkline"
+	"ctp-future-kline/internal/mmkline"
 )
 
 // 以下导出用于对外复用与测试调用。

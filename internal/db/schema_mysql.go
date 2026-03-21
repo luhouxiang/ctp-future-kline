@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strings"
 
-	"ctp-go-demo/internal/config"
+	"ctp-future-kline/internal/config"
 )
 
 func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
@@ -103,6 +103,15 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 		`CREATE INDEX idx_chart_drawings_scope ON chart_drawings(symbol, kind, variety, timeframe, updated_at)`,
 		`CREATE INDEX idx_chart_drawings_owner_scope ON chart_drawings(owner, symbol, kind, variety, timeframe, updated_at)`,
 		`CREATE INDEX idx_chart_drawings_object_class ON chart_drawings(object_class)`,
+		`CREATE TABLE IF NOT EXISTS user_config (
+  owner VARCHAR(64) NOT NULL DEFAULT 'admin',
+  scope_name VARCHAR(64) NOT NULL,
+  item_key VARCHAR(128) NOT NULL,
+  value_json JSON NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (owner, scope_name, item_key)
+)`,
+		`CREATE INDEX idx_user_config_updated_at ON user_config(updated_at DESC)`,
 		`CREATE TABLE IF NOT EXISTS strategy_definitions (
   strategy_id VARCHAR(128) NOT NULL,
   display_name VARCHAR(191) NOT NULL,

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/internal/klineclock"
+	"ctp-future-kline/internal/klineclock"
 )
 
 type fixedPrevProvider struct {

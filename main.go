@@ -15,12 +15,13 @@ import (
 	"strconv"
 	"strings"
 
-	"ctp-go-demo/internal/calendar"
-	"ctp-go-demo/internal/config"
-	dbx "ctp-go-demo/internal/db"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/version"
-	"ctp-go-demo/internal/web"
+	"ctp-future-kline/internal/calendar"
+	"ctp-future-kline/internal/config"
+	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/userconfig"
+	"ctp-future-kline/internal/version"
+	"ctp-future-kline/internal/web"
 )
 
 func main() {
@@ -70,6 +71,19 @@ func main() {
 	}
 	if err := dbx.EnsureDatabaseAndSchema(cfg.DB, db); err != nil {
 		logger.Error("ensure mysql schema failed", "error", err)
+	}
+	overrideStore := &userconfig.Store{}
+	overrideStore, err = userconfig.NewStore(dsn)
+	if err != nil {
+		logger.Error("open user config store failed", "error", err)
+	} else {
+		overrides, loadErr := overrideStore.LoadAppOverrides(userconfig.DefaultOwner)
+		if loadErr != nil {
+			logger.Error("load user config overrides failed", "owner", userconfig.DefaultOwner, "error", loadErr)
+		} else {
+			cfg = userconfig.ApplyAppOverrides(cfg, overrides)
+		}
+		_ = overrideStore.Close()
 	}
 	_ = db.Close()
 	cfg.CTP.DBDSN = dsn

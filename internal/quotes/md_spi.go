@@ -1,6 +1,6 @@
 // md_spi.go 实现 MD API 的回调入口。
 // 它负责接收实时 tick、做入站字段清洗，然后把标准化后的 tick 送入 marketDataRuntime 继续处理。
-package trader
+package quotes
 
 import (
 	"fmt"
@@ -8,9 +8,9 @@ import (
 	"strings"
 	"time"
 
-	"ctp-go-demo/internal/klineclock"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/sessiontime"
+	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/sessiontime"
 
 	ctp "github.com/kkqy/ctp-go"
 )

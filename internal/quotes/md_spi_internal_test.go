@@ -1,4 +1,4 @@
-package trader
+package quotes
 
 import (
 	"math"

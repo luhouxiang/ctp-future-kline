@@ -11,9 +11,9 @@ import (
 	"sync"
 	"time"
 
-	"ctp-go-demo/internal/bus"
-	"ctp-go-demo/internal/logger"
-	"ctp-go-demo/internal/order"
+	"ctp-future-kline/internal/bus"
+	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/order"
 )
 
 const (

@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 
-	"ctp-go-demo/internal/logger"
+	"ctp-future-kline/internal/logger"
 )
 
 var ErrReplayOrderBlocked = errors.New("ERR_REPLAY_ORDER_BLOCKED")

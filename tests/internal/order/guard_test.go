@@ -5,7 +5,7 @@ import (
 	"errors"
 	"testing"
 
-	"ctp-go-demo/internal/order"
+	"ctp-future-kline/internal/order"
 )
 
 func TestEnsureReplaySafe(t *testing.T) {

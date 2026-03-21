@@ -1,4 +1,4 @@
-package trader_test
+package quotes_test
 
 import (
 	"fmt"
@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"ctp-go-demo/tests/internal/testmysql"
-	"ctp-go-demo/tests/internal/trader/testkit"
+	"ctp-future-kline/tests/internal/quotes/testkit"
+	"ctp-future-kline/tests/internal/testmysql"
 )
 
 func TestL9AsyncCalculatorComputesAndStores(t *testing.T) {
