@@ -1,3 +1,5 @@
+// ctp_gateway.go 封装交易侧 CTP API 的具体交互。
+// 它负责前置连接、登录、结算确认、账户/持仓/委托/成交查询，以及下单和撤单请求的回调编排。
 package trade
 
 import (

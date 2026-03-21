@@ -1,3 +1,5 @@
+// replay_sink.go 是 replay.Service 和行情处理链之间的桥接层。
+// 它把回放源里的 tick 事件重新还原成 tickEvent，再复用 mdSpi 和 marketDataRuntime 的实时处理逻辑。
 package trader
 
 import (

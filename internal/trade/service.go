@@ -1,3 +1,5 @@
+// service.go 是实盘交易子系统的服务层。
+// 它对接 CTPGateway、维护账户/持仓/委托/成交快照、执行周期性查询，并通过事件把交易状态同步给 Web 控制面。
 package trade
 
 import (

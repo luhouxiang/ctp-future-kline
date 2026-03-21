@@ -1,3 +1,6 @@
+// kline_store.go 封装 K 线存储层。
+// 它负责管理 1m、L9、mm 等表结构，并提供 minute bar 的 upsert/query 能力，
+// 是行情聚合结果落库的统一入口。
 package trader
 
 import (

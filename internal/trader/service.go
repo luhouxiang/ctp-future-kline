@@ -1,3 +1,6 @@
+// service.go 负责装配实时行情链路。
+// 它先通过 Trader API 完成认证、登录和合约查询，再启动 MD 订阅链路，
+// 把 mdSpi、marketDataRuntime、klineStore、L9 计算、bus、CSV 录制等模块串成完整处理管道。
 package trader
 
 import (

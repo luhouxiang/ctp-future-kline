@@ -1,3 +1,6 @@
+// runtime_status.go 提供行情运行时的统一状态中心。
+// 所有连接状态、订阅状态、tick 延迟、队列深度、去重计数等指标都汇总到这里，
+// 再由 /api/status 和 WebSocket 对外暴露。
 package trader
 
 import (

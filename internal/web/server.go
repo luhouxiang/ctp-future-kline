@@ -1,3 +1,6 @@
+// server.go 是系统的 Web 控制面。
+// 它负责组装行情运行时、回放、策略、实盘交易、查询等模块，并通过 HTTP 和 WebSocket
+// 向前端页面暴露状态、控制接口和实时事件。
 package web
 
 import (

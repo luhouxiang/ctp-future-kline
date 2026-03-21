@@ -1,3 +1,5 @@
+// spi.go 实现 Trader API 的回调适配层。
+// 它主要处理认证、登录和合约查询回调，并把交易日、连接状态、合约列表等信息反馈给上层服务。
 package trader
 
 import (

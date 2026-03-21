@@ -1,3 +1,5 @@
+// config.go 定义应用总配置结构，并负责把 config.json 解析成可运行的 AppConfig。
+// 这里同时承担默认值补齐和基础校验，是所有运行模块共享的配置入口。
 package config
 
 import (

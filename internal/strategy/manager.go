@@ -1,3 +1,5 @@
+// manager.go 是策略子系统的主控入口。
+// 它负责启动或连接 Python 策略进程，维护 gRPC 连接与健康检查，并对外提供策略定义、实例和信号管理能力。
 package strategy
 
 import (

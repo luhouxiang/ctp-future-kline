@@ -1,3 +1,5 @@
+// runtime_manager.go 封装行情主链路的生命周期入口。
+// 它负责启动 trader.Service，捕获顶层 panic/error，并把运行状态同步到 RuntimeStatusCenter。
 package trader
 
 import (

@@ -1,3 +1,5 @@
+// md_spi.go 实现 MD API 的回调入口。
+// 它负责接收实时 tick、做入站字段清洗，然后把标准化后的 tick 送入 marketDataRuntime 继续处理。
 package trader
 
 import (

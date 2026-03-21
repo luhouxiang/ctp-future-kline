@@ -1,3 +1,6 @@
+// service.go 实现回放任务调度中心。
+// 它负责从 bus 日志或 tick CSV 中读取事件，管理回放任务的启动/暂停/恢复/停止，
+// 并把事件分发给注册的 consumer。
 package replay
 
 import (

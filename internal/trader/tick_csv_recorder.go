@@ -1,3 +1,5 @@
+// tick_csv_recorder.go 负责把接收到的原始 tick 按合约录制成 CSV。
+// 这些文件主要用于排障、数据核对和 replay.tickcsv 回放，不参与业务聚合决策。
 package trader
 
 import (
