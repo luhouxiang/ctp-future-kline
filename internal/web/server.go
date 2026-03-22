@@ -190,6 +190,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/import/session", s.handleImportSession)
 	mux.HandleFunc("/api/import/session/", s.handleImportDecision)
 	mux.HandleFunc("/api/kline/search", s.handleKlineSearch)
+	mux.HandleFunc("/api/kline/index/rebuild-current", s.handleKlineIndexRebuildCurrent)
+	mux.HandleFunc("/api/kline/index/rebuild-all", s.handleKlineIndexRebuildAll)
+	mux.HandleFunc("/api/kline/index/rebuild-one", s.handleKlineIndexRebuildOne)
 	mux.HandleFunc("/api/kline/bars", s.handleKlineBars)
 	mux.HandleFunc("/api/instruments", s.handleInstruments)
 	mux.HandleFunc("/api/calendar/status", s.handleCalendarStatus)
@@ -447,19 +450,79 @@ func (s *Server) handleKlineSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
-	start, end, err := parseSearchTimeRange(r.URL.Query().Get("start"), r.URL.Query().Get("end"))
-	if err != nil {
-		http.Error(w, "invalid start/end: "+err.Error(), http.StatusBadRequest)
-		return
-	}
 	page, pageSize := parsePageArgs(r.URL.Query().Get("page"), r.URL.Query().Get("page_size"))
 
-	resp, err := s.query.Search(keyword, start, end, page, pageSize)
+	resp, err := s.query.Search(keyword, page, pageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleKlineIndexRebuildCurrent(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		Items []klinequery.SearchItem `json:"items"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if err := s.query.RebuildSearchItems(req.Items); err != nil {
+		if errors.Is(err, searchindex.ErrBusy) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleKlineIndexRebuildAll(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if err := s.query.RebuildAllIndex(); err != nil {
+		if errors.Is(err, searchindex.ErrBusy) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (s *Server) handleKlineIndexRebuildOne(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req klinequery.SearchItem
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	item, exists, err := s.query.RebuildSearchItem(req)
+	if err != nil {
+		if errors.Is(err, searchindex.ErrBusy) {
+			http.Error(w, err.Error(), http.StatusConflict)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"ok":     true,
+		"exists": exists,
+		"item":   item,
+	})
 }
 
 func (s *Server) handleKlineBars(w http.ResponseWriter, r *http.Request) {
@@ -1594,15 +1657,6 @@ func (h sessionHandler) OnConflict(c importer.ConflictRecord) {
 func (h sessionHandler) OnDone(p importer.Progress) {
 	if h.server.search != nil {
 		h.server.search.Invalidate()
-		go func(sessionID string) {
-			start := time.Now()
-			logger.Info("kline search index refresh begin", "session_id", sessionID)
-			if err := h.server.search.EnsureFresh(); err != nil {
-				logger.Error("kline search index refresh failed", "session_id", sessionID, "error", err)
-				return
-			}
-			logger.Info("kline search index refresh done", "session_id", sessionID, "elapsed_ms", time.Since(start).Milliseconds())
-		}(h.sessionID)
 	}
 	logger.Info("import session done",
 		"session_id", h.sessionID,

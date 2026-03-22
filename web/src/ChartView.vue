@@ -353,9 +353,11 @@ async function fetchChunk(endParam, isInitial) {
     type: p.type,
     variety: p.variety || '',
     timeframe: p.timeframe || '1m',
-    end: endParam,
     limit: String(CHUNK_SIZE),
   })
+  if (endParam) {
+    query.set('end', endParam)
+  }
   console.log('[ChartView] fetch /api/kline/bars', {
     symbol: p.symbol,
     type: p.type,
@@ -396,7 +398,7 @@ async function loadInitialChunk() {
   state.loading = true
   state.error = ''
   try {
-    const endParam = p.end || formatEndParamByUnix(Math.floor(Date.now() / 1000))
+    const endParam = p.end || ''
     const bars = await fetchChunk(endParam, true)
     state.bars = bars
     state.hasMore = bars.length >= CHUNK_SIZE

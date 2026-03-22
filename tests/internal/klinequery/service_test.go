@@ -22,16 +22,21 @@ func TestBarsAndSearch(t *testing.T) {
 
 	idx := searchindex.NewManager(dsn, 0)
 	svc := klinequery.NewService(dsn, idx)
+	if err := idx.RebuildAll(); err != nil {
+		t.Fatalf("RebuildAll() error = %v", err)
+	}
 
-	start := mustTime("2026-01-19 09:00:00")
 	end := mustTime("2026-01-19 09:30:00")
 
-	searchResp, err := svc.Search("sr", start, end, 1, 100)
+	searchResp, err := svc.Search("sr", 1, 100)
 	if err != nil {
 		t.Fatalf("Search() error = %v", err)
 	}
 	if searchResp.Total != 2 {
 		t.Fatalf("Search total = %d, want 2", searchResp.Total)
+	}
+	if searchResp.Items[0].BarCount == 0 {
+		t.Fatalf("Search item bar_count = 0, want metadata backfilled")
 	}
 
 	barsResp, err := svc.BarsByEnd("SR2701", "contract", "sr", "1m", end, 2000)
@@ -111,6 +116,9 @@ func TestListContractsOnlyReturnsContractKind(t *testing.T) {
 
 	idx := searchindex.NewManager(dsn, 0)
 	svc := klinequery.NewService(dsn, idx)
+	if err := idx.RebuildAll(); err != nil {
+		t.Fatalf("RebuildAll() error = %v", err)
+	}
 
 	resp, err := svc.ListContracts(1, 100)
 	if err != nil {

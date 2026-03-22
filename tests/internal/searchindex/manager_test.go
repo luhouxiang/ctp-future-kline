@@ -2,45 +2,20 @@ package searchindex_test
 
 import (
 	"testing"
-	"time"
 
 	"ctp-future-kline/internal/searchindex"
 	"ctp-future-kline/tests/internal/testmysql"
 )
 
-func TestSearchAndLookup(t *testing.T) {
+func TestRebuildAllAndLookup(t *testing.T) {
 	t.Parallel()
 
 	dsn := testmysql.NewDatabase(t)
 	prepareDB(t, dsn)
 
 	mgr := searchindex.NewManager(dsn, 0)
-	start := mustTime("2026-01-19 00:00:00")
-	end := mustTime("2026-01-20 23:59:00")
-
-	items, total, err := mgr.Search("sr", start, end, 1, 100)
-	if err != nil {
-		t.Fatalf("Search() error = %v", err)
-	}
-	if total != 2 {
-		t.Fatalf("total = %d, want 2", total)
-	}
-	if len(items) != 2 {
-		t.Fatalf("len(items) = %d, want 2", len(items))
-	}
-
-	foundContract := false
-	foundL9 := false
-	for _, it := range items {
-		if it.Kind == "contract" && it.SymbolNorm == "sr2701" {
-			foundContract = true
-		}
-		if it.Kind == "l9" && it.SymbolNorm == "srl9" {
-			foundL9 = true
-		}
-	}
-	if !foundContract || !foundL9 {
-		t.Fatalf("unexpected search items: %+v", items)
+	if err := mgr.RebuildAll(); err != nil {
+		t.Fatalf("RebuildAll() error = %v", err)
 	}
 
 	got, err := mgr.LookupBySymbol("SRL9", "l9", "sr")
@@ -52,6 +27,44 @@ func TestSearchAndLookup(t *testing.T) {
 	}
 	if got.Variety != "sr" {
 		t.Fatalf("variety = %q, want sr", got.Variety)
+	}
+	if got.BarCount != 1 {
+		t.Fatalf("bar_count = %d, want 1", got.BarCount)
+	}
+}
+
+func TestRebuildItemsDeletesMissingRow(t *testing.T) {
+	t.Parallel()
+
+	dsn := testmysql.NewDatabase(t)
+	prepareDB(t, dsn)
+
+	mgr := searchindex.NewManager(dsn, 0)
+	if err := mgr.RebuildAll(); err != nil {
+		t.Fatalf("RebuildAll() error = %v", err)
+	}
+
+	db := testmysql.Open(t, dsn)
+	defer db.Close()
+	if _, err := db.Exec(`DELETE FROM "future_kline_instrument_1m_sr" WHERE lower("InstrumentID")='sr2701'`); err != nil {
+		t.Fatalf("delete source row failed: %v", err)
+	}
+
+	if err := mgr.RebuildItems([]searchindex.Target{{
+		TableName: "future_kline_instrument_1m_sr",
+		Symbol:    "sr2701",
+		Variety:   "sr",
+		Kind:      "contract",
+	}}); err != nil {
+		t.Fatalf("RebuildItems() error = %v", err)
+	}
+
+	got, err := mgr.LookupBySymbol("sr2701", "contract", "sr")
+	if err != nil {
+		t.Fatalf("LookupBySymbol() error = %v", err)
+	}
+	if got != nil {
+		t.Fatalf("LookupBySymbol() = %+v, want nil after delete", got)
 	}
 }
 
@@ -129,9 +142,4 @@ func prepareDB(t *testing.T, dsn string) {
 			t.Fatalf("exec failed: %v", err)
 		}
 	}
-}
-
-func mustTime(v string) time.Time {
-	out, _ := time.ParseInLocation("2006-01-02 15:04:05", v, time.Local)
-	return out
 }

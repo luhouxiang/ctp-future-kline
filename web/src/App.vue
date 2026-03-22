@@ -182,8 +182,6 @@ const backtestForm = reactive({
 
 const searchForm = reactive({
   keyword: '',
-  start: '',
-  end: '',
   page: 1,
   pageSize: 100,
 })
@@ -192,6 +190,9 @@ const searchState = reactive({
   loading: false,
   total: 0,
   items: [],
+  rebuildingCurrent: false,
+  rebuildingAll: false,
+  rowBusy: {},
 })
 
 const files = ref([])
@@ -308,8 +309,6 @@ function toDateTimeLocal(date) {
 }
 
 function defaultTimeRange() {
-  searchForm.end = ''
-  searchForm.start = ''
 }
 
 function normalizeDateTimeInput(value) {
@@ -853,8 +852,6 @@ async function runSearch(resetPage = false) {
   try {
     const params = new URLSearchParams({
       keyword: searchForm.keyword.trim(),
-      start: normalizeDateTimeInput(searchForm.start),
-      end: normalizeDateTimeInput(searchForm.end),
       page: String(searchForm.page),
       page_size: String(searchForm.pageSize),
     })
@@ -869,6 +866,73 @@ async function runSearch(resetPage = false) {
     addLog(`K线查询失败: ${error.message}`)
   } finally {
     searchState.loading = false
+  }
+}
+
+function rowBusyKey(item) {
+  return `${item.type}|${item.symbol}|${item.variety || ''}`
+}
+
+async function rebuildCurrentIndex() {
+  if (searchState.rebuildingCurrent || searchState.rebuildingAll) return
+  searchState.rebuildingCurrent = true
+  try {
+    const resp = await fetch('/api/kline/index/rebuild-current', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ items: searchState.items }),
+    })
+    if (!resp.ok) {
+      throw new Error(await resp.text() || `http ${resp.status}`)
+    }
+    await runSearch(false)
+  } catch (error) {
+    addLog(`重建当前索引失败: ${error.message}`)
+  } finally {
+    searchState.rebuildingCurrent = false
+  }
+}
+
+async function rebuildAllIndex() {
+  if (searchState.rebuildingAll || searchState.rebuildingCurrent) return
+  searchState.rebuildingAll = true
+  try {
+    const resp = await fetch('/api/kline/index/rebuild-all', { method: 'POST' })
+    if (!resp.ok) {
+      throw new Error(await resp.text() || `http ${resp.status}`)
+    }
+    await runSearch(false)
+  } catch (error) {
+    addLog(`重建全部索引失败: ${error.message}`)
+  } finally {
+    searchState.rebuildingAll = false
+  }
+}
+
+async function rebuildOneIndex(item) {
+  const key = rowBusyKey(item)
+  if (searchState.rowBusy[key]) return
+  searchState.rowBusy[key] = true
+  try {
+    const resp = await fetch('/api/kline/index/rebuild-one', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(item),
+    })
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      throw new Error(data?.error || `http ${resp.status}`)
+    }
+    if (!data.exists) {
+      searchState.items = searchState.items.filter((entry) => rowBusyKey(entry) !== key)
+      searchState.total = Math.max(0, Number(searchState.total || 0) - 1)
+      return
+    }
+    searchState.items = searchState.items.map((entry) => rowBusyKey(entry) === key ? { ...entry, ...data.item } : entry)
+  } catch (error) {
+    addLog(`重建索引失败: ${error.message}`)
+  } finally {
+    searchState.rowBusy[key] = false
   }
 }
 
@@ -889,19 +953,15 @@ function openChart(item) {
     symbol: item.symbol,
     type: item.type,
     variety: item.variety || '',
-    start: normalizeDateTimeInput(searchForm.start),
-    end: normalizeDateTimeInput(searchForm.end),
   })
   const url = `/chart?${params.toString()}`
   console.log('[openChart] params', {
     symbol: item.symbol,
     type: item.type,
     variety: item.variety || '',
-    start: normalizeDateTimeInput(searchForm.start),
-    end: normalizeDateTimeInput(searchForm.end),
     url,
   })
-  addLog(`openChart symbol=${item.symbol} type=${item.type} variety=${item.variety || ''} start=${normalizeDateTimeInput(searchForm.start)} end=${normalizeDateTimeInput(searchForm.end)}`)
+  addLog(`openChart symbol=${item.symbol} type=${item.type} variety=${item.variety || ''}`)
   window.open(url, '_blank')
 }
 
@@ -1457,8 +1517,12 @@ onUnmounted(() => {
       <h3>K线查询</h3>
       <div class="row">
         <input v-model="searchForm.keyword" placeholder="关键字（代码/品种/交易所）" />
-        <input v-model="searchForm.start" type="datetime-local" />
-        <input v-model="searchForm.end" type="datetime-local" />
+        <button class="secondary" :disabled="searchState.rebuildingCurrent || searchState.rebuildingAll" @click="rebuildCurrentIndex">
+          {{ searchState.rebuildingCurrent ? '重建当前中...' : '重建当前索引' }}
+        </button>
+        <button class="secondary" :disabled="searchState.rebuildingAll || searchState.rebuildingCurrent" @click="rebuildAllIndex">
+          {{ searchState.rebuildingAll ? '重建全部中...' : '重建全部索引' }}
+        </button>
         <button :disabled="searchState.loading" @click="runSearch(true)">
           {{ searchState.loading ? '查询中...' : '查询' }}
         </button>
@@ -1470,9 +1534,8 @@ onUnmounted(() => {
             <th>代码</th>
             <th>品种</th>
             <th>交易所</th>
-            <th>开始</th>
-            <th>结束</th>
             <th>数量</th>
+            <th>更新时间</th>
             <th>操作</th>
           </tr>
         </thead>
@@ -1482,15 +1545,22 @@ onUnmounted(() => {
             <td>{{ item.symbol }}</td>
             <td>{{ item.variety }}</td>
             <td>{{ item.exchange }}</td>
-            <td>{{ item.min_time }}</td>
-            <td>{{ item.max_time }}</td>
             <td>{{ item.bar_count }}</td>
+            <td>
+              <button
+                class="secondary"
+                :disabled="!!searchState.rowBusy[rowBusyKey(item)] || searchState.rebuildingAll || searchState.rebuildingCurrent"
+                @click="rebuildOneIndex(item)"
+              >
+                {{ searchState.rowBusy[rowBusyKey(item)] ? '重建中...' : (item.updated_at || '--') }}
+              </button>
+            </td>
             <td>
               <button class="secondary" @click="openChart(item)">打开图表</button>
             </td>
           </tr>
           <tr v-if="searchState.items.length === 0">
-            <td colspan="8">无数据</td>
+            <td colspan="7">无数据</td>
           </tr>
         </tbody>
       </table>

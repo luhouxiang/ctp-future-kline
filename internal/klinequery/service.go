@@ -2,7 +2,9 @@ package klinequery
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -14,21 +16,19 @@ import (
 )
 
 type SearchItem struct {
-	// Type 表示命中数据类型，如 instrument、l9、mm。
+	// Type 表示命中数据类型，例如 contract 或 l9。
 	Type string `json:"type"`
-	// Symbol 是展示给前端的合约或品种名。
+	// Symbol 是展示给前端的合约或指数代码。
 	Symbol string `json:"symbol"`
 	// Variety 是品种代码。
 	Variety string `json:"variety"`
 	// Exchange 是交易所代码。
 	Exchange string `json:"exchange"`
-	// MinTime 是该数据集起始时间。
-	MinTime string `json:"min_time"`
-	// MaxTime 是该数据集结束时间。
-	MaxTime string `json:"max_time"`
-	// BarCount 是总 bar 数量。
+	// BarCount 是索引表中记录的 K 线数量。
 	BarCount int64 `json:"bar_count"`
-	// TableName 是底层命中的数据库表名。
+	// UpdatedAt 是索引最近一次更新时间。
+	UpdatedAt string `json:"updated_at"`
+	// TableName 是候选项对应的底层表名。
 	TableName string `json:"table_name"`
 }
 
@@ -44,8 +44,8 @@ type SearchResponse struct {
 }
 
 type KlineBar struct {
-	AdjustedTime int64   `json:"adjusted_time"` // 调整后的时间，即实际时间
-	DataTime     int64   `json:"data_time"`     // 数据时间：交易日+数据时间
+	AdjustedTime int64   `json:"adjusted_time"`
+	DataTime     int64   `json:"data_time"`
 	Open         float64 `json:"open"`
 	High         float64 `json:"high"`
 	Low          float64 `json:"low"`
@@ -62,56 +62,76 @@ type MACDPoint struct {
 }
 
 type BarsMeta struct {
-	// Symbol 是当前查询的展示 symbol。
-	Symbol string `json:"symbol"`
-	// Type 是当前查询类型。
-	Type string `json:"type"`
-	// Variety 是品种代码。
-	Variety string `json:"variety"`
-	// Exchange 是交易所代码。
+	Symbol   string `json:"symbol"`
+	Type     string `json:"type"`
+	Variety  string `json:"variety"`
 	Exchange string `json:"exchange"`
 }
 
 type BarsResponse struct {
-	// Meta 是当前 bars 查询的元信息。
-	Meta BarsMeta `json:"meta"`
-	// Bars 是 K 线序列。
-	Bars []KlineBar `json:"bars"`
-	// MACD 是可选的 MACD 指标序列。
+	Meta BarsMeta    `json:"meta"`
+	Bars []KlineBar  `json:"bars"`
 	MACD []MACDPoint `json:"macd"`
 }
 
 type Service struct {
-	// dbPath 是业务数据库连接串。
 	dbPath string
-	// index 是表级索引管理器。
-	index *searchindex.Manager
+	index  *searchindex.Manager
+}
+
+type searchTable struct {
+	Name    string
+	Kind    string
+	Variety string
+}
+
+type symbolRow struct {
+	Symbol   string
+	Exchange string
 }
 
 func NewService(dbPath string, index *searchindex.Manager) *Service {
 	return &Service{dbPath: dbPath, index: index}
 }
 
-func (s *Service) Search(keyword string, start time.Time, end time.Time, page int, pageSize int) (SearchResponse, error) {
-	items, total, err := s.index.Search(keyword, start, end, page, pageSize)
+func (s *Service) Search(keyword string, page int, pageSize int) (SearchResponse, error) {
+	if page <= 0 {
+		page = 1
+	}
+	if pageSize <= 0 {
+		pageSize = 100
+	}
+	if pageSize > 200 {
+		pageSize = 200
+	}
+
+	db, err := openQueryDB(s.dbPath)
+	if err != nil {
+		return SearchResponse{}, fmt.Errorf("open mysql failed: %w", err)
+	}
+	defer db.Close()
+
+	tables, err := listSearchTables(db)
 	if err != nil {
 		return SearchResponse{}, err
 	}
-	out := make([]SearchItem, 0, len(items))
-	for _, it := range items {
-		out = append(out, SearchItem{
-			Type:      it.Kind,
-			Symbol:    displaySymbol(it.Symbol, it.Kind),
-			Variety:   it.Variety,
-			Exchange:  it.Exchange,
-			MinTime:   it.MinTime.Format("2006-01-02 15:04"),
-			MaxTime:   it.MaxTime.Format("2006-01-02 15:04"),
-			BarCount:  it.BarCount,
-			TableName: it.TableName,
-		})
+	items, err := s.searchCandidates(db, tables, keyword)
+	if err != nil {
+		return SearchResponse{}, err
 	}
+
+	total := len(items)
+	startIdx, endIdx := pageSlice(total, page, pageSize)
+	paged := make([]SearchItem, 0, endIdx-startIdx)
+	if startIdx < endIdx {
+		paged = append(paged, items[startIdx:endIdx]...)
+	}
+	if err := s.fillIndexMetadata(paged); err != nil {
+		return SearchResponse{}, err
+	}
+
 	return SearchResponse{
-		Items:    out,
+		Items:    paged,
 		Total:    total,
 		Page:     page,
 		PageSize: pageSize,
@@ -133,10 +153,6 @@ func (s *Service) ListContracts(page int, pageSize int) (SearchResponse, error) 
 		pageSize = 2000
 	}
 
-	if err := s.index.EnsureFresh(); err != nil {
-		return SearchResponse{}, err
-	}
-
 	db, err := openQueryDB(s.dbPath)
 	if err != nil {
 		return SearchResponse{}, fmt.Errorf("open mysql failed: %w", err)
@@ -150,10 +166,10 @@ func (s *Service) ListContracts(page int, pageSize int) (SearchResponse, error) 
 
 	offset := (page - 1) * pageSize
 	rows, err := db.Query(`
-SELECT symbol,variety,exchange,min_time,max_time,bar_count,table_name
+SELECT symbol,variety,exchange,bar_count,updated_at,table_name
 FROM kline_search_index
 WHERE kind='contract'
-ORDER BY max_time DESC, symbol ASC
+ORDER BY updated_at DESC, symbol ASC
 LIMIT ? OFFSET ?`, pageSize, offset)
 	if err != nil {
 		return SearchResponse{}, fmt.Errorf("query contract index failed: %w", err)
@@ -166,12 +182,11 @@ LIMIT ? OFFSET ?`, pageSize, offset)
 			symbol   string
 			variety  string
 			exchange string
-			minTime  time.Time
-			maxTime  time.Time
 			barCount int64
+			updated  time.Time
 			table    string
 		)
-		if err := rows.Scan(&symbol, &variety, &exchange, &minTime, &maxTime, &barCount, &table); err != nil {
+		if err := rows.Scan(&symbol, &variety, &exchange, &barCount, &updated, &table); err != nil {
 			return SearchResponse{}, fmt.Errorf("scan contract row failed: %w", err)
 		}
 		items = append(items, SearchItem{
@@ -179,9 +194,8 @@ LIMIT ? OFFSET ?`, pageSize, offset)
 			Symbol:    displaySymbol(symbol, "contract"),
 			Variety:   variety,
 			Exchange:  exchange,
-			MinTime:   minTime.Format("2006-01-02 15:04"),
-			MaxTime:   maxTime.Format("2006-01-02 15:04"),
 			BarCount:  barCount,
+			UpdatedAt: updated.Format("2006-01-02 15:04:05"),
 			TableName: table,
 		})
 	}
@@ -213,9 +227,16 @@ func (s *Service) BarsByEnd(symbol string, kind string, variety string, timefram
 	if limit > 5000 {
 		limit = 5000
 	}
-	item, err := s.index.LookupBySymbol(symbol, kind, variety)
+
+	item, err := s.index.RefreshBySymbol(symbol, kind, variety)
 	if err != nil {
-		return BarsResponse{}, err
+		if !errors.Is(err, searchindex.ErrBusy) {
+			return BarsResponse{}, err
+		}
+		item, err = s.index.LookupBySymbol(symbol, kind, variety)
+		if err != nil {
+			return BarsResponse{}, err
+		}
 	}
 	if item == nil {
 		logger.Info("kline query lookup miss", "symbol", symbol, "type", kind, "variety", variety)
@@ -272,15 +293,18 @@ WHERE (
  OR lower("InstrumentID") = ?
 )
   AND "Period" = ?
+  AND %s >= ?
   AND %s <= ?
 ORDER BY "__sort_time" DESC
-LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
+LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr, adjustedExpr)
 
 	loadRows := func(endTime time.Time) ([]KlineBar, string, error) {
+		startTime := endTime.AddDate(0, -1, 0)
 		args := []any{
 			primarySymbol,
 			secondarySymbol,
 			queryPeriod,
+			startTime.Format("2006-01-02 15:04:00"),
 			endTime.Format("2006-01-02 15:04:00"),
 			limit,
 		}
@@ -289,13 +313,12 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 			"period", queryPeriod,
 			"args_symbol", primarySymbol,
 			"args_symbol_fallback", secondarySymbol,
+			"args_start", startTime.Format("2006-01-02 15:04:00"),
 			"args_end", endTime.Format("2006-01-02 15:04:00"),
 			"args_limit", limit,
 			"sql", renderExecutableSQL(query, args...),
 		)
-		rows, qErr := db.Query(
-			query, args...,
-		)
+		rows, qErr := db.Query(query, args...)
 		if qErr != nil {
 			return nil, "", qErr
 		}
@@ -341,16 +364,6 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 	if err != nil {
 		return BarsResponse{}, fmt.Errorf("query bars failed: %w", err)
 	}
-	// 若按传入 end 查不到，回退到“当前时间”再取一段，避免前端时间传参造成空图
-	if len(bars) == 0 {
-		logger.Info("kline query fallback", "symbol", symbol, "type", kind, "fallback_end", time.Now().Format("2006-01-02 15:04:00"))
-		fallbackBars, fallbackExchange, fbErr := loadRows(time.Now())
-		if fbErr != nil {
-			return BarsResponse{}, fmt.Errorf("fallback query bars failed: %w", fbErr)
-		}
-		bars = fallbackBars
-		exchange = fallbackExchange
-	}
 	if len(bars) == 0 {
 		return BarsResponse{}, sql.ErrNoRows
 	}
@@ -359,7 +372,6 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 	logger.Info("kline pipeline", "stage", "load_done", "symbol", symbol, "kind", kind, "variety", item.Variety, "timeframe", tf, "period", queryPeriod, "table", queryTable, "rows", len(bars), "first_time", time.Unix(bars[0].AdjustedTime, 0).Format("2006-01-02 15:04:05"), "last_time", time.Unix(bars[len(bars)-1].AdjustedTime, 0).Format("2006-01-02 15:04:05"))
 
 	var closes []float64
-	closes = closes[:0]
 	for _, bar := range bars {
 		closes = append(closes, bar.Close)
 	}
@@ -386,6 +398,394 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 		Bars: bars,
 		MACD: macd,
 	}, nil
+}
+
+func (s *Service) RebuildAllIndex() error {
+	return s.index.RebuildAll()
+}
+
+func (s *Service) RebuildSearchItems(items []SearchItem) error {
+	targets := make([]searchindex.Target, 0, len(items))
+	for _, item := range items {
+		targets = append(targets, searchindex.Target{
+			TableName: item.TableName,
+			Symbol:    item.Symbol,
+			Variety:   item.Variety,
+			Kind:      item.Type,
+		})
+	}
+	return s.index.RebuildItems(targets)
+}
+
+func (s *Service) RebuildSearchItem(item SearchItem) (SearchItem, bool, error) {
+	if err := s.RebuildSearchItems([]SearchItem{item}); err != nil {
+		return SearchItem{}, false, err
+	}
+	meta, err := s.index.LookupBySymbol(item.Symbol, item.Type, item.Variety)
+	if err != nil {
+		return SearchItem{}, false, err
+	}
+	if meta == nil {
+		return SearchItem{
+			Type:      item.Type,
+			Symbol:    item.Symbol,
+			Variety:   item.Variety,
+			Exchange:  item.Exchange,
+			TableName: item.TableName,
+		}, false, nil
+	}
+	return SearchItem{
+		Type:      meta.Kind,
+		Symbol:    displaySymbol(meta.Symbol, meta.Kind),
+		Variety:   meta.Variety,
+		Exchange:  meta.Exchange,
+		BarCount:  meta.BarCount,
+		UpdatedAt: meta.UpdatedAt.Format("2006-01-02 15:04:05"),
+		TableName: meta.TableName,
+	}, true, nil
+}
+
+func (s *Service) searchCandidates(db *sql.DB, tables []searchTable, keyword string) ([]SearchItem, error) {
+	letters, digits := splitKeyword(strings.ToLower(strings.TrimSpace(keyword)))
+	if letters == "" && digits == "" {
+		return s.defaultSearchItems(db, tables, 10)
+	}
+	if letters == "" {
+		return nil, nil
+	}
+
+	l9Tables := make(map[string]searchTable)
+	contractTables := make([]searchTable, 0, len(tables))
+	for _, table := range tables {
+		if table.Variety == "" || !strings.HasPrefix(table.Variety, letters) {
+			continue
+		}
+		if table.Kind == "l9" {
+			l9Tables[table.Variety] = table
+		}
+		if table.Kind == "contract" {
+			contractTables = append(contractTables, table)
+		}
+	}
+
+	results := make([]SearchItem, 0, 64)
+	includedL9 := make(map[string]struct{})
+	for _, table := range contractTables {
+		rows, err := fetchContractSymbols(db, table.Name, digits)
+		if err != nil {
+			return nil, err
+		}
+		for _, row := range rows {
+			results = append(results, SearchItem{
+				Type:      "contract",
+				Symbol:    displaySymbol(row.Symbol, "contract"),
+				Variety:   table.Variety,
+				Exchange:  row.Exchange,
+				TableName: table.Name,
+			})
+			if l9Table, ok := l9Tables[table.Variety]; ok {
+				if _, exists := includedL9[table.Variety]; !exists {
+					item, fetchErr := fetchFirstSymbol(db, l9Table.Name, "l9", l9Table.Variety)
+					if fetchErr != nil {
+						return nil, fetchErr
+					}
+					if item != nil {
+						results = append(results, *item)
+						includedL9[table.Variety] = struct{}{}
+					}
+				}
+			}
+		}
+	}
+
+	if digits == "" {
+		for variety, table := range l9Tables {
+			if _, exists := includedL9[variety]; exists {
+				continue
+			}
+			item, err := fetchFirstSymbol(db, table.Name, "l9", variety)
+			if err != nil {
+				return nil, err
+			}
+			if item != nil {
+				results = append(results, *item)
+			}
+		}
+	}
+
+	return dedupeSearchItems(results), nil
+}
+
+func (s *Service) defaultSearchItems(db *sql.DB, tables []searchTable, limit int) ([]SearchItem, error) {
+	results := make([]SearchItem, 0, limit)
+	for _, table := range tables {
+		if len(results) >= limit {
+			break
+		}
+		if table.Kind != "l9" {
+			continue
+		}
+		item, err := fetchFirstSymbol(db, table.Name, "l9", table.Variety)
+		if err != nil {
+			return nil, err
+		}
+		if item != nil {
+			results = append(results, *item)
+		}
+	}
+	if len(results) < limit {
+		for _, table := range tables {
+			if len(results) >= limit {
+				break
+			}
+			if table.Kind != "contract" {
+				continue
+			}
+			item, err := fetchFirstSymbol(db, table.Name, "contract", table.Variety)
+			if err != nil {
+				return nil, err
+			}
+			if item != nil {
+				results = append(results, *item)
+			}
+		}
+	}
+	return dedupeSearchItems(results), nil
+}
+
+func (s *Service) fillIndexMetadata(items []SearchItem) error {
+	if len(items) == 0 {
+		return nil
+	}
+	targets := make([]searchindex.Target, 0, len(items))
+	for _, item := range items {
+		targets = append(targets, searchindex.Target{
+			TableName: item.TableName,
+			Symbol:    item.Symbol,
+			Variety:   item.Variety,
+			Kind:      item.Type,
+		})
+	}
+	lookup, err := s.index.LookupItems(targets)
+	if err != nil {
+		return err
+	}
+	for idx := range items {
+		key := searchIndexTargetKey(items[idx])
+		meta, ok := lookup[key]
+		if !ok {
+			continue
+		}
+		items[idx].BarCount = meta.BarCount
+		items[idx].UpdatedAt = meta.UpdatedAt.Format("2006-01-02 15:04:05")
+		if items[idx].Exchange == "" {
+			items[idx].Exchange = meta.Exchange
+		}
+		if items[idx].TableName == "" {
+			items[idx].TableName = meta.TableName
+		}
+	}
+	return nil
+}
+
+func listSearchTables(db *sql.DB) ([]searchTable, error) {
+	rows, err := db.Query(`
+SELECT table_name
+FROM information_schema.tables
+WHERE table_schema = DATABASE()
+  AND (table_name LIKE 'future_kline_l9_1m_%' OR table_name LIKE 'future_kline_instrument_1m_%')
+ORDER BY table_name`)
+	if err != nil {
+		return nil, fmt.Errorf("list search tables failed: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]searchTable, 0, 256)
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			return nil, fmt.Errorf("scan search table name failed: %w", err)
+		}
+		kind := tableKindFromTableName(tableName)
+		variety := varietyFromTableName(tableName)
+		if kind == "" || variety == "" {
+			continue
+		}
+		out = append(out, searchTable{Name: tableName, Kind: kind, Variety: variety})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate search tables failed: %w", err)
+	}
+	return out, nil
+}
+
+func tableKindFromTableName(tableName string) string {
+	switch {
+	case strings.HasPrefix(tableName, "future_kline_l9_1m_"):
+		return "l9"
+	case strings.HasPrefix(tableName, "future_kline_instrument_1m_"):
+		return "contract"
+	default:
+		return ""
+	}
+}
+
+func varietyFromTableName(tableName string) string {
+	switch {
+	case strings.HasPrefix(tableName, "future_kline_l9_1m_"):
+		return normalizeSearchVariety(strings.TrimPrefix(tableName, "future_kline_l9_1m_"))
+	case strings.HasPrefix(tableName, "future_kline_instrument_1m_"):
+		return normalizeSearchVariety(strings.TrimPrefix(tableName, "future_kline_instrument_1m_"))
+	default:
+		return ""
+	}
+}
+
+func normalizeSearchVariety(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	end := 0
+	for _, ch := range value {
+		if ch >= 'a' && ch <= 'z' {
+			end++
+			continue
+		}
+		break
+	}
+	if end == 0 {
+		return ""
+	}
+	return value[:end]
+}
+
+func fetchFirstSymbol(db *sql.DB, tableName string, kind string, variety string) (*SearchItem, error) {
+	rows, err := db.Query(`
+SELECT lower("InstrumentID"), MAX("Exchange")
+FROM "` + tableName + `"
+GROUP BY lower("InstrumentID")
+ORDER BY lower("InstrumentID")
+LIMIT 1`)
+	if err != nil {
+		return nil, fmt.Errorf("query first symbol from %s failed: %w", tableName, err)
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	var symbol, exchange string
+	if err := rows.Scan(&symbol, &exchange); err != nil {
+		return nil, fmt.Errorf("scan first symbol from %s failed: %w", tableName, err)
+	}
+	return &SearchItem{
+		Type:      kind,
+		Symbol:    displaySymbol(symbol, kind),
+		Variety:   variety,
+		Exchange:  strings.ToUpper(strings.TrimSpace(exchange)),
+		TableName: tableName,
+	}, nil
+}
+
+func fetchContractSymbols(db *sql.DB, tableName string, digits string) ([]symbolRow, error) {
+	var (
+		rows *sql.Rows
+		err  error
+	)
+	if digits == "" {
+		rows, err = db.Query(`
+SELECT lower("InstrumentID"), MAX("Exchange")
+FROM "` + tableName + `"
+GROUP BY lower("InstrumentID")
+ORDER BY lower("InstrumentID")`)
+	} else {
+		rows, err = db.Query(`
+SELECT lower("InstrumentID"), MAX("Exchange")
+FROM "`+tableName+`"
+WHERE lower("InstrumentID") LIKE ?
+GROUP BY lower("InstrumentID")
+ORDER BY lower("InstrumentID")`, "%"+digits+"%")
+	}
+	if err != nil {
+		return nil, fmt.Errorf("query contract symbols from %s failed: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	out := make([]symbolRow, 0, 64)
+	for rows.Next() {
+		var row symbolRow
+		if err := rows.Scan(&row.Symbol, &row.Exchange); err != nil {
+			return nil, fmt.Errorf("scan contract symbol from %s failed: %w", tableName, err)
+		}
+		row.Exchange = strings.ToUpper(strings.TrimSpace(row.Exchange))
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate contract symbols from %s failed: %w", tableName, err)
+	}
+	return out, nil
+}
+
+func splitKeyword(keyword string) (string, string) {
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	if keyword == "" {
+		return "", ""
+	}
+	var letters strings.Builder
+	var digits strings.Builder
+	for _, ch := range keyword {
+		switch {
+		case ch >= 'a' && ch <= 'z':
+			if digits.Len() == 0 {
+				letters.WriteRune(ch)
+			}
+		case ch >= '0' && ch <= '9':
+			digits.WriteRune(ch)
+		}
+	}
+	return letters.String(), digits.String()
+}
+
+func dedupeSearchItems(items []SearchItem) []SearchItem {
+	seen := make(map[string]struct{}, len(items))
+	out := make([]SearchItem, 0, len(items))
+	for _, item := range items {
+		key := item.Type + "|" + strings.ToLower(strings.TrimSpace(item.Symbol))
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, item)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Variety == out[j].Variety {
+			if out[i].Type == out[j].Type {
+				return out[i].Symbol < out[j].Symbol
+			}
+			if out[i].Type == "contract" {
+				return true
+			}
+			if out[j].Type == "contract" {
+				return false
+			}
+			return out[i].Type < out[j].Type
+		}
+		return out[i].Variety < out[j].Variety
+	})
+	return out
+}
+
+func pageSlice(total int, page int, pageSize int) (int, int) {
+	start := (page - 1) * pageSize
+	if start > total {
+		start = total
+	}
+	end := start + pageSize
+	if end > total {
+		end = total
+	}
+	return start, end
+}
+
+func searchIndexTargetKey(item SearchItem) string {
+	return strings.ToLower(strings.TrimSpace(item.Symbol)) + "|" + strings.ToLower(strings.TrimSpace(item.Type)) + "|" + normalizeSearchVariety(item.Variety)
 }
 
 func tableHasColumn(db *sql.DB, tableName string, column string) (bool, error) {

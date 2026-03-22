@@ -2,6 +2,7 @@ package searchindex
 
 import (
 	"database/sql"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -14,43 +15,46 @@ import (
 
 const timeLayout = "2006-01-02 15:04:05"
 
+var ErrBusy = errors.New("search index rebuild already running")
+
 type Item struct {
 	// TableName 是索引命中的底层 K 线表名。
 	TableName string `json:"table_name"`
 	// Symbol 是展示给前端的合约或品种标识。
 	Symbol string `json:"symbol"`
-	// SymbolNorm 是标准化后的 symbol，用于搜索和去重。
+	// SymbolNorm 是标准化后的 symbol，用于匹配和去重。
 	SymbolNorm string `json:"symbol_norm"`
 	// Variety 是品种代码。
 	Variety string `json:"variety"`
 	// Exchange 是交易所代码。
 	Exchange string `json:"exchange"`
-	// Kind 表示 instrument、l9、mm 等数据类型。
+	// Kind 表示 contract 或 l9。
 	Kind string `json:"kind"`
-	// MinTime 是表内最早数据时间。
-	MinTime time.Time `json:"min_time"`
-	// MaxTime 是表内最晚数据时间。
-	MaxTime time.Time `json:"max_time"`
-	// BarCount 是表内记录总数。
+	// BarCount 是该记录对应的 K 线数量。
 	BarCount int64 `json:"bar_count"`
-	// UpdatedAt 是索引刷新时间。
+	// UpdatedAt 是该条索引最近一次成功更新的时间。
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+type Target struct {
+	// TableName 是要重建的底层表名。
+	TableName string `json:"table_name"`
+	// Symbol 是要重建的 symbol。
+	Symbol string `json:"symbol"`
+	// Variety 是 symbol 所属品种。
+	Variety string `json:"variety"`
+	// Kind 表示 contract 或 l9。
+	Kind string `json:"kind"`
 }
 
 type Manager struct {
 	// dbPath 是业务数据库连接串。
 	dbPath string
-	// refreshInterval 控制索引自动刷新周期。
-	refreshInterval time.Duration
 
-	// mu 保护刷新状态。
+	// mu 保护重建互斥状态。
 	mu sync.Mutex
-	// cond 用于协调并发刷新请求。
-	cond *sync.Cond
-	// refreshing 标记当前是否有刷新在进行。
-	refreshing bool
-	// lastRefresh 记录最近一次刷新时间。
-	lastRefresh time.Time
+	// rebuilding 标识当前是否有索引重建任务在执行。
+	rebuilding bool
 }
 
 const (
@@ -64,160 +68,193 @@ const (
 	legacyL9TablePrefix      = "future_kline_l9_" // legacy
 )
 
-func NewManager(dbPath string, refreshInterval time.Duration) *Manager {
-	if refreshInterval <= 0 {
-		refreshInterval = 30 * time.Second
-	}
-	m := &Manager{
-		dbPath:          dbPath,
-		refreshInterval: refreshInterval,
-	}
-	m.cond = sync.NewCond(&m.mu)
-	return m
+func NewManager(dbPath string, _ time.Duration) *Manager {
+	return &Manager{dbPath: dbPath}
 }
 
-func (m *Manager) Invalidate() {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.lastRefresh = time.Time{}
-}
+func (m *Manager) Invalidate() {}
 
-func (m *Manager) EnsureFresh() error {
-	m.mu.Lock()
-	for {
-		needRefresh := time.Since(m.lastRefresh) >= m.refreshInterval || m.lastRefresh.IsZero()
-		if !needRefresh {
-			m.mu.Unlock()
-			return nil
-		}
-		if !m.refreshing {
-			m.refreshing = true
-			break
-		}
-		m.cond.Wait()
-	}
-
-	m.mu.Unlock()
-	if err := m.rebuild(); err != nil {
-		m.mu.Lock()
-		m.refreshing = false
-		m.cond.Broadcast()
-		m.mu.Unlock()
-		return err
-	}
-	m.mu.Lock()
-	m.lastRefresh = time.Now()
-	m.refreshing = false
-	m.cond.Broadcast()
-	m.mu.Unlock()
-	return nil
-}
-
-func (m *Manager) Search(keyword string, start time.Time, end time.Time, page int, pageSize int) ([]Item, int, error) {
-	if err := m.EnsureFresh(); err != nil {
-		return nil, 0, err
-	}
-	if page <= 0 {
-		page = 1
-	}
-	if pageSize <= 0 {
-		pageSize = 100
-	}
-
-	db, err := m.openDB()
-	if err != nil {
-		return nil, 0, fmt.Errorf("open mysql failed: %w", err)
-	}
-	defer db.Close()
-
-	keyword = strings.ToLower(strings.TrimSpace(keyword))
-	whereClauses := []string{
-		"min_time <= ?",
-		"max_time >= ?",
-	}
-	args := []any{
-		end.Format(timeLayout),
-		start.Format(timeLayout),
-	}
-	if keyword != "" {
-		kw := "%" + keyword + "%"
-		whereClauses = append(whereClauses, "(symbol_norm LIKE ? OR variety LIKE ? OR lower(exchange) LIKE ? OR lower(table_name) LIKE ?)")
-		args = append(args, kw, kw, kw, kw)
-	}
-	whereSQL := strings.Join(whereClauses, "\n  AND ")
-
-	countSQL := `
-SELECT COUNT(1)
-FROM kline_search_index
-WHERE ` + whereSQL
-
-	var total int
-	logger.Info("search index count query",
-		"sql", renderExecutableSQL(countSQL, args...),
-	)
-	if err := db.QueryRow(countSQL, args...).Scan(&total); err != nil {
-		return nil, 0, fmt.Errorf("count search index failed: %w", err)
-	}
-	logger.Info("search index count result", "total", total)
-
-	offset := (page - 1) * pageSize
-	querySQL := `
-SELECT table_name, symbol, symbol_norm, variety, exchange, kind, min_time, max_time, bar_count, updated_at
-FROM kline_search_index
-WHERE ` + whereSQL + `
-ORDER BY max_time DESC, symbol ASC
-LIMIT ? OFFSET ?`
-	queryArgs := append(append([]any{}, args...), pageSize, offset)
-
-	rows, err := db.Query(querySQL, queryArgs...)
-	if err != nil {
-		return nil, 0, fmt.Errorf("query search index failed: %w", err)
-	}
-	defer rows.Close()
-
-	out := make([]Item, 0, pageSize)
-	logger.Info("search index query",
-		"sql", renderExecutableSQL(querySQL, queryArgs...),
-	)
-	for rows.Next() {
-		var it Item
-		var minS, maxS, updatedS time.Time
-		if err := rows.Scan(
-			&it.TableName,
-			&it.Symbol,
-			&it.SymbolNorm,
-			&it.Variety,
-			&it.Exchange,
-			&it.Kind,
-			&minS,
-			&maxS,
-			&it.BarCount,
-			&updatedS,
-		); err != nil {
-			return nil, 0, fmt.Errorf("scan search row failed: %w", err)
-		}
-		it.MinTime = minS
-		it.MaxTime = maxS
-		it.UpdatedAt = updatedS
-		out = append(out, it)
-	}
-	if err := rows.Err(); err != nil {
-		return nil, 0, fmt.Errorf("iterate search rows failed: %w", err)
-	}
-	logger.Info("search index query result", "rows", len(out), "total", total)
-	return out, total, nil
-}
+func (m *Manager) EnsureFresh() error { return nil }
 
 func (m *Manager) LookupBySymbol(symbol string, kind string, variety string) (*Item, error) {
-	if err := m.EnsureFresh(); err != nil {
-		return nil, err
-	}
 	db, err := m.openDB()
 	if err != nil {
 		return nil, fmt.Errorf("open mysql failed: %w", err)
 	}
 	defer db.Close()
 
+	return lookupBySymbolDB(db, symbol, kind, variety)
+}
+
+func (m *Manager) LookupItems(targets []Target) (map[string]Item, error) {
+	db, err := m.openDB()
+	if err != nil {
+		return nil, fmt.Errorf("open mysql failed: %w", err)
+	}
+	defer db.Close()
+
+	return lookupItemsDB(db, targets)
+}
+
+func (m *Manager) RebuildAll() error {
+	return m.runExclusive(func() error {
+		db, err := m.openDB()
+		if err != nil {
+			return fmt.Errorf("open mysql failed: %w", err)
+		}
+		defer db.Close()
+
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin transaction failed: %w", err)
+		}
+		defer func() {
+			if err != nil {
+				_ = tx.Rollback()
+			}
+		}()
+
+		if err = ensureSchema(tx); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`DELETE FROM kline_search_index`); err != nil {
+			return fmt.Errorf("clear search index failed: %w", err)
+		}
+
+		tables, err := listKlineTables(tx)
+		if err != nil {
+			return err
+		}
+		now := time.Now()
+		totalInserted := 0
+		for _, tableName := range tables {
+			kind := tableKindFromName(tableName)
+			variety := extractVarietyFromTableName(tableName)
+			if kind == "" || variety == "" {
+				continue
+			}
+			rows, scanErr := collectGroupedRows(tx, tableName, nil)
+			if scanErr != nil {
+				return scanErr
+			}
+			inserted, upsertErr := upsertRows(tx, tableName, kind, variety, rows, now)
+			if upsertErr != nil {
+				return upsertErr
+			}
+			totalInserted += inserted
+		}
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("commit rebuild failed: %w", err)
+		}
+		logger.Info("search index rebuild all done", "inserted_rows", totalInserted)
+		return nil
+	})
+}
+
+func (m *Manager) RebuildItems(targets []Target) error {
+	targets = normalizeTargets(targets)
+	if len(targets) == 0 {
+		return nil
+	}
+	return m.runExclusive(func() error {
+		db, err := m.openDB()
+		if err != nil {
+			return fmt.Errorf("open mysql failed: %w", err)
+		}
+		defer db.Close()
+
+		tx, err := db.Begin()
+		if err != nil {
+			return fmt.Errorf("begin transaction failed: %w", err)
+		}
+		defer func() {
+			if err != nil {
+				_ = tx.Rollback()
+			}
+		}()
+
+		if err = ensureSchema(tx); err != nil {
+			return err
+		}
+
+		groupedTargets := make(map[string][]Target)
+		for _, target := range targets {
+			groupedTargets[target.TableName] = append(groupedTargets[target.TableName], target)
+		}
+		now := time.Now()
+		for tableName, tableTargets := range groupedTargets {
+			kind := tableKindFromName(tableName)
+			variety := extractVarietyFromTableName(tableName)
+			if kind == "" || variety == "" {
+				continue
+			}
+			if err := deleteTargets(tx, tableTargets); err != nil {
+				return err
+			}
+
+			symbols := make([]string, 0, len(tableTargets))
+			for _, target := range tableTargets {
+				symbols = append(symbols, normalizeStoredSymbol(target.Symbol, target.Kind, target.Variety))
+			}
+			rows, scanErr := collectGroupedRows(tx, tableName, dedupeStrings(symbols))
+			if scanErr != nil {
+				return scanErr
+			}
+			if _, upsertErr := upsertRows(tx, tableName, kind, variety, rows, now); upsertErr != nil {
+				return upsertErr
+			}
+		}
+
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("commit rebuild items failed: %w", err)
+		}
+		logger.Info("search index rebuild items done", "item_count", len(targets))
+		return nil
+	})
+}
+
+func (m *Manager) RefreshBySymbol(symbol string, kind string, variety string) (*Item, error) {
+	target := Target{
+		Symbol:  symbol,
+		Kind:    kind,
+		Variety: variety,
+	}
+	target = normalizeTarget(target)
+	if target.Symbol == "" || target.Kind == "" || target.Variety == "" {
+		return nil, nil
+	}
+	target.TableName = tableNameForTarget(target)
+	if target.TableName == "" {
+		return nil, nil
+	}
+	if err := m.RebuildItems([]Target{target}); err != nil {
+		return nil, err
+	}
+	return m.LookupBySymbol(target.Symbol, target.Kind, target.Variety)
+}
+
+func (m *Manager) runExclusive(fn func() error) error {
+	m.mu.Lock()
+	if m.rebuilding {
+		m.mu.Unlock()
+		return ErrBusy
+	}
+	m.rebuilding = true
+	m.mu.Unlock()
+
+	defer func() {
+		m.mu.Lock()
+		m.rebuilding = false
+		m.mu.Unlock()
+	}()
+	return fn()
+}
+
+func (m *Manager) openDB() (*sql.DB, error) {
+	return dbx.Open(m.dbPath)
+}
+
+func lookupBySymbolDB(db *sql.DB, symbol string, kind string, variety string) (*Item, error) {
 	kind = strings.ToLower(strings.TrimSpace(kind))
 	symbolNorm, parsedVariety := normalizeLookupSymbol(symbol, kind)
 	if symbolNorm == "" {
@@ -229,244 +266,121 @@ func (m *Manager) LookupBySymbol(symbol string, kind string, variety string) (*I
 	variety = normalizeVariety(variety)
 
 	query := `
-SELECT table_name, symbol, symbol_norm, variety, exchange, kind, min_time, max_time, bar_count, updated_at
+SELECT table_name, symbol, symbol_norm, variety, exchange, kind, bar_count, updated_at
 FROM kline_search_index
 WHERE symbol_norm = ? AND kind = ?
   AND (? = '' OR variety = ?)
-ORDER BY max_time DESC
+ORDER BY updated_at DESC
 LIMIT 1`
-	logger.Info("search index lookup query",
-		"sql", renderExecutableSQL(query, symbolNorm, kind, variety, variety),
-	)
 	var it Item
-	var minS, maxS, updatedS time.Time
-	err = db.QueryRow(query, symbolNorm, kind, variety, variety).Scan(
+	var updatedS time.Time
+	err := db.QueryRow(query, symbolNorm, kind, variety, variety).Scan(
 		&it.TableName,
 		&it.Symbol,
 		&it.SymbolNorm,
 		&it.Variety,
 		&it.Exchange,
 		&it.Kind,
-		&minS,
-		&maxS,
 		&it.BarCount,
 		&updatedS,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			logger.Info("search index lookup result", "found", false, "symbol_norm", symbolNorm, "kind", kind, "variety", variety)
 			return nil, nil
 		}
 		return nil, fmt.Errorf("lookup symbol failed: %w", err)
 	}
-	it.MinTime = minS
-	it.MaxTime = maxS
 	it.UpdatedAt = updatedS
-	logger.Info("search index lookup result",
-		"found", true,
-		"table", it.TableName,
-		"symbol", it.Symbol,
-		"kind", it.Kind,
-		"bar_count", it.BarCount,
-	)
 	return &it, nil
 }
 
-func renderExecutableSQL(query string, args ...any) string {
-	out := strings.TrimSpace(query)
-	for _, arg := range args {
-		out = strings.Replace(out, "?", mysqlLiteral(arg), 1)
+func lookupItemsDB(db *sql.DB, targets []Target) (map[string]Item, error) {
+	targets = normalizeTargets(targets)
+	out := make(map[string]Item, len(targets))
+	if len(targets) == 0 {
+		return out, nil
 	}
-	return navicatSQL(out)
-}
-
-func navicatSQL(query string) string {
-	out := strings.Join(strings.Fields(strings.TrimSpace(query)), " ")
-	// Use MySQL identifier quotes so SQL can be pasted directly into Navicat.
-	return strings.ReplaceAll(out, `"`, "`")
-}
-
-func mysqlLiteral(v any) string {
-	switch x := v.(type) {
-	case nil:
-		return "NULL"
-	case string:
-		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
-	case []byte:
-		return "'" + strings.ReplaceAll(string(x), "'", "''") + "'"
-	case bool:
-		if x {
-			return "1"
+	type argRow struct {
+		symbol string
+		kind   string
+	}
+	argsRows := make([]argRow, 0, len(targets))
+	varieties := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		argsRows = append(argsRows, argRow{
+			symbol: normalizeStoredSymbol(target.Symbol, target.Kind, target.Variety),
+			kind:   target.Kind,
+		})
+		if target.Variety != "" {
+			varieties[target.Variety] = struct{}{}
 		}
-		return "0"
-	case int:
-		return strconv.Itoa(x)
-	case int8:
-		return strconv.FormatInt(int64(x), 10)
-	case int16:
-		return strconv.FormatInt(int64(x), 10)
-	case int32:
-		return strconv.FormatInt(int64(x), 10)
-	case int64:
-		return strconv.FormatInt(x, 10)
-	case uint:
-		return strconv.FormatUint(uint64(x), 10)
-	case uint8:
-		return strconv.FormatUint(uint64(x), 10)
-	case uint16:
-		return strconv.FormatUint(uint64(x), 10)
-	case uint32:
-		return strconv.FormatUint(uint64(x), 10)
-	case uint64:
-		return strconv.FormatUint(x, 10)
-	case float32:
-		return strconv.FormatFloat(float64(x), 'f', -1, 32)
-	case float64:
-		return strconv.FormatFloat(x, 'f', -1, 64)
-	case time.Time:
-		return "'" + x.Format(timeLayout) + "'"
-	default:
-		return "'" + strings.ReplaceAll(fmt.Sprint(v), "'", "''") + "'"
 	}
-}
 
-func (m *Manager) rebuild() error {
-	db, err := m.openDB()
+	whereParts := make([]string, 0, len(argsRows))
+	args := make([]any, 0, len(argsRows)*2+len(varieties))
+	for _, row := range argsRows {
+		whereParts = append(whereParts, "(symbol_norm = ? AND kind = ?)")
+		args = append(args, row.symbol, row.kind)
+	}
+	query := `
+SELECT table_name, symbol, symbol_norm, variety, exchange, kind, bar_count, updated_at
+FROM kline_search_index
+WHERE ` + strings.Join(whereParts, " OR ")
+	rows, err := db.Query(query, args...)
 	if err != nil {
-		return fmt.Errorf("open mysql failed: %w", err)
+		return nil, fmt.Errorf("batch lookup search index failed: %w", err)
 	}
-	defer db.Close()
+	defer rows.Close()
 
-	tx, err := db.Begin()
-	if err != nil {
-		return fmt.Errorf("begin transaction failed: %w", err)
+	for rows.Next() {
+		var item Item
+		if err := rows.Scan(
+			&item.TableName,
+			&item.Symbol,
+			&item.SymbolNorm,
+			&item.Variety,
+			&item.Exchange,
+			&item.Kind,
+			&item.BarCount,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan search index batch row failed: %w", err)
+		}
+		out[targetKey(Target{Symbol: item.SymbolNorm, Kind: item.Kind, Variety: item.Variety})] = item
 	}
-	defer func() {
-		if err != nil {
-			_ = tx.Rollback()
-		}
-	}()
-
-	if err = ensureSchema(tx); err != nil {
-		return err
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate search index batch rows failed: %w", err)
 	}
-	if _, err = tx.Exec(`DELETE FROM kline_search_index`); err != nil {
-		return fmt.Errorf("clear search index failed: %w", err)
-	}
-
-	tables, err := listKlineTables(tx)
-	if err != nil {
-		return err
-	}
-	logger.Info("search index rebuild tables", "count", len(tables))
-	now := time.Now().Format(timeLayout)
-	totalInserted := 0
-	for _, tableName := range tables {
-		kind := tableKindFromName(tableName)
-		variety := extractVarietyFromTableName(tableName)
-		if kind == "" || variety == "" {
-			continue
-		}
-
-		timeExpr, err := resolveQueryTimeExpr(tx, tableName)
-		if err != nil {
-			return err
-		}
-		groupSQL := fmt.Sprintf(`
-SELECT "InstrumentID",MAX("Exchange"),MIN(%s),MAX(%s),COUNT(1)
-FROM "%s"
-GROUP BY "InstrumentID"`, timeExpr, timeExpr, tableName)
-		logger.Info("search index rebuild table query", "table", tableName, "sql", navicatSQL(groupSQL))
-		rows, qErr := tx.Query(groupSQL)
-		if qErr != nil {
-			return fmt.Errorf("scan table %s failed: %w", tableName, qErr)
-		}
-		type groupedRow struct {
-			symbol   string
-			exchange string
-			minS     time.Time
-			maxS     time.Time
-			cnt      int64
-		}
-		grouped := make([]groupedRow, 0, 128)
-		for rows.Next() {
-			var r groupedRow
-			if scanErr := rows.Scan(&r.symbol, &r.exchange, &r.minS, &r.maxS, &r.cnt); scanErr != nil {
-				_ = rows.Close()
-				return fmt.Errorf("scan grouped row from %s failed: %w", tableName, scanErr)
-			}
-			grouped = append(grouped, r)
-		}
-		if iterErr := rows.Err(); iterErr != nil {
-			_ = rows.Close()
-			return fmt.Errorf("iterate grouped rows failed: %w", iterErr)
-		}
-		_ = rows.Close()
-		logger.Info("search index rebuild table grouped result", "table", tableName, "group_count", len(grouped))
-		inserted := 0
-		for _, r := range grouped {
-			normSymbol := normalizeStoredSymbol(r.symbol, kind, variety)
-			if normSymbol == "" {
-				continue
-			}
-			if _, execErr := tx.Exec(`
-INSERT INTO kline_search_index
-(table_name, symbol, symbol_norm, variety, exchange, kind, min_time, max_time, bar_count, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-ON DUPLICATE KEY UPDATE
-  exchange=VALUES(exchange),
-  min_time=VALUES(min_time),
-  max_time=VALUES(max_time),
-  bar_count=VALUES(bar_count),
-  updated_at=VALUES(updated_at)`,
-				tableName,
-				normSymbol,
-				normSymbol,
-				variety,
-				strings.ToUpper(strings.TrimSpace(r.exchange)),
-				kind,
-				r.minS.Format(timeLayout),
-				r.maxS.Format(timeLayout),
-				r.cnt,
-				now,
-			); execErr != nil {
-				return fmt.Errorf("insert search index row failed: %w", execErr)
-			}
-			inserted++
-		}
-		totalInserted += inserted
-		logger.Info("search index rebuild table insert result", "table", tableName, "inserted_rows", inserted)
-	}
-
-	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit rebuild failed: %w", err)
-	}
-	logger.Info("search index rebuild done", "inserted_rows", totalInserted)
-	return nil
-}
-
-func (m *Manager) openDB() (*sql.DB, error) {
-	return dbx.Open(m.dbPath)
+	return out, nil
 }
 
 func ensureSchema(tx *sql.Tx) error {
-	stmts := []string{
-		`CREATE TABLE IF NOT EXISTS kline_search_index (
+	if _, err := tx.Exec(`CREATE TABLE IF NOT EXISTS kline_search_index (
   table_name VARCHAR(191) NOT NULL,
   symbol VARCHAR(64) NOT NULL,
   symbol_norm VARCHAR(64) NOT NULL,
   variety VARCHAR(32) NOT NULL,
   exchange VARCHAR(16) NOT NULL,
   kind VARCHAR(16) NOT NULL,
-  min_time DATETIME NOT NULL,
-  max_time DATETIME NOT NULL,
   bar_count BIGINT NOT NULL,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (table_name, symbol, kind)
-)`,
+)`); err != nil {
+		return fmt.Errorf("ensure search index schema failed: %w", err)
+	}
+	if err := dropLegacyColumnIfExists(tx, "kline_search_index", "min_time"); err != nil {
+		return err
+	}
+	if err := dropLegacyColumnIfExists(tx, "kline_search_index", "max_time"); err != nil {
+		return err
+	}
+	if err := dropIndexIfExists(tx, "kline_search_index", "idx_kline_search_time_range"); err != nil {
+		return err
+	}
+
+	stmts := []string{
 		`CREATE INDEX idx_kline_search_symbol_norm ON kline_search_index(symbol_norm)`,
 		`CREATE INDEX idx_kline_search_variety ON kline_search_index(variety)`,
-		`CREATE INDEX idx_kline_search_time_range ON kline_search_index(min_time, max_time)`,
 		`CREATE INDEX idx_kline_search_kind ON kline_search_index(kind)`,
 	}
 	for _, stmt := range stmts {
@@ -478,6 +392,38 @@ func ensureSchema(tx *sql.Tx) error {
 		}
 	}
 	return nil
+}
+
+func dropLegacyColumnIfExists(tx *sql.Tx, tableName string, column string) error {
+	hasColumn, err := tableHasColumn(tx, tableName, column)
+	if err != nil {
+		return fmt.Errorf("inspect legacy column %s.%s failed: %w", tableName, column, err)
+	}
+	if !hasColumn {
+		return nil
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, quoteMySQLIdentifier(tableName), quoteMySQLIdentifier(column))); err != nil {
+		return fmt.Errorf("drop legacy column %s.%s failed: %w", tableName, column, err)
+	}
+	return nil
+}
+
+func dropIndexIfExists(tx *sql.Tx, tableName string, indexName string) error {
+	hasIndex, err := tableHasIndex(tx, tableName, indexName)
+	if err != nil {
+		return fmt.Errorf("inspect legacy index %s.%s failed: %w", tableName, indexName, err)
+	}
+	if !hasIndex {
+		return nil
+	}
+	if _, err := tx.Exec(fmt.Sprintf(`DROP INDEX %s ON %s`, quoteMySQLIdentifier(indexName), quoteMySQLIdentifier(tableName))); err != nil {
+		return fmt.Errorf("drop legacy index %s.%s failed: %w", tableName, indexName, err)
+	}
+	return nil
+}
+
+func quoteMySQLIdentifier(value string) string {
+	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
 
 func isDuplicateIndexErr(err error) bool {
@@ -513,6 +459,152 @@ ORDER BY table_name`)
 		return nil, fmt.Errorf("iterate table names failed: %w", err)
 	}
 	return out, nil
+}
+
+type groupedRow struct {
+	symbol   string
+	exchange string
+	cnt      int64
+}
+
+func collectGroupedRows(tx *sql.Tx, tableName string, symbols []string) ([]groupedRow, error) {
+	var (
+		query string
+		args  []any
+	)
+	if len(symbols) == 0 {
+		query = fmt.Sprintf(`
+SELECT lower("InstrumentID"), MAX("Exchange"), COUNT(1)
+FROM "%s"
+GROUP BY lower("InstrumentID")`, tableName)
+	} else {
+		placeholders := make([]string, 0, len(symbols))
+		args = make([]any, 0, len(symbols))
+		for _, symbol := range symbols {
+			placeholders = append(placeholders, "?")
+			args = append(args, strings.ToLower(strings.TrimSpace(symbol)))
+		}
+		query = fmt.Sprintf(`
+SELECT lower("InstrumentID"), MAX("Exchange"), COUNT(1)
+FROM "%s"
+WHERE lower("InstrumentID") IN (%s)
+GROUP BY lower("InstrumentID")`, tableName, strings.Join(placeholders, ","))
+	}
+	rows, err := tx.Query(query, args...)
+	if err != nil {
+		return nil, fmt.Errorf("scan table %s failed: %w", tableName, err)
+	}
+	defer rows.Close()
+
+	out := make([]groupedRow, 0, 64)
+	for rows.Next() {
+		var row groupedRow
+		if err := rows.Scan(&row.symbol, &row.exchange, &row.cnt); err != nil {
+			return nil, fmt.Errorf("scan grouped row from %s failed: %w", tableName, err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate grouped rows from %s failed: %w", tableName, err)
+	}
+	return out, nil
+}
+
+func upsertRows(tx *sql.Tx, tableName string, kind string, variety string, rows []groupedRow, now time.Time) (int, error) {
+	inserted := 0
+	for _, row := range rows {
+		normSymbol := normalizeStoredSymbol(row.symbol, kind, variety)
+		if normSymbol == "" {
+			continue
+		}
+		if _, err := tx.Exec(`
+INSERT INTO kline_search_index
+(table_name, symbol, symbol_norm, variety, exchange, kind, bar_count, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+ON DUPLICATE KEY UPDATE
+  exchange=VALUES(exchange),
+  bar_count=VALUES(bar_count),
+  updated_at=VALUES(updated_at)`,
+			tableName,
+			normSymbol,
+			normSymbol,
+			variety,
+			strings.ToUpper(strings.TrimSpace(row.exchange)),
+			kind,
+			row.cnt,
+			now.Format(timeLayout),
+		); err != nil {
+			return inserted, fmt.Errorf("insert search index row failed: %w", err)
+		}
+		inserted++
+	}
+	return inserted, nil
+}
+
+func deleteTargets(tx *sql.Tx, targets []Target) error {
+	for _, target := range targets {
+		if _, err := tx.Exec(`
+DELETE FROM kline_search_index
+WHERE table_name = ? AND symbol_norm = ? AND kind = ?`,
+			target.TableName,
+			normalizeStoredSymbol(target.Symbol, target.Kind, target.Variety),
+			target.Kind,
+		); err != nil {
+			return fmt.Errorf("delete target search index row failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func normalizeTargets(targets []Target) []Target {
+	out := make([]Target, 0, len(targets))
+	seen := make(map[string]struct{}, len(targets))
+	for _, target := range targets {
+		target = normalizeTarget(target)
+		if target.Symbol == "" || target.Kind == "" || target.Variety == "" {
+			continue
+		}
+		if target.TableName == "" {
+			target.TableName = tableNameForTarget(target)
+		}
+		if target.TableName == "" {
+			continue
+		}
+		key := targetKey(target)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, target)
+	}
+	return out
+}
+
+func normalizeTarget(target Target) Target {
+	target.Kind = strings.ToLower(strings.TrimSpace(target.Kind))
+	target.Variety = normalizeVariety(target.Variety)
+	target.Symbol = normalizeStoredSymbol(target.Symbol, target.Kind, target.Variety)
+	target.TableName = strings.TrimSpace(target.TableName)
+	if target.Variety == "" {
+		_, parsedVariety := normalizeLookupSymbol(target.Symbol, target.Kind)
+		target.Variety = parsedVariety
+	}
+	return target
+}
+
+func targetKey(target Target) string {
+	return normalizeStoredSymbol(target.Symbol, target.Kind, target.Variety) + "|" + strings.ToLower(strings.TrimSpace(target.Kind)) + "|" + normalizeVariety(target.Variety)
+}
+
+func tableNameForTarget(target Target) string {
+	switch target.Kind {
+	case "contract":
+		return instrumentTablePrefix + target.Variety
+	case "l9":
+		return l9TablePrefix + target.Variety
+	default:
+		return ""
+	}
 }
 
 func normalizeVariety(value string) string {
@@ -619,23 +711,101 @@ WHERE table_schema = DATABASE()
 	return false, rows.Err()
 }
 
-func resolveQueryTimeExpr(tx *sql.Tx, tableName string) (string, error) {
-	dataTimeCol := ""
-	hasDataTime, err := tableHasColumn(tx, tableName, "DataTime")
+func tableHasIndex(tx *sql.Tx, tableName string, indexName string) (bool, error) {
+	rows, err := tx.Query(`
+SELECT index_name
+FROM information_schema.statistics
+WHERE table_schema = DATABASE()
+  AND table_name = ?`, tableName)
 	if err != nil {
-		return "", fmt.Errorf("inspect table %s DataTime failed: %w", tableName, err)
+		return false, err
 	}
-	if hasDataTime {
-		dataTimeCol = `"DataTime"`
-	} else {
-		hasLegacyTime, err := tableHasColumn(tx, tableName, "Time")
-		if err != nil {
-			return "", fmt.Errorf("inspect table %s Time failed: %w", tableName, err)
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return false, err
 		}
-		if !hasLegacyTime {
-			return "", fmt.Errorf("table %s missing both DataTime and Time columns", tableName)
+		if strings.EqualFold(name, indexName) {
+			return true, nil
 		}
-		dataTimeCol = `"Time"`
 	}
-	return dataTimeCol, nil
+	return false, rows.Err()
+}
+
+func renderExecutableSQL(query string, args ...any) string {
+	out := strings.TrimSpace(query)
+	for _, arg := range args {
+		out = strings.Replace(out, "?", mysqlLiteral(arg), 1)
+	}
+	return navicatSQL(out)
+}
+
+func navicatSQL(query string) string {
+	out := strings.Join(strings.Fields(strings.TrimSpace(query)), " ")
+	return strings.ReplaceAll(out, `"`, "`")
+}
+
+func mysqlLiteral(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return "NULL"
+	case string:
+		return "'" + strings.ReplaceAll(x, "'", "''") + "'"
+	case []byte:
+		return "'" + strings.ReplaceAll(string(x), "'", "''") + "'"
+	case bool:
+		if x {
+			return "1"
+		}
+		return "0"
+	case int:
+		return strconv.Itoa(x)
+	case int8:
+		return strconv.FormatInt(int64(x), 10)
+	case int16:
+		return strconv.FormatInt(int64(x), 10)
+	case int32:
+		return strconv.FormatInt(int64(x), 10)
+	case int64:
+		return strconv.FormatInt(x, 10)
+	case uint:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint8:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint16:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint32:
+		return strconv.FormatUint(uint64(x), 10)
+	case uint64:
+		return strconv.FormatUint(x, 10)
+	case float32:
+		return strconv.FormatFloat(float64(x), 'f', -1, 32)
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64)
+	case time.Time:
+		return "'" + x.Format(timeLayout) + "'"
+	default:
+		return "'" + strings.ReplaceAll(fmt.Sprint(v), "'", "''") + "'"
+	}
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
