@@ -7,6 +7,7 @@
   $env:PATH = "E:\work\go\ctp-future-kline;$env:PATH"
   ```
 - Use the same `PATH` preparation for related commands such as `go test ./...`, `go test ./internal/trade`, `dlv debug`, and `dlv test`, so tests do not fail due to missing `thostmduserapi_se.dll`, `thosttraderapi_se.dll`, or `wrap.dll`.
+- Test-created MySQL schemas with the `codex_test_` prefix are temporary fixtures. Keep test cleanup intact so these schemas are dropped at test cleanup time, and preserve the stale-schema purge on the next test run so interrupted runs do not accumulate leftover test databases.
 
 ## PowerShell UTF-8 Safety
 

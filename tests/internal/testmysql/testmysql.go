@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -18,11 +19,17 @@ import (
 const dbNamePrefix = "codex_test_"
 
 var dbSeq atomic.Uint64
+var cleanupOnce sync.Once
 
 func NewDatabase(t *testing.T) string {
 	t.Helper()
 
 	cfg := baseConfig()
+	cleanupOnce.Do(func() {
+		if err := purgeStaleDatabases(cfg); err != nil {
+			t.Fatalf("purge stale test databases failed: %v", err)
+		}
+	})
 	cfg.Database = dbName(t.Name())
 
 	if err := dbx.EnsureDatabase(cfg); err != nil {
@@ -110,15 +117,61 @@ func dropDatabase(t *testing.T, cfg config.DBConfig) {
 		t.Fatalf("refusing to drop non-test database %q", cfg.Database)
 	}
 
-	admin, err := dbx.Open(dbx.BuildAdminDSN(cfg))
+	admin, err := openAdminDB(cfg)
 	if err != nil {
 		t.Fatalf("open mysql admin connection failed during cleanup: %v", err)
 	}
 	defer admin.Close()
 
-	if _, err := admin.Exec(fmt.Sprintf(`DROP DATABASE IF EXISTS "%s"`, cfg.Database)); err != nil {
+	if err := dropDatabaseByName(admin, cfg.Database); err != nil {
 		t.Fatalf("drop test database failed: %v", err)
 	}
+}
+
+func purgeStaleDatabases(cfg config.DBConfig) error {
+	admin, err := openAdminDB(cfg)
+	if err != nil {
+		return err
+	}
+	defer admin.Close()
+
+	rows, err := admin.Query(`SELECT SCHEMA_NAME FROM information_schema.SCHEMATA WHERE SCHEMA_NAME LIKE 'codex_test\_%'`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			return err
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for _, name := range names {
+		if err := dropDatabaseByName(admin, name); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func openAdminDB(cfg config.DBConfig) (*sql.DB, error) {
+	return dbx.Open(dbx.BuildAdminDSN(cfg))
+}
+
+func dropDatabaseByName(admin *sql.DB, name string) error {
+	if !strings.HasPrefix(name, dbNamePrefix) {
+		return fmt.Errorf("refusing to drop non-test database %q", name)
+	}
+	quoted := strings.ReplaceAll(name, "`", "``")
+	_, err := admin.Exec(fmt.Sprintf("DROP DATABASE IF EXISTS `%s`", quoted))
+	return err
 }
 
 func loadConfigFromWorkspace() config.DBConfig {
