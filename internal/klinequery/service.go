@@ -4,7 +4,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -446,10 +445,183 @@ func (s *Service) RebuildSearchItem(item SearchItem) (SearchItem, bool, error) {
 }
 
 func (s *Service) searchCandidates(db *sql.DB, tables []searchTable, keyword string) ([]SearchItem, error) {
-	letters, digits := splitKeyword(strings.ToLower(strings.TrimSpace(keyword)))
-	if letters == "" && digits == "" {
-		return s.defaultSearchItems(db, tables, 10)
+	keyword = normalizeSearchKeyword(keyword)
+	if keyword == "" {
+		items, err := s.defaultSearchItemsFromIndex(db, 10)
+		if err != nil {
+			return nil, err
+		}
+		if len(items) > 0 {
+			return items, nil
+		}
+		return s.defaultSearchItemsFromTables(db, tables, 10)
 	}
+
+	items, err := s.searchItemsFromIndex(db, keyword)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) > 0 {
+		return items, nil
+	}
+	return s.searchCandidatesFromTables(db, tables, keyword)
+}
+
+func (s *Service) searchItemsFromIndex(db *sql.DB, keyword string) ([]SearchItem, error) {
+	if keyword == "" {
+		return nil, nil
+	}
+	if ok, err := searchIndexTableExists(db); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, nil
+	}
+
+	prefixLike := keyword + "%"
+	containsLike := "%" + keyword + "%"
+	rows, err := db.Query(`
+SELECT symbol,variety,exchange,kind,bar_count,updated_at,table_name,
+       CASE
+         WHEN symbol_norm LIKE ? THEN 0
+         WHEN symbol_norm LIKE ? THEN 1
+         WHEN variety LIKE ? THEN 2
+         WHEN variety LIKE ? THEN 3
+         WHEN lower(exchange) LIKE ? THEN 4
+         WHEN lower(exchange) LIKE ? THEN 5
+         ELSE 6
+       END AS match_rank,
+       CASE WHEN kind='l9' THEN 0 ELSE 1 END AS kind_rank
+FROM kline_search_index
+WHERE symbol_norm LIKE ?
+   OR symbol_norm LIKE ?
+   OR variety LIKE ?
+   OR variety LIKE ?
+   OR lower(exchange) LIKE ?
+   OR lower(exchange) LIKE ?
+ORDER BY match_rank ASC, kind_rank ASC, updated_at DESC, symbol_norm ASC`,
+		prefixLike,
+		containsLike,
+		prefixLike,
+		containsLike,
+		prefixLike,
+		containsLike,
+		prefixLike,
+		containsLike,
+		prefixLike,
+		containsLike,
+		prefixLike,
+		containsLike,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query search index candidates failed: %w", err)
+	}
+	defer rows.Close()
+
+	items := make([]SearchItem, 0, 128)
+	for rows.Next() {
+		var (
+			item      SearchItem
+			updatedAt time.Time
+			matchRank int
+			kindRank  int
+		)
+		if err := rows.Scan(
+			&item.Symbol,
+			&item.Variety,
+			&item.Exchange,
+			&item.Type,
+			&item.BarCount,
+			&updatedAt,
+			&item.TableName,
+			&matchRank,
+			&kindRank,
+		); err != nil {
+			return nil, fmt.Errorf("scan search index candidate failed: %w", err)
+		}
+		item.Symbol = displaySymbol(item.Symbol, item.Type)
+		item.UpdatedAt = updatedAt.Format("2006-01-02 15:04:05")
+		item.Exchange = strings.ToUpper(strings.TrimSpace(item.Exchange))
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate search index candidates failed: %w", err)
+	}
+	return dedupeSearchItems(items), nil
+}
+
+func (s *Service) defaultSearchItemsFromIndex(db *sql.DB, limit int) ([]SearchItem, error) {
+	if limit <= 0 {
+		return nil, nil
+	}
+	if ok, err := searchIndexTableExists(db); err != nil {
+		return nil, err
+	} else if !ok {
+		return nil, nil
+	}
+
+	items := make([]SearchItem, 0, limit)
+	appendByKind := func(kind string) error {
+		if len(items) >= limit {
+			return nil
+		}
+		rows, err := db.Query(`
+SELECT symbol,variety,exchange,kind,bar_count,updated_at,table_name
+FROM kline_search_index
+WHERE kind = ?
+ORDER BY updated_at DESC, symbol_norm ASC
+LIMIT ?`, kind, limit-len(items))
+		if err != nil {
+			return fmt.Errorf("query default search index items failed: %w", err)
+		}
+		defer rows.Close()
+
+		for rows.Next() {
+			var (
+				item      SearchItem
+				updatedAt time.Time
+			)
+			if err := rows.Scan(
+				&item.Symbol,
+				&item.Variety,
+				&item.Exchange,
+				&item.Type,
+				&item.BarCount,
+				&updatedAt,
+				&item.TableName,
+			); err != nil {
+				return fmt.Errorf("scan default search index item failed: %w", err)
+			}
+			item.Symbol = displaySymbol(item.Symbol, item.Type)
+			item.UpdatedAt = updatedAt.Format("2006-01-02 15:04:05")
+			item.Exchange = strings.ToUpper(strings.TrimSpace(item.Exchange))
+			items = append(items, item)
+		}
+		return rows.Err()
+	}
+
+	if err := appendByKind("l9"); err != nil {
+		return nil, err
+	}
+	if err := appendByKind("contract"); err != nil {
+		return nil, err
+	}
+	return dedupeSearchItems(items), nil
+}
+
+func searchIndexTableExists(db *sql.DB) (bool, error) {
+	var count int
+	if err := db.QueryRow(`
+SELECT COUNT(1)
+FROM information_schema.tables
+WHERE table_schema = DATABASE()
+  AND table_name = 'kline_search_index'`).Scan(&count); err != nil {
+		return false, fmt.Errorf("query search index table existence failed: %w", err)
+	}
+	return count > 0, nil
+}
+
+func (s *Service) searchCandidatesFromTables(db *sql.DB, tables []searchTable, keyword string) ([]SearchItem, error) {
+	letters, digits := splitKeyword(strings.ToLower(strings.TrimSpace(keyword)))
 	if letters == "" {
 		return nil, nil
 	}
@@ -516,7 +688,7 @@ func (s *Service) searchCandidates(db *sql.DB, tables []searchTable, keyword str
 	return dedupeSearchItems(results), nil
 }
 
-func (s *Service) defaultSearchItems(db *sql.DB, tables []searchTable, limit int) ([]SearchItem, error) {
+func (s *Service) defaultSearchItemsFromTables(db *sql.DB, tables []searchTable, limit int) ([]SearchItem, error) {
 	results := make([]SearchItem, 0, limit)
 	for _, table := range tables {
 		if len(results) >= limit {
@@ -724,7 +896,7 @@ ORDER BY lower("InstrumentID")`, "%"+digits+"%")
 }
 
 func splitKeyword(keyword string) (string, string) {
-	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	keyword = normalizeSearchKeyword(keyword)
 	if keyword == "" {
 		return "", ""
 	}
@@ -743,6 +915,21 @@ func splitKeyword(keyword string) (string, string) {
 	return letters.String(), digits.String()
 }
 
+func normalizeSearchKeyword(keyword string) string {
+	keyword = strings.ToLower(strings.TrimSpace(keyword))
+	if keyword == "" {
+		return ""
+	}
+	var out strings.Builder
+	out.Grow(len(keyword))
+	for _, ch := range keyword {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+			out.WriteRune(ch)
+		}
+	}
+	return out.String()
+}
+
 func dedupeSearchItems(items []SearchItem) []SearchItem {
 	seen := make(map[string]struct{}, len(items))
 	out := make([]SearchItem, 0, len(items))
@@ -754,21 +941,6 @@ func dedupeSearchItems(items []SearchItem) []SearchItem {
 		seen[key] = struct{}{}
 		out = append(out, item)
 	}
-	sort.SliceStable(out, func(i, j int) bool {
-		if out[i].Variety == out[j].Variety {
-			if out[i].Type == out[j].Type {
-				return out[i].Symbol < out[j].Symbol
-			}
-			if out[i].Type == "contract" {
-				return true
-			}
-			if out[j].Type == "contract" {
-				return false
-			}
-			return out[i].Type < out[j].Type
-		}
-		return out[i].Variety < out[j].Variety
-	})
 	return out
 }
 

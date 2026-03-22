@@ -93,7 +93,7 @@ function findPivots(bars, pivotK, startIndex) {
 }
 
 export const DEFAULT_REVERSAL_SETTINGS = {
-  enabled: true,
+  enabled: false,
   midTrendMinBars: 50,
   midTrendMaxBars: 2000,
   pivotKMinute: 3,

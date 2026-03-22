@@ -439,6 +439,168 @@ select {
   width: 48px;
 }
 
+.tv-keyboard-sprite {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 80;
+  width: min(360px, calc(100vw - 36px));
+  border: 1px solid #355172;
+  border-radius: 10px;
+  background: rgba(12, 21, 36, 0.96);
+  box-shadow: 0 14px 36px rgba(0, 0, 0, 0.32);
+  overflow: hidden;
+}
+
+.theme-light .tv-keyboard-sprite {
+  border-color: #9ebad4;
+  background: rgba(248, 251, 255, 0.98);
+  box-shadow: 0 14px 36px rgba(39, 67, 94, 0.18);
+}
+
+.tv-keyboard-sprite-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px 6px;
+}
+
+.tv-keyboard-sprite-title {
+  font-size: 12px;
+  color: #8ea5bf;
+  letter-spacing: 0.08em;
+}
+
+.theme-light .tv-keyboard-sprite-title {
+  color: #5c7897;
+}
+
+.tv-keyboard-sprite-query {
+  padding: 0 12px 4px;
+  font-size: 22px;
+  line-height: 1.2;
+  font-weight: 700;
+  color: #f4fbff;
+  font-variant-numeric: tabular-nums;
+  text-transform: lowercase;
+}
+
+.theme-light .tv-keyboard-sprite-query {
+  color: #17314a;
+}
+
+.tv-keyboard-sprite-hint {
+  padding: 0 12px 10px;
+  font-size: 11px;
+  color: #8ea5bf;
+}
+
+.theme-light .tv-keyboard-sprite-hint {
+  color: #5c7897;
+}
+
+.tv-keyboard-sprite-list {
+  max-height: min(360px, 48vh);
+  overflow: auto;
+  border-top: 1px solid rgba(94, 127, 160, 0.28);
+}
+
+.theme-light .tv-keyboard-sprite-list {
+  border-top-color: rgba(120, 154, 188, 0.28);
+}
+
+.tv-keyboard-sprite-empty {
+  padding: 16px 12px;
+  color: #8ea5bf;
+  font-size: 12px;
+}
+
+.theme-light .tv-keyboard-sprite-empty {
+  color: #5c7897;
+}
+
+.tv-keyboard-sprite-item {
+  width: 100%;
+  border: 0;
+  border-top: 1px solid rgba(94, 127, 160, 0.18);
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 10px 12px;
+  cursor: pointer;
+  text-align: left;
+}
+
+.tv-keyboard-sprite-item:first-child {
+  border-top: 0;
+}
+
+.tv-keyboard-sprite-item.active {
+  background: rgba(78, 161, 255, 0.16);
+}
+
+.theme-light .tv-keyboard-sprite-item {
+  border-top-color: rgba(120, 154, 188, 0.18);
+}
+
+.theme-light .tv-keyboard-sprite-item.active {
+  background: rgba(78, 161, 255, 0.1);
+}
+
+.tv-keyboard-sprite-item .sprite-main,
+.tv-keyboard-sprite-item .sprite-sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.tv-keyboard-sprite-item .sprite-main {
+  flex: 1 1 auto;
+}
+
+.tv-keyboard-sprite-item .sprite-sub {
+  flex: 0 0 auto;
+  color: #8ea5bf;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.theme-light .tv-keyboard-sprite-item .sprite-sub {
+  color: #5c7897;
+}
+
+.tv-keyboard-sprite-item .sprite-symbol {
+  font-size: 14px;
+  font-weight: 700;
+  color: #f4fbff;
+  text-transform: lowercase;
+}
+
+.theme-light .tv-keyboard-sprite-item .sprite-symbol {
+  color: #17314a;
+}
+
+.tv-keyboard-sprite-item .sprite-type {
+  display: inline-flex;
+  align-items: center;
+  height: 18px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: rgba(255, 209, 102, 0.16);
+  color: #ffd166;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.theme-light .tv-keyboard-sprite-item .sprite-type {
+  background: rgba(248, 179, 62, 0.14);
+  color: #9f5d12;
+}
+
 .tv-watchlist-head {
   display: flex;
   justify-content: space-between;

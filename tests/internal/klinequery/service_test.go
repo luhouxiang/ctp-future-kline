@@ -57,6 +57,210 @@ func TestBarsAndSearch(t *testing.T) {
 	}
 }
 
+func TestSearchEmptyKeywordPrefersIndexL9ThenContracts(t *testing.T) {
+	t.Parallel()
+
+	dsn := testmysql.NewDatabase(t)
+	db := testmysql.Open(t, dsn)
+	defer db.Close()
+
+	createSearchIndexTable(t, db)
+	now := mustTime("2026-01-20 15:00:00")
+	for i := 0; i < 12; i++ {
+		variety := fmt.Sprintf("v%02d", i)
+		insertSearchIndexRow(t, db, searchIndexRow{
+			symbol:     variety + "l9",
+			symbolNorm: variety + "l9",
+			variety:    variety,
+			exchange:   "L9",
+			kind:       "l9",
+			barCount:   int64(100 + i),
+			updatedAt:  now.Add(time.Duration(i) * time.Minute),
+			tableName:  "future_kline_l9_1m_" + variety,
+		})
+	}
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "rb2501",
+		symbolNorm: "rb2501",
+		variety:    "rb",
+		exchange:   "SHFE",
+		kind:       "contract",
+		barCount:   88,
+		updatedAt:  now.Add(20 * time.Minute),
+		tableName:  "future_kline_instrument_1m_rb",
+	})
+
+	svc := klinequery.NewService(dsn, searchindex.NewManager(dsn, 0))
+	resp, err := svc.Search("", 1, 20)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(resp.Items) != 10 {
+		t.Fatalf("len(resp.Items)=%d, want 10", len(resp.Items))
+	}
+	for i, item := range resp.Items {
+		if item.Type != "l9" {
+			t.Fatalf("items[%d].Type=%q, want l9", i, item.Type)
+		}
+		if item.BarCount == 0 || item.TableName == "" || item.UpdatedAt == "" {
+			t.Fatalf("items[%d] metadata not filled: %+v", i, item)
+		}
+	}
+}
+
+func TestSearchEmptyKeywordFallsBackWhenIndexHasNoRows(t *testing.T) {
+	t.Parallel()
+
+	dsn := testmysql.NewDatabase(t)
+	prepareDB(t, dsn)
+	db := testmysql.Open(t, dsn)
+	defer db.Close()
+	createSearchIndexTable(t, db)
+
+	svc := klinequery.NewService(dsn, searchindex.NewManager(dsn, 0))
+	resp, err := svc.Search("", 1, 20)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(resp.Items) != 2 {
+		t.Fatalf("len(resp.Items)=%d, want 2", len(resp.Items))
+	}
+	got := map[string]bool{}
+	for _, item := range resp.Items {
+		got[item.Type] = true
+	}
+	if !got["l9"] || !got["contract"] {
+		t.Fatalf("fallback items=%+v, want both l9 and contract from table scan", resp.Items)
+	}
+}
+
+func TestSearchEmptyKeywordFillsContractsWhenIndexL9Insufficient(t *testing.T) {
+	t.Parallel()
+
+	dsn := testmysql.NewDatabase(t)
+	db := testmysql.Open(t, dsn)
+	defer db.Close()
+
+	createSearchIndexTable(t, db)
+	now := mustTime("2026-01-20 15:00:00")
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "srl9",
+		symbolNorm: "srl9",
+		variety:    "sr",
+		exchange:   "L9",
+		kind:       "l9",
+		barCount:   90,
+		updatedAt:  now,
+		tableName:  "future_kline_l9_1m_sr",
+	})
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "cfl9",
+		symbolNorm: "cfl9",
+		variety:    "cf",
+		exchange:   "L9",
+		kind:       "l9",
+		barCount:   91,
+		updatedAt:  now.Add(time.Minute),
+		tableName:  "future_kline_l9_1m_cf",
+	})
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "rb2501",
+		symbolNorm: "rb2501",
+		variety:    "rb",
+		exchange:   "SHFE",
+		kind:       "contract",
+		barCount:   92,
+		updatedAt:  now.Add(2 * time.Minute),
+		tableName:  "future_kline_instrument_1m_rb",
+	})
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "ag2501",
+		symbolNorm: "ag2501",
+		variety:    "ag",
+		exchange:   "SHFE",
+		kind:       "contract",
+		barCount:   93,
+		updatedAt:  now.Add(3 * time.Minute),
+		tableName:  "future_kline_instrument_1m_ag",
+	})
+
+	svc := klinequery.NewService(dsn, searchindex.NewManager(dsn, 0))
+	resp, err := svc.Search("", 1, 20)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(resp.Items) != 4 {
+		t.Fatalf("len(resp.Items)=%d, want 4", len(resp.Items))
+	}
+	if resp.Items[0].Type != "l9" || resp.Items[1].Type != "l9" {
+		t.Fatalf("first two items=%+v, want l9 first", resp.Items[:2])
+	}
+	if resp.Items[2].Type != "contract" || resp.Items[3].Type != "contract" {
+		t.Fatalf("last two items=%+v, want contracts appended after l9", resp.Items[2:])
+	}
+}
+
+func TestSearchKeywordPrefersPrefixAndL9OverContainsAndContracts(t *testing.T) {
+	t.Parallel()
+
+	dsn := testmysql.NewDatabase(t)
+	db := testmysql.Open(t, dsn)
+	defer db.Close()
+
+	createSearchIndexTable(t, db)
+	now := mustTime("2026-01-20 15:00:00")
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "srl9",
+		symbolNorm: "srl9",
+		variety:    "sr",
+		exchange:   "L9",
+		kind:       "l9",
+		barCount:   101,
+		updatedAt:  now.Add(3 * time.Minute),
+		tableName:  "future_kline_l9_1m_sr",
+	})
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "sr2501",
+		symbolNorm: "sr2501",
+		variety:    "sr",
+		exchange:   "CZCE",
+		kind:       "contract",
+		barCount:   102,
+		updatedAt:  now.Add(2 * time.Minute),
+		tableName:  "future_kline_instrument_1m_sr",
+	})
+	insertSearchIndexRow(t, db, searchIndexRow{
+		symbol:     "masr",
+		symbolNorm: "masr",
+		variety:    "ma",
+		exchange:   "CZCE",
+		kind:       "contract",
+		barCount:   103,
+		updatedAt:  now.Add(5 * time.Minute),
+		tableName:  "future_kline_instrument_1m_ma",
+	})
+
+	svc := klinequery.NewService(dsn, searchindex.NewManager(dsn, 0))
+	resp, err := svc.Search("sr", 1, 20)
+	if err != nil {
+		t.Fatalf("Search() error = %v", err)
+	}
+	if len(resp.Items) < 3 {
+		t.Fatalf("len(resp.Items)=%d, want at least 3", len(resp.Items))
+	}
+	got := []string{
+		resp.Items[0].Type + ":" + resp.Items[0].Symbol,
+		resp.Items[1].Type + ":" + resp.Items[1].Symbol,
+		resp.Items[2].Type + ":" + resp.Items[2].Symbol,
+	}
+	want := []string{"l9:srl9", "contract:sr2501", "contract:masr"}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("items order=%v, want prefix-first and l9-first order %v", got, want)
+		}
+	}
+}
+
 func TestBarsByEndUsesAdjustedTime(t *testing.T) {
 	t.Parallel()
 
@@ -404,6 +608,47 @@ func insertL9DayBars(t *testing.T, db *sql.DB, tradeDate string, hhmm []string) 
 		)
 		price += 0.2
 	}
+}
+
+type searchIndexRow struct {
+	symbol     string
+	symbolNorm string
+	variety    string
+	exchange   string
+	kind       string
+	barCount   int64
+	updatedAt  time.Time
+	tableName  string
+}
+
+func createSearchIndexTable(t *testing.T, db *sql.DB) {
+	t.Helper()
+	mustExec(t, db, `CREATE TABLE IF NOT EXISTS kline_search_index(
+  table_name VARCHAR(128) NOT NULL,
+  symbol VARCHAR(64) NOT NULL,
+  symbol_norm VARCHAR(64) NOT NULL,
+  variety VARCHAR(32) NOT NULL,
+  exchange VARCHAR(16) NOT NULL,
+  kind VARCHAR(16) NOT NULL,
+  bar_count BIGINT NOT NULL,
+  updated_at DATETIME NOT NULL
+)`)
+	mustExec(t, db, `DELETE FROM kline_search_index`)
+}
+
+func insertSearchIndexRow(t *testing.T, db *sql.DB, row searchIndexRow) {
+	t.Helper()
+	mustExecArgs(t, db, `INSERT INTO kline_search_index(table_name,symbol,symbol_norm,variety,exchange,kind,bar_count,updated_at)
+VALUES(?,?,?,?,?,?,?,?)`,
+		row.tableName,
+		row.symbol,
+		row.symbolNorm,
+		row.variety,
+		row.exchange,
+		row.kind,
+		row.barCount,
+		row.updatedAt.Format("2006-01-02 15:04:05"),
+	)
 }
 
 func mustExec(t *testing.T, db *sql.DB, stmt string) {

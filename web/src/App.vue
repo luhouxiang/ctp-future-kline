@@ -911,7 +911,7 @@ async function rebuildAllIndex() {
 
 async function rebuildOneIndex(item) {
   const key = rowBusyKey(item)
-  if (searchState.rowBusy[key]) return
+  if (searchState.rowBusy[key]) return null
   searchState.rowBusy[key] = true
   try {
     const resp = await fetch('/api/kline/index/rebuild-one', {
@@ -926,11 +926,13 @@ async function rebuildOneIndex(item) {
     if (!data.exists) {
       searchState.items = searchState.items.filter((entry) => rowBusyKey(entry) !== key)
       searchState.total = Math.max(0, Number(searchState.total || 0) - 1)
-      return
+      return null
     }
     searchState.items = searchState.items.map((entry) => rowBusyKey(entry) === key ? { ...entry, ...data.item } : entry)
+    return data.item || item
   } catch (error) {
     addLog(`重建索引失败: ${error.message}`)
+    return null
   } finally {
     searchState.rowBusy[key] = false
   }
@@ -948,20 +950,22 @@ function nextPage() {
   void runSearch(false)
 }
 
-function openChart(item) {
+async function openChart(item) {
+  const refreshedItem = await rebuildOneIndex(item)
+  if (!refreshedItem) return
   const params = new URLSearchParams({
-    symbol: item.symbol,
-    type: item.type,
-    variety: item.variety || '',
+    symbol: refreshedItem.symbol,
+    type: refreshedItem.type,
+    variety: refreshedItem.variety || '',
   })
   const url = `/chart?${params.toString()}`
   console.log('[openChart] params', {
-    symbol: item.symbol,
-    type: item.type,
-    variety: item.variety || '',
+    symbol: refreshedItem.symbol,
+    type: refreshedItem.type,
+    variety: refreshedItem.variety || '',
     url,
   })
-  addLog(`openChart symbol=${item.symbol} type=${item.type} variety=${item.variety || ''}`)
+  addLog(`openChart symbol=${refreshedItem.symbol} type=${refreshedItem.type} variety=${refreshedItem.variety || ''}`)
   window.open(url, '_blank')
 }
 
@@ -977,22 +981,28 @@ function connectWS() {
   ws.onclose = () => {
     wsConnected.value = false
     addLog('WebSocket 已断开，2秒后重连')
-    setTimeout(connectWS, 2000)
+    setTimeout(() => {
+      connectWS()
+    }, 2000)
+  }
+
+  ws.onerror = () => {
+    wsConnected.value = false
   }
 
   ws.onmessage = (event) => {
-    const msg = JSON.parse(event.data)
-    if (msg.type === 'status_update' && msg.data?.status) {
-      applyStatusSnapshot(msg.data.status)
-      if (msg.data.replay) {
-        replaySupported.value = true
-        applyReplayState(msg.data.replay)
-      } else {
-        replaySupported.value = false
-      }
+    let msg
+    try {
+      msg = JSON.parse(event.data)
+    } catch {
       return
     }
-    if (msg.type === 'strategy_status_update' && msg.data) {
+    if (!msg || typeof msg !== 'object') return
+    if (msg.type === 'status' && msg.data) {
+      Object.assign(status, msg.data)
+      return
+    }
+    if (msg.type === 'strategy_status' && msg.data) {
       applyStrategyStatus(msg.data)
       fetchStrategyBundle()
       return

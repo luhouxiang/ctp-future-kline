@@ -516,7 +516,7 @@ type ReversalLayout struct {
 
 func DefaultReversalSettings() ReversalSettings {
 	return ReversalSettings{
-		Enabled:              true,
+		Enabled:              false,
 		MidTrendMinBars:      50,
 		MidTrendMaxBars:      2000,
 		PivotKMinute:         3,

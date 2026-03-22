@@ -11,6 +11,7 @@ const props = defineProps({
   activeTab: { type: String, default: 'reversal' },
   channels: { type: Object, default: () => ({ rows: [], selected_id: '', settings: {}, detail: null }) },
   reversal: { type: Object, default: () => ({ settings: {}, results: { lines: [], events: [] }, selected_id: '' }) },
+  lightweightOnly: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -186,10 +187,10 @@ function statusLabel(s) {
         <button class="tv-watch-tab" :class="{ active: props.activeTab === 'object_tree' }" @click="emit('set-active-tab', 'object_tree')">
           对象树
         </button>
-        <button class="tv-watch-tab" :class="{ active: props.activeTab === 'channel' }" @click="emit('set-active-tab', 'channel')">
+        <button v-if="!props.lightweightOnly" class="tv-watch-tab" :class="{ active: props.activeTab === 'channel' }" @click="emit('set-active-tab', 'channel')">
           通道
         </button>
-        <button class="tv-watch-tab" :class="{ active: props.activeTab === 'reversal' }" @click="emit('set-active-tab', 'reversal')">
+        <button v-if="!props.lightweightOnly" class="tv-watch-tab" :class="{ active: props.activeTab === 'reversal' }" @click="emit('set-active-tab', 'reversal')">
           反转
         </button>
       </div>
@@ -246,7 +247,7 @@ function statusLabel(s) {
       <div v-if="!props.drawings.length" class="tv-object-empty">暂无对象</div>
     </div>
 
-    <div v-else-if="props.open && props.activeTab === 'channel'" class="tv-watchlist-body tv-channel-tab">
+    <div v-else-if="!props.lightweightOnly && props.open && props.activeTab === 'channel'" class="tv-watchlist-body tv-channel-tab">
       <details class="tv-channel-help" open>
         <summary>参数说明与操作语义</summary>
         <div class="tv-channel-help-content">
@@ -378,7 +379,7 @@ function statusLabel(s) {
       </div>
     </div>
 
-    <div v-else-if="props.open" class="tv-watchlist-body tv-channel-tab">
+    <div v-else-if="!props.lightweightOnly && props.open" class="tv-watchlist-body tv-channel-tab">
       <div class="tv-channel-settings-head">1-2-3 反转信号</div>
       <div class="tv-channel-actions-row">
         <button class="tv-btn" @click="emit('reversal-action', { type: 'recalc' })">重算</button>

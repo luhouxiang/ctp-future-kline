@@ -4,11 +4,13 @@ import TopToolbar from './TopToolbar.vue'
 import LeftDrawToolbar from './LeftDrawToolbar.vue'
 import WatchlistPanel from './WatchlistPanel.vue'
 import PriceChartPane from './PriceChartPane.vue'
+import KeyboardSprite from './KeyboardSprite.vue'
 import { DEFAULT_CHANNEL_SETTINGS, normalizeChannelSettingsV2 } from './analysis/channelDetector'
 import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis/reversalDetector'
 
 const paneRef = ref(null)
 const owner = ref('admin')
+const lightweightOnly = true
 
 const scope = reactive({
   symbol: '',
@@ -33,7 +35,7 @@ const layout = reactive({
 
 const drawings = ref([])
 const watchlist = ref([])
-const activeRightTab = ref('reversal')
+const activeRightTab = ref('watchlist')
 const selectedDrawingId = ref('')
 const saveStatus = ref('idle')
 const activeTool = ref('cursor')
@@ -58,6 +60,8 @@ const maxWatchlistWidth = 520
 let resizeMeta = null
 let saveTimer = null
 let beforeUnloadHandler = null
+let spriteQueryTimer = null
+let spriteKeyHandler = null
 const DRAWING_TYPE_LABELS = {
   trendline: '趋势线',
   hline: '水平线',
@@ -73,6 +77,48 @@ function normalizeChannelSettingsWithDisplayOff(raw) {
   out.display.showRegression = false
   return out
 }
+
+function normalizeReversalSettingsOff(raw) {
+  return normalizeReversalSettings({
+    ...(raw || DEFAULT_REVERSAL_SETTINGS),
+    enabled: false,
+  })
+}
+
+function applyLightweightDefaults(layoutData = {}) {
+  layout.theme = layoutData.theme || 'dark'
+  layout.panes.right_watchlist_open = layoutData.panes?.right_watchlist_open ?? true
+  watchlistWidth.value = Number(layoutData.panes?.right_watchlist_width || 280)
+  if (!Number.isFinite(watchlistWidth.value)) watchlistWidth.value = 280
+  if (watchlistWidth.value < minWatchlistWidth) watchlistWidth.value = minWatchlistWidth
+  if (watchlistWidth.value > maxWatchlistWidth) watchlistWidth.value = maxWatchlistWidth
+  layout.indicators.ma20 = true
+  layout.indicators.macd = true
+  layout.indicators.volume = true
+  channelDebug.value = false
+  channelState.settings = normalizeChannelSettingsWithDisplayOff(layoutData.channels?.settings || DEFAULT_CHANNEL_SETTINGS)
+  channelState.decisions = []
+  channelState.selected_id = ''
+  channelState.rows = []
+  channelState.detail = null
+  channelState.persistVersion = 0
+  reversalState.settings = normalizeReversalSettingsOff(layoutData.reversal?.settings || DEFAULT_REVERSAL_SETTINGS)
+  reversalState.results = { lines: [], events: [] }
+  reversalState.persistVersion = 0
+  reversalState.selected_id = ''
+  activeRightTab.value = 'watchlist'
+  drawings.value = (layoutData.drawings || []).map((d) => normalizeDrawingForSave(d))
+  selectedDrawingId.value = ''
+}
+
+const keyboardSprite = reactive({
+  visible: false,
+  loading: false,
+  query: '',
+  items: [],
+  activeIndex: 0,
+  requestSeq: 0,
+})
 
 function normalizeDrawingForSave(d) {
   const out = {
@@ -227,28 +273,7 @@ async function loadLayout() {
     const resp = await fetch(`/api/chart/layout?${qs.toString()}`)
     if (!resp.ok) return
     const data = await resp.json()
-    layout.theme = data.theme || 'dark'
-    layout.panes.right_watchlist_open = data.panes?.right_watchlist_open ?? true
-    watchlistWidth.value = Number(data.panes?.right_watchlist_width || 280)
-    if (!Number.isFinite(watchlistWidth.value)) watchlistWidth.value = 280
-    if (watchlistWidth.value < minWatchlistWidth) watchlistWidth.value = minWatchlistWidth
-    if (watchlistWidth.value > maxWatchlistWidth) watchlistWidth.value = maxWatchlistWidth
-    layout.indicators.ma20 = data.indicators?.ma20 ?? true
-    layout.indicators.macd = data.indicators?.macd ?? true
-    layout.indicators.volume = data.indicators?.volume ?? true
-    channelState.settings = normalizeChannelSettingsWithDisplayOff(data.channels?.settings || {})
-    channelState.decisions = []
-    channelState.selected_id = ''
-    reversalState.settings = normalizeReversalSettings({
-      ...(data.reversal?.settings || {}),
-      enabled: true,
-    })
-    reversalState.results = data.reversal?.results || { lines: [], events: [] }
-    reversalState.persistVersion = Number(data.reversal?.persistVersion || data.reversal?.persist_version || 0) || 0
-    reversalState.selected_id = String(data.reversal?.selected_id || '')
-    activeRightTab.value = 'reversal'
-    drawings.value = (data.drawings || []).map((d) => normalizeDrawingForSave(d))
-    selectedDrawingId.value = ''
+    applyLightweightDefaults(data)
   } catch {
     // ignore
   }
@@ -312,6 +337,117 @@ function onSelectWatch(item) {
   history.replaceState({}, '', `/chart?${qs.toString()}`)
 }
 
+function resetKeyboardSprite() {
+  keyboardSprite.visible = false
+  keyboardSprite.loading = false
+  keyboardSprite.query = ''
+  keyboardSprite.items = []
+  keyboardSprite.activeIndex = 0
+  keyboardSprite.requestSeq += 1
+}
+
+function isEditableTarget(target) {
+  const el = target instanceof HTMLElement ? target : document.activeElement
+  if (!(el instanceof HTMLElement)) return false
+  if (el.isContentEditable) return true
+  const tag = String(el.tagName || '').toLowerCase()
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return true
+  return !!el.closest('input, textarea, select, button, [contenteditable="true"]')
+}
+
+function isSpriteKey(evt) {
+  return !evt.ctrlKey && !evt.metaKey && !evt.altKey && evt.key.length === 1 && /^[a-zA-Z0-9]$/.test(evt.key)
+}
+
+async function fetchKeyboardSpriteItems() {
+  const query = String(keyboardSprite.query || '').trim().toLowerCase()
+  if (!query) {
+    keyboardSprite.items = []
+    keyboardSprite.loading = false
+    keyboardSprite.activeIndex = 0
+    return
+  }
+  const requestSeq = keyboardSprite.requestSeq + 1
+  keyboardSprite.requestSeq = requestSeq
+  keyboardSprite.loading = true
+  try {
+    const params = new URLSearchParams({
+      keyword: query,
+      page: '1',
+      page_size: '20',
+    })
+    const resp = await fetch(`/api/kline/search?${params.toString()}`)
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+    const data = await resp.json()
+    if (keyboardSprite.requestSeq !== requestSeq) return
+    keyboardSprite.items = Array.isArray(data.items) ? data.items : []
+    if (keyboardSprite.activeIndex >= keyboardSprite.items.length) keyboardSprite.activeIndex = 0
+  } catch {
+    if (keyboardSprite.requestSeq !== requestSeq) return
+    keyboardSprite.items = []
+    keyboardSprite.activeIndex = 0
+  } finally {
+    if (keyboardSprite.requestSeq === requestSeq) keyboardSprite.loading = false
+  }
+}
+
+function openKeyboardSprite(initialChar = '') {
+  const next = String(initialChar || '').trim().toLowerCase()
+  keyboardSprite.visible = true
+  keyboardSprite.query = next
+  keyboardSprite.activeIndex = 0
+}
+
+function chooseKeyboardSprite(item) {
+  if (!item) return
+  resetKeyboardSprite()
+  onSelectWatch(item)
+}
+
+function onKeyboardSpriteKeydown(evt) {
+  if (isEditableTarget(evt.target)) return
+  if (!keyboardSprite.visible) {
+    if (!isSpriteKey(evt)) return
+    evt.preventDefault()
+    openKeyboardSprite(evt.key)
+    return
+  }
+
+  if (evt.key === 'Escape') {
+    evt.preventDefault()
+    resetKeyboardSprite()
+    return
+  }
+  if (evt.key === 'Backspace') {
+    evt.preventDefault()
+    keyboardSprite.query = keyboardSprite.query.slice(0, -1)
+    if (!keyboardSprite.query) resetKeyboardSprite()
+    return
+  }
+  if (evt.key === 'ArrowDown') {
+    evt.preventDefault()
+    if (!keyboardSprite.items.length) return
+    keyboardSprite.activeIndex = (keyboardSprite.activeIndex + 1) % keyboardSprite.items.length
+    return
+  }
+  if (evt.key === 'ArrowUp') {
+    evt.preventDefault()
+    if (!keyboardSprite.items.length) return
+    keyboardSprite.activeIndex = (keyboardSprite.activeIndex - 1 + keyboardSprite.items.length) % keyboardSprite.items.length
+    return
+  }
+  if (evt.key === 'Enter') {
+    evt.preventDefault()
+    chooseKeyboardSprite(keyboardSprite.items[keyboardSprite.activeIndex] || null)
+    return
+  }
+  if (isSpriteKey(evt)) {
+    evt.preventDefault()
+    keyboardSprite.query += evt.key.toLowerCase()
+    return
+  }
+}
+
 function onDeleteSelected() {
   if (selectedDrawingId.value) {
     const target = selectedDrawingId.value
@@ -356,10 +492,12 @@ function onSetTheme(v) {
 }
 
 function onToggleChannelDebug() {
+  if (lightweightOnly) return
   channelDebug.value = !channelDebug.value
 }
 
 function onToggleReversal() {
+  if (lightweightOnly) return
   reversalState.settings = normalizeReversalSettings({
     ...reversalState.settings,
     enabled: !reversalState.settings?.enabled,
@@ -384,10 +522,12 @@ function onChannelViewChange(payload) {
 }
 
 function onChannelAction(action) {
+  if (lightweightOnly) return
   paneRef.value?.applyChannelAction?.(action || null)
 }
 
 function onChannelSettings(payload) {
+  if (lightweightOnly) return
   paneRef.value?.applyChannelSettings?.(payload || null)
 }
 
@@ -404,14 +544,17 @@ function onReversalViewChange(payload) {
 }
 
 function onSetReversalSettings(payload) {
+  if (lightweightOnly) return
   paneRef.value?.applyReversalSettings?.(payload || null)
 }
 
 function onRecalcReversal() {
+  if (lightweightOnly) return
   paneRef.value?.recalcReversalNow?.()
 }
 
 function onReversalAction(action) {
+  if (lightweightOnly) return
   const type = String(action?.type || '')
   if (type === 'recalc') {
     onRecalcReversal()
@@ -457,6 +600,7 @@ function startResizeWatchlist(evt) {
 watch(
   () => [scope.symbol, scope.type, scope.variety, scope.timeframe],
   async () => {
+    resetKeyboardSprite()
     await loadLayout()
   },
 )
@@ -468,10 +612,28 @@ watch(
   },
 )
 
+watch(
+  () => keyboardSprite.query,
+  () => {
+    if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
+    if (!keyboardSprite.visible || !keyboardSprite.query) {
+      keyboardSprite.items = []
+      keyboardSprite.loading = false
+      keyboardSprite.activeIndex = 0
+      return
+    }
+    spriteQueryTimer = setTimeout(() => {
+      void fetchKeyboardSpriteItems()
+    }, 100)
+  },
+)
+
 onMounted(async () => {
   getParams()
   await fetchWatchlist()
   await loadLayout()
+  spriteKeyHandler = (evt) => onKeyboardSpriteKeydown(evt)
+  window.addEventListener('keydown', spriteKeyHandler)
   beforeUnloadHandler = () => {
     flushSaveOnUnload()
     if (saveTimer) clearTimeout(saveTimer)
@@ -481,6 +643,8 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopResizeWatchlist()
+  if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
+  if (spriteKeyHandler) window.removeEventListener('keydown', spriteKeyHandler)
   if (beforeUnloadHandler) window.removeEventListener('beforeunload', beforeUnloadHandler)
 })
 </script>
@@ -497,6 +661,7 @@ onUnmounted(() => {
       :active-tool="activeTool"
       :channel-debug="channelDebug"
       :reversal-settings="reversalState.settings"
+      :lightweight-only="lightweightOnly"
       @set-timeframe="onSetTimeframe"
       @set-theme="onSetTheme"
       @set-tool="onSetTool"
@@ -547,6 +712,7 @@ onUnmounted(() => {
           results: reversalState.results,
           selected_id: reversalState.selected_id || ''
         }"
+        :lightweight-only="lightweightOnly"
         :selected-drawing-id="selectedDrawingId"
         :active-tab="activeRightTab"
         @toggle="layout.panes.right_watchlist_open = !layout.panes.right_watchlist_open"
@@ -560,5 +726,16 @@ onUnmounted(() => {
         @reversal-action="onReversalAction"
       />
     </div>
+
+    <KeyboardSprite
+      :visible="keyboardSprite.visible"
+      :query="keyboardSprite.query"
+      :items="keyboardSprite.items"
+      :loading="keyboardSprite.loading"
+      :active-index="keyboardSprite.activeIndex"
+      @select="chooseKeyboardSprite"
+      @close="resetKeyboardSprite"
+      @set-active-index="keyboardSprite.activeIndex = $event"
+    />
   </div>
 </template>

@@ -20,6 +20,7 @@ import {
   detectReversalsInVisibleRange,
   normalizeReversalSettings,
 } from "./analysis/reversalDetector";
+import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
 
 const CHUNK_SIZE = 2000;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
@@ -201,7 +202,7 @@ watch(
   ],
   () => {
     const val = props.channelState || {};
-    state.channelSettings = forceChannelDisplayOff(val.settings || {});
+    state.channelSettings = normalizeChannelSettingsV2(val.settings || {});
     state.channelDecisions = [];
     state.selectedChannelId = "";
     scheduleChannelRecalc();
@@ -215,8 +216,13 @@ watch(
   () => {
     const val = props.reversalState || {}
     state.reversalSettings = normalizeReversalSettings(val.settings || {})
-    if (val.results && typeof val.results === "object") state.reversalResults = val.results
-    state.selectedReversalEventId = String(val.selected_id || "")
+    if (isReversalDetectionEnabled(state.reversalSettings)) {
+      if (val.results && typeof val.results === "object") state.reversalResults = val.results
+      state.selectedReversalEventId = String(val.selected_id || "")
+    } else {
+      state.reversalResults = { lines: [], events: [] }
+      state.selectedReversalEventId = ""
+    }
     scheduleReversalRecalc()
   },
   { deep: true, immediate: true }
@@ -262,8 +268,14 @@ function getAdjustedTime(bar) {
   return Number(bar?.adjusted_time ?? bar?.time ?? 0);
 }
 
-function getDisplayTime(bar) {
+function getActualDataTime(bar) {
   const ts = Number(bar?.data_time ?? 0);
+  if (Number.isFinite(ts) && ts > 0) return ts;
+  return getAdjustedTime(bar);
+}
+
+function getDisplayTime(bar) {
+  const ts = Number(bar?.plot_time ?? 0);
   if (Number.isFinite(ts) && ts > 0) return ts;
   return getAdjustedTime(bar);
 }
@@ -611,6 +623,7 @@ function rebuildChartsForTheme() {
   initCharts();
   applyChartSizes();
   renderSeries();
+  resetViewportToLoadedBars();
 }
 
 function buildMA20Data(bars) {
@@ -678,7 +691,7 @@ function normalizeBarsAscendingUnique(rawBars, source = "unknown") {
       }
     }
     const displayTime = getDisplayTime(bar);
-    const normalized = { ...bar, adjusted_time: ts, data_time: displayTime, plot_time: displayTime };
+    const normalized = { ...bar, adjusted_time: ts, data_time: getActualDataTime(bar), plot_time: displayTime };
     // Keep the later record when timestamp duplicates.
     byTime.set(ts, normalized);
   }
@@ -754,6 +767,18 @@ function renderSeries() {
   viewVersion.value += 1;
 }
 
+function resetViewportToLoadedBars() {
+  const range = buildInitialVisibleLogicalRange(Array.isArray(state.bars) ? state.bars.length : 0);
+  if (!range) return;
+  try {
+    chartRefs.candle?.timeScale?.().setVisibleLogicalRange?.(range);
+    chartRefs.macd?.timeScale?.().setVisibleLogicalRange?.(range);
+    chartRefs.volume?.timeScale?.().setVisibleLogicalRange?.(range);
+  } catch {
+    // ignore
+  }
+}
+
 function currentVisibleIndexRange() {
   if (!state.bars.length) return null;
   const range = chartRefs.candle?.timeScale()?.getVisibleLogicalRange?.();
@@ -800,17 +825,17 @@ function methodDisplayName(method) {
   return m || "-";
 }
 
-function forceChannelDisplayOff(raw) {
-  const out = normalizeChannelSettingsV2(raw || {});
-  out.display.showExtrema = false;
-  out.display.showRansac = false;
-  out.display.showRegression = false;
-  return out;
-}
-
 function allChannelDisplayOff(settings) {
   const d = settings?.display || {};
   return !d.showExtrema && !d.showRansac && !d.showRegression;
+}
+
+function isChannelDetectionEnabled(settings = state.channelSettings) {
+  return !allChannelDisplayOff(settings);
+}
+
+function isReversalDetectionEnabled(settings = state.reversalSettings) {
+  return shouldRenderReversal(settings);
 }
 
 function isMethodEnabled(method) {
@@ -1069,11 +1094,26 @@ function publishChannelView() {
 }
 
 function recalcChannelsNow() {
+  if (!isChannelDetectionEnabled()) {
+    state.channelSegments = [];
+    state.channelAutoCandidates = [];
+    state.selectedChannelId = "";
+    state.channelDetail = null;
+    state.channelDebug.visibleRange = { start: -1, end: -1 };
+    state.channelDebug.lastRecalcAt = Date.now();
+    state.channelDebug.params = null;
+    publishChannelView();
+    viewVersion.value += 1;
+    return;
+  }
   if (!state.bars.length) {
     state.channelSegments = [];
     state.channelAutoCandidates = [];
+    state.selectedChannelId = "";
+    state.channelDetail = null;
     state.channelDebug.visibleRange = { start: -1, end: -1 };
     state.channelDebug.lastRecalcAt = Date.now();
+    state.channelDebug.params = null;
     publishChannelView();
     viewVersion.value += 1;
     return;
@@ -1109,6 +1149,10 @@ function recalcChannelsNow() {
 
 function scheduleChannelRecalc() {
   if (channelRecalcTimer) clearTimeout(channelRecalcTimer);
+  if (!isChannelDetectionEnabled()) {
+    recalcChannelsNow();
+    return;
+  }
   channelRecalcTimer = setTimeout(() => {
     channelRecalcTimer = null;
     recalcChannelsNow();
@@ -1116,17 +1160,26 @@ function scheduleChannelRecalc() {
 }
 
 function publishReversalView() {
+  const enabled = isReversalDetectionEnabled()
   emit("reversal-view-change", {
     settings: state.reversalSettings,
-    results: state.reversalResults,
+    results: enabled ? state.reversalResults : { lines: [], events: [] },
     persistVersion: state.reversalPersistVersion,
-    selected_id: state.selectedReversalEventId || "",
+    selected_id: enabled ? (state.selectedReversalEventId || "") : "",
   });
 }
 
 function recalcReversalNow() {
+  if (!isReversalDetectionEnabled()) {
+    state.reversalResults = { lines: [], events: [] };
+    state.selectedReversalEventId = "";
+    publishReversalView();
+    viewVersion.value += 1;
+    return;
+  }
   if (!state.bars.length) {
     state.reversalResults = { lines: [], events: [] };
+    state.selectedReversalEventId = "";
     publishReversalView();
     viewVersion.value += 1;
     return;
@@ -1158,6 +1211,10 @@ function recalcReversalNow() {
 
 function scheduleReversalRecalc() {
   if (reversalRecalcTimer) clearTimeout(reversalRecalcTimer);
+  if (!isReversalDetectionEnabled()) {
+    recalcReversalNow();
+    return;
+  }
   reversalRecalcTimer = setTimeout(() => {
     reversalRecalcTimer = null;
     recalcReversalNow();
@@ -1185,8 +1242,8 @@ async function fetchChunk(endParam) {
   const bars = (data.bars || []).map((bar) => ({
     ...bar,
     adjusted_time: getAdjustedTime(bar),
-    data_time: getDisplayTime(bar),
-    plot_time: getDisplayTime(bar),
+    data_time: getActualDataTime(bar),
+    plot_time: getAdjustedTime(bar),
   }));
   return { bars, meta: data.meta || {} };
 }
@@ -1209,6 +1266,7 @@ async function loadInitialChunk() {
         .trim()
         .toLowerCase();
     renderSeries();
+    resetViewportToLoadedBars();
   } catch (err) {
     state.error = `闂傚倸鍊风粈渚€骞夐垾鎰佹綎缂備焦蓱閸欏繘鏌熼锝囦汗鐟滅増甯掗悙濠冦亜閹哄棗浜鹃梺缁樺姇閿曨亪寮婚悢鐑樺枂闁告洦鍋勯～鍥⒑闁偛鑻晶顕€鏌涢悤浣哥仩妞ゆ洏鍎靛畷鐔碱敆娴ｈ櫣肖婵＄偑鍊栭崝鎴﹀磿? ${
       err.message || err
@@ -1620,7 +1678,7 @@ function applyChannelAction(action) {
     return;
   }
   if (type === "reset-settings") {
-    state.channelSettings = forceChannelDisplayOff(DEFAULT_CHANNEL_SETTINGS);
+    state.channelSettings = normalizeChannelSettingsV2(DEFAULT_CHANNEL_SETTINGS);
     state.channelPersistVersion += 1;
     scheduleChannelRecalc();
     publishChannelView();
@@ -1693,10 +1751,13 @@ function applyChannelAction(action) {
 }
 
 function applyChannelSettings(payload) {
-  const settings = forceChannelDisplayOff(payload?.settings || {});
+  const settings = normalizeChannelSettingsV2(payload?.settings || {});
   state.channelSettings = settings;
   state.channelPersistVersion += 1;
-  if (payload?.force || settings?.common?.liveApply) scheduleChannelRecalc();
+  if (payload?.force || settings?.common?.liveApply || !isChannelDetectionEnabled(settings)) {
+    scheduleChannelRecalc();
+    return;
+  }
   publishChannelView();
 }
 
@@ -1704,8 +1765,11 @@ function applyReversalSettings(payload) {
   const settings = normalizeReversalSettings(payload?.settings || {});
   state.reversalSettings = settings;
   state.reversalPersistVersion += 1;
-  if (payload?.force || settings?.enabled) scheduleReversalRecalc();
-  publishReversalView();
+  if (payload?.force || isReversalDetectionEnabled(settings)) {
+    scheduleReversalRecalc();
+    return;
+  }
+  recalcReversalNow();
 }
 
 function focusTimeOnCandle(time) {
@@ -1848,6 +1912,7 @@ const channelOverlayShapes = computed(() => {
 
 const reversalOverlayData = computed(() => {
   void viewVersion.value;
+  if (!isReversalDetectionEnabled()) return { lines: [], events: [] };
   if (!seriesRefs.candle) return { lines: [], events: [] };
   const lines = Array.isArray(state.reversalResults?.lines) ? state.reversalResults.lines : [];
   const events = Array.isArray(state.reversalResults?.events) ? state.reversalResults.events : [];
@@ -1904,6 +1969,7 @@ const reversalOverlayData = computed(() => {
 
 const reversalDebugRows = computed(() => {
   void viewVersion.value;
+  if (!isReversalDetectionEnabled()) return [];
   if (!props.showChannelDebug) return [];
   const lines = Array.isArray(state.reversalResults?.lines) ? state.reversalResults.lines : [];
   const events = Array.isArray(state.reversalResults?.events) ? state.reversalResults.events : [];
