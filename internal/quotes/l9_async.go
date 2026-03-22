@@ -190,6 +190,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 		Variety:          variety,
 		InstrumentID:     variety + "l9",
 		Exchange:         "L9",
+		Replay:           len(bars) > 0 && bars[0].Replay,
 		MinuteTime:       minuteTime,
 		AdjustedTime:     c.adjustedMinuteTime(minuteTime),
 		SourceReceivedAt: sourceReceivedAt,
@@ -233,6 +234,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 			Trace:        trace,
 			InstrumentID: l9Bar.InstrumentID,
 			IsL9:         true,
+			Replay:       l9Bar.Replay,
 		})
 	}
 
@@ -258,6 +260,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 					Trace:        runtimeTrace{ReceivedAt: sourceReceivedAt, PersistEnqueuedAt: time.Now()},
 					InstrumentID: bar.InstrumentID,
 					IsL9:         true,
+					Replay:       l9Bar.Replay,
 				})
 			}
 		}

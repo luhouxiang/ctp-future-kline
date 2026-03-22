@@ -21,6 +21,7 @@ import {
   normalizeReversalSettings,
 } from "./analysis/reversalDetector";
 import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
+import { mergeRealtimeBarUpdate } from "./realtimeBars";
 
 const CHUNK_SIZE = 2000;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
@@ -1761,6 +1762,20 @@ function applyChannelSettings(payload) {
   publishChannelView();
 }
 
+function applyRealtimeBarUpdate(update) {
+  const sub = update?.subscription || {};
+  if (
+    String(sub.symbol || "").trim().toLowerCase() !== String(props.scope?.symbol || "").trim().toLowerCase() ||
+    String(sub.type || "").trim().toLowerCase() !== String(props.scope?.type || "").trim().toLowerCase() ||
+    String(sub.variety || "").trim().toLowerCase() !== String(props.scope?.variety || "").trim().toLowerCase() ||
+    String(sub.timeframe || "").trim().toLowerCase() !== String(props.scope?.timeframe || "").trim().toLowerCase()
+  ) {
+    return;
+  }
+  state.bars = normalizeBarsAscendingUnique(mergeRealtimeBarUpdate(state.bars, update), "realtime_update");
+  renderSeries();
+}
+
 function applyReversalSettings(payload) {
   const settings = normalizeReversalSettings(payload?.settings || {});
   state.reversalSettings = settings;
@@ -1828,6 +1843,7 @@ function getChannelPanelState() {
 defineExpose({
   onDeleteSelected,
   reload: loadInitialChunk,
+  applyRealtimeBarUpdate,
   setSelectedDrawing,
   getChannelSegments,
   getChannelPanelState,

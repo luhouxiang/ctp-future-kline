@@ -70,7 +70,13 @@ type Server struct {
 	// sessions 保存当前上传/导入任务会话。
 	sessions map[string]*importer.TDXImportSession
 	// wsConns 保存当前在线的 websocket 客户端连接。
-	wsConns map[*websocket.Conn]struct{}
+	wsConns map[*websocket.Conn]*wsClient
+	// chartStream 负责把实时/replay K 线事件分发给图表 websocket。
+	chartStream *quotes.ChartStream
+}
+
+type wsClient struct {
+	subs map[string]quotes.ChartSubscription
 }
 
 type runtimeStarter interface {
@@ -91,7 +97,7 @@ func NewServer(cfg config.AppConfig) *Server {
 		query:    klinequery.NewService(dsn, search),
 		calendar: calendar.NewManager(dsn),
 		sessions: make(map[string]*importer.TDXImportSession),
-		wsConns:  make(map[*websocket.Conn]struct{}),
+		wsConns:  make(map[*websocket.Conn]*wsClient),
 	}
 	if err := dbx.EnsureDatabase(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
@@ -143,6 +149,12 @@ func NewServer(cfg config.AppConfig) *Server {
 	} else {
 		s.userConfig = store
 	}
+	if stream, err := quotes.NewChartStream(dsn); err != nil {
+		logger.Error("init chart stream failed", "error", err)
+	} else {
+		s.chartStream = stream
+		quotes.SetDefaultChartStream(stream)
+	}
 	if cfg.Strategy.IsEnabled() {
 		manager, err := strategy.NewManager(cfg.Strategy, dsn)
 		if err != nil {
@@ -178,6 +190,9 @@ func (s *Server) Run() error {
 		} else {
 			go s.forwardTradeEvents(svc)
 		}
+	}
+	if s.chartStream != nil {
+		go s.forwardChartEvents()
 	}
 	logger.Info("web server listening", "addr", s.cfg.Web.ListenAddr)
 	return http.ListenAndServe(s.cfg.Web.ListenAddr, mux)
@@ -421,27 +436,136 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	s.wsConns[conn] = struct{}{}
+	s.wsConns[conn] = &wsClient{subs: make(map[string]quotes.ChartSubscription)}
 	s.mu.Unlock()
 
-	_ = conn.WriteJSON(map[string]any{
+	s.writeConnJSON(conn, map[string]any{
 		"type": "status_update",
 		"data": s.statusPayload(),
 	})
 
 	go func() {
 		defer func() {
-			s.mu.Lock()
-			delete(s.wsConns, conn)
-			s.mu.Unlock()
+			s.removeWSConn(conn)
 			conn.Close()
 		}()
 		for {
-			if _, _, err := conn.ReadMessage(); err != nil {
+			_, raw, err := conn.ReadMessage()
+			if err != nil {
 				return
 			}
+			s.handleWSMessage(conn, raw)
 		}
 	}()
+}
+
+func (s *Server) writeConnJSON(conn *websocket.Conn, payload any) error {
+	s.wsWriteMu.Lock()
+	defer s.wsWriteMu.Unlock()
+	return conn.WriteJSON(payload)
+}
+
+func (s *Server) removeWSConn(conn *websocket.Conn) {
+	var subs []quotes.ChartSubscription
+	s.mu.Lock()
+	if client, ok := s.wsConns[conn]; ok && client != nil {
+		subs = make([]quotes.ChartSubscription, 0, len(client.subs))
+		for _, sub := range client.subs {
+			subs = append(subs, sub)
+		}
+	}
+	delete(s.wsConns, conn)
+	s.mu.Unlock()
+	if s.chartStream != nil {
+		for _, sub := range subs {
+			s.chartStream.RemoveInterest(sub)
+		}
+	}
+}
+
+func (s *Server) handleWSMessage(conn *websocket.Conn, raw []byte) {
+	var msg struct {
+		Type string          `json:"type"`
+		Data json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &msg); err != nil {
+		return
+	}
+	switch strings.TrimSpace(msg.Type) {
+	case "chart_subscribe":
+		s.handleChartSubscribe(conn, msg.Data)
+	case "chart_unsubscribe":
+		s.handleChartUnsubscribe(conn, msg.Data)
+	case "chart_ping":
+		_ = s.writeConnJSON(conn, map[string]any{"type": "chart_pong", "data": map[string]any{}})
+	}
+}
+
+func (s *Server) handleChartSubscribe(conn *websocket.Conn, raw json.RawMessage) {
+	var req quotes.ChartSubscription
+	if err := json.Unmarshal(raw, &req); err != nil {
+		s.writeChartSubscriptionError(conn, req, "invalid subscribe payload")
+		return
+	}
+	if s.chartStream == nil {
+		s.writeChartSubscriptionError(conn, req, "chart stream is not available")
+		return
+	}
+	sub, err := s.chartStream.AddInterest(req)
+	if err != nil {
+		s.writeChartSubscriptionError(conn, req, err.Error())
+		return
+	}
+	key := quotes.ChartSubscriptionKey(sub)
+	var added bool
+	s.mu.Lock()
+	client := s.wsConns[conn]
+	if client == nil {
+		client = &wsClient{subs: make(map[string]quotes.ChartSubscription)}
+		s.wsConns[conn] = client
+	}
+	if _, exists := client.subs[key]; !exists {
+		client.subs[key] = sub
+		added = true
+	}
+	s.mu.Unlock()
+	if !added {
+		s.chartStream.RemoveInterest(sub)
+	}
+}
+
+func (s *Server) handleChartUnsubscribe(conn *websocket.Conn, raw json.RawMessage) {
+	var req quotes.ChartSubscription
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return
+	}
+	sub, err := quotes.NormalizeChartSubscription(req)
+	if err != nil {
+		return
+	}
+	key := quotes.ChartSubscriptionKey(sub)
+	var removed bool
+	s.mu.Lock()
+	if client := s.wsConns[conn]; client != nil {
+		if _, exists := client.subs[key]; exists {
+			delete(client.subs, key)
+			removed = true
+		}
+	}
+	s.mu.Unlock()
+	if removed && s.chartStream != nil {
+		s.chartStream.RemoveInterest(sub)
+	}
+}
+
+func (s *Server) writeChartSubscriptionError(conn *websocket.Conn, sub quotes.ChartSubscription, message string) {
+	_ = s.writeConnJSON(conn, map[string]any{
+		"type": "chart_subscription_error",
+		"data": map[string]any{
+			"subscription": sub,
+			"message":      message,
+		},
+	})
 }
 
 func (s *Server) handleKlineSearch(w http.ResponseWriter, r *http.Request) {
@@ -1559,6 +1683,17 @@ func (s *Server) forwardTradeEvents(svc *trade.Service) {
 	}
 }
 
+func (s *Server) forwardChartEvents() {
+	if s.chartStream == nil {
+		return
+	}
+	ch, cancel := s.chartStream.Subscribe()
+	defer cancel()
+	for update := range ch {
+		s.broadcastChartUpdate(update)
+	}
+}
+
 func (s *Server) broadcastStatusTicker() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -1598,11 +1733,34 @@ func (s *Server) broadcastEvent(eventType string, data any) {
 	defer s.wsWriteMu.Unlock()
 
 	for _, conn := range conns {
-		if err := conn.WriteJSON(payload); err != nil {
-			s.mu.Lock()
-			delete(s.wsConns, conn)
-			s.mu.Unlock()
-			conn.Close()
+		if err := s.writeConnJSON(conn, payload); err != nil {
+			s.removeWSConn(conn)
+			_ = conn.Close()
+		}
+	}
+}
+
+func (s *Server) broadcastChartUpdate(update quotes.ChartBarUpdate) {
+	payload := map[string]any{
+		"type": "chart_bar_update",
+		"data": update,
+	}
+	key := quotes.ChartSubscriptionKey(update.Subscription)
+	s.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(s.wsConns))
+	for conn, client := range s.wsConns {
+		if client == nil {
+			continue
+		}
+		if _, ok := client.subs[key]; ok {
+			conns = append(conns, conn)
+		}
+	}
+	s.mu.Unlock()
+	for _, conn := range conns {
+		if err := s.writeConnJSON(conn, payload); err != nil {
+			s.removeWSConn(conn)
+			_ = conn.Close()
 		}
 	}
 }

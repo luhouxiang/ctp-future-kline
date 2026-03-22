@@ -50,6 +50,7 @@ type minuteBar struct {
 	Variety              string
 	InstrumentID         string
 	Exchange             string
+	Replay               bool
 	MinuteTime           time.Time
 	AdjustedTime         time.Time
 	SourceReceivedAt     time.Time

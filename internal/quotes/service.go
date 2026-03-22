@@ -247,6 +247,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	busLog, _ := s.getBusLog()
 	sideEffects := newMarketDataSideEffects(status,
 		func(t tickEvent) {
+			PublishRealtimeChartTick(t)
 			strategy.PublishRealtimeTick(strategy.TickEvent{
 				InstrumentID:    t.InstrumentID,
 				ExchangeID:      t.ExchangeID,
@@ -303,6 +304,9 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		flowPath:          s.cfg.FlowPath,
 		onTick:            sideEffects.PublishTick,
 		onBar:             sideEffects.PublishBar,
+		onPersistTask: func(task persistTask) {
+			PublishChartFinalBar(task.Bar, task.Replay)
+		},
 	}
 
 	var spi *mdSpi

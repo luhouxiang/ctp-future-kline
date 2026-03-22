@@ -62,6 +62,11 @@ let saveTimer = null
 let beforeUnloadHandler = null
 let spriteQueryTimer = null
 let spriteKeyHandler = null
+let chartWS = null
+let chartWSReconnectTimer = null
+let chartWSReconnectAttempt = 0
+const realtimeStatus = ref('connecting')
+const activeChartSubscriptionKey = ref('')
 const DRAWING_TYPE_LABELS = {
   trendline: '趋势线',
   hline: '水平线',
@@ -491,6 +496,107 @@ function onSetTheme(v) {
   layout.theme = v
 }
 
+function currentChartSubscription() {
+  if (!scope.symbol || !scope.type || !scope.timeframe) return null
+  return {
+    symbol: String(scope.symbol || '').trim().toLowerCase(),
+    type: String(scope.type || '').trim().toLowerCase(),
+    variety: String(scope.variety || '').trim().toLowerCase(),
+    timeframe: String(scope.timeframe || '1m').trim().toLowerCase(),
+  }
+}
+
+function chartSubscriptionKey(sub) {
+  return [sub?.symbol || '', sub?.type || '', sub?.variety || '', sub?.timeframe || ''].join('|')
+}
+
+function sendChartWS(type, data) {
+  if (!chartWS || chartWS.readyState !== WebSocket.OPEN) return false
+  chartWS.send(JSON.stringify({ type, data }))
+  return true
+}
+
+function syncChartSubscription() {
+  const next = currentChartSubscription()
+  const nextKey = next ? chartSubscriptionKey(next) : ''
+  if (activeChartSubscriptionKey.value && activeChartSubscriptionKey.value !== nextKey) {
+    const [symbol, type, variety, timeframe] = activeChartSubscriptionKey.value.split('|')
+    sendChartWS('chart_unsubscribe', { symbol, type, variety, timeframe })
+    activeChartSubscriptionKey.value = ''
+  }
+  if (!next || !sendChartWS('chart_subscribe', next)) return
+  activeChartSubscriptionKey.value = nextKey
+}
+
+function scheduleChartWSReconnect() {
+  if (chartWSReconnectTimer) return
+  const delay = Math.min(5000, 1000 * Math.max(1, chartWSReconnectAttempt + 1))
+  chartWSReconnectTimer = setTimeout(() => {
+    chartWSReconnectTimer = null
+    connectChartWS()
+  }, delay)
+}
+
+function connectChartWS() {
+  if (chartWS && (chartWS.readyState === WebSocket.OPEN || chartWS.readyState === WebSocket.CONNECTING)) return
+  realtimeStatus.value = 'connecting'
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws'
+  chartWS = new WebSocket(`${protocol}://${location.host}/ws`)
+  chartWS.addEventListener('open', async () => {
+    realtimeStatus.value = 'live'
+    chartWSReconnectAttempt = 0
+    if (activeChartSubscriptionKey.value) {
+      activeChartSubscriptionKey.value = ''
+      await paneRef.value?.reload?.()
+    }
+    syncChartSubscription()
+  })
+  chartWS.addEventListener('message', (evt) => {
+    let msg = null
+    try {
+      msg = JSON.parse(String(evt.data || '{}'))
+    } catch {
+      return
+    }
+    if (msg?.type === 'chart_bar_update' && msg.data) {
+      paneRef.value?.applyRealtimeBarUpdate?.(msg.data)
+      return
+    }
+    if (msg?.type === 'chart_subscription_error') {
+      realtimeStatus.value = 'error'
+    }
+  })
+  chartWS.addEventListener('close', () => {
+    realtimeStatus.value = 'offline'
+    chartWS = null
+    chartWSReconnectAttempt += 1
+    scheduleChartWSReconnect()
+  })
+  chartWS.addEventListener('error', () => {
+    realtimeStatus.value = 'error'
+  })
+}
+
+function closeChartWS() {
+  if (chartWSReconnectTimer) {
+    clearTimeout(chartWSReconnectTimer)
+    chartWSReconnectTimer = null
+  }
+  const current = currentChartSubscription()
+  if (current) {
+    sendChartWS('chart_unsubscribe', current)
+  }
+  activeChartSubscriptionKey.value = ''
+  if (chartWS) {
+    try {
+      chartWS.close()
+    } catch {
+      // ignore
+    }
+    chartWS = null
+  }
+}
+
 function onToggleChannelDebug() {
   if (lightweightOnly) return
   channelDebug.value = !channelDebug.value
@@ -602,6 +708,7 @@ watch(
   async () => {
     resetKeyboardSprite()
     await loadLayout()
+    syncChartSubscription()
   },
 )
 
@@ -632,9 +739,11 @@ onMounted(async () => {
   getParams()
   await fetchWatchlist()
   await loadLayout()
+  connectChartWS()
   spriteKeyHandler = (evt) => onKeyboardSpriteKeydown(evt)
   window.addEventListener('keydown', spriteKeyHandler)
   beforeUnloadHandler = () => {
+    closeChartWS()
     flushSaveOnUnload()
     if (saveTimer) clearTimeout(saveTimer)
   }
@@ -643,6 +752,7 @@ onMounted(async () => {
 
 onUnmounted(() => {
   stopResizeWatchlist()
+  closeChartWS()
   if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
   if (spriteKeyHandler) window.removeEventListener('keydown', spriteKeyHandler)
   if (beforeUnloadHandler) window.removeEventListener('beforeunload', beforeUnloadHandler)

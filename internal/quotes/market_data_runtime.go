@@ -50,6 +50,8 @@ type runtimeOptions struct {
 	onTick func(tickEvent)
 	// onBar 是 bar 旁路回调。
 	onBar func(minuteBar)
+	// onPersistTask 在 bar 进入落库队列时触发。
+	onPersistTask func(persistTask)
 }
 
 type runtimeTick struct {
@@ -91,6 +93,8 @@ type persistTask struct {
 	ShardID int
 	// IsL9 标记该任务是否属于 L9/主连产物。
 	IsL9 bool
+	// Replay 标记该任务是否来自回放链路。
+	Replay bool
 }
 
 type flushRequest struct {
@@ -614,6 +618,9 @@ func (r *marketDataRuntime) enqueuePersistTasks(tasks []persistTask) {
 		return
 	}
 	for _, task := range tasks {
+		if r.opts.onPersistTask != nil {
+			r.opts.onPersistTask(task)
+		}
 		r.dbWriter.Enqueue(task)
 	}
 }
@@ -769,6 +776,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			Variety:          variety,
 			InstrumentID:     instrumentID,
 			Exchange:         exchangeID,
+			Replay:           t.replay,
 			MinuteTime:       minuteTime,
 			AdjustedTime:     adjustedTime,
 			SourceReceivedAt: now,
@@ -803,6 +811,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			Variety:          variety,
 			InstrumentID:     instrumentID,
 			Exchange:         exchangeID,
+			Replay:           t.replay,
 			MinuteTime:       minuteTime,
 			AdjustedTime:     adjustedTime,
 			SourceReceivedAt: now,
@@ -908,6 +917,7 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 			Trace:        trace,
 			InstrumentID: closedBar.InstrumentID,
 			ShardID:      s.id,
+			Replay:       closedBar.Replay,
 		})
 	}
 
@@ -924,6 +934,7 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 						Trace:        trace,
 						InstrumentID: aggBar.InstrumentID,
 						ShardID:      s.id,
+						Replay:       closedBar.Replay,
 					})
 				}
 			}

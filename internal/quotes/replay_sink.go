@@ -49,6 +49,7 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		enableMultiMinute: cfg.IsMultiMinuteEnabled(),
 		flowPath:          cfg.FlowPath,
 		onTick: func(t tickEvent) {
+			PublishReplayChartTick(t)
 			strategy.PublishReplayTick(strategy.TickEvent{
 				InstrumentID:    t.InstrumentID,
 				ExchangeID:      t.ExchangeID,
@@ -81,6 +82,9 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 				OpenInterest:    bar.OpenInterest,
 				SettlementPrice: bar.SettlementPrice,
 			})
+		},
+		onPersistTask: func(task persistTask) {
+			PublishChartFinalBar(task.Bar, task.Replay)
 		},
 	})
 	return &ReplaySink{

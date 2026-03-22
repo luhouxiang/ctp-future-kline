@@ -48,6 +48,8 @@ type mdSpiOptions struct {
 	onTick func(tickEvent)
 	// onBar 是 bar 旁路回调，供策略和 bus 使用。
 	onBar func(minuteBar)
+	// onPersistTask 在 bar 已进入落库任务队列时触发，供图表 final 事件使用。
+	onPersistTask func(persistTask)
 }
 
 type tickEvent struct {
@@ -177,6 +179,7 @@ func newMdSpiWithStatusAndOptions(store *klineStore, l9Async *l9AsyncCalculator,
 		flowPath:          opts.flowPath,
 		onTick:            opts.onTick,
 		onBar:             opts.onBar,
+		onPersistTask:     opts.onPersistTask,
 	})
 	return spi
 }
