@@ -139,6 +139,9 @@ let globalPointerMoveHandler = null;
 let channelRecalcTimer = null;
 let reversalRecalcTimer = null;
 let channelDrag = null;
+let realtimeIndicatorTimer = null;
+let realtimeApplyRateTimer = null;
+let realtimeApplyCount = 0;
 
 const drawState = reactive({
   activeTool: "cursor",
@@ -732,7 +735,6 @@ function renderSeries() {
         Number.isFinite(x.low) &&
         Number.isFinite(x.close)
     );
-  const ma20Data = buildMA20Data(bars);
   const volumeData = bars.map((bar) => ({
     time: getDisplayTime(bar),
     value: Number.isFinite(Number(bar?.volume)) ? Number(bar?.volume) : 0,
@@ -745,17 +747,23 @@ function renderSeries() {
     console.error("[chart] candle setData failed", e);
   }
   try {
-    seriesRefs.ma20.setData(ma20Data);
-  } catch (e) {
-    console.error("[chart] ma20 setData failed", e);
-  }
-  try {
     seriesRefs.volume.setData(volumeData);
   } catch (e) {
     console.error("[chart] volume setData failed", e);
   }
-  const m = calcMACD(bars);
+  renderDerivedSeries(bars);
+}
+
+function renderDerivedSeries(bars) {
+  const normalizedBars = Array.isArray(bars) ? bars : normalizeBarsAscendingUnique(state.bars, "derived_render");
+  const ma20Data = buildMA20Data(normalizedBars);
+  const m = calcMACD(normalizedBars);
   state.macdHist = m.hist;
+  try {
+    seriesRefs.ma20.setData(ma20Data);
+  } catch (e) {
+    console.error("[chart] ma20 setData failed", e);
+  }
   try {
     seriesRefs.dif.setData(m.dif);
     seriesRefs.dea.setData(m.dea);
@@ -766,6 +774,56 @@ function renderSeries() {
   scheduleChannelRecalc();
   scheduleReversalRecalc();
   viewVersion.value += 1;
+}
+
+function updatePrimarySeriesForRealtime() {
+  const bars = normalizeBarsAscendingUnique(state.bars, "realtime_primary");
+  if (!seriesRefs.candle || !bars.length) return;
+  const last = bars[bars.length - 1];
+  const candlePoint = {
+    time: getDisplayTime(last),
+    open: Number(last?.open),
+    high: Number(last?.high),
+    low: Number(last?.low),
+    close: Number(last?.close),
+  };
+  const volumePoint = {
+    time: getDisplayTime(last),
+    value: Number.isFinite(Number(last?.volume)) ? Number(last?.volume) : 0,
+    color: "rgba(0,0,0,0)",
+  };
+  if (
+    !Number.isFinite(candlePoint.time) ||
+    !Number.isFinite(candlePoint.open) ||
+    !Number.isFinite(candlePoint.high) ||
+    !Number.isFinite(candlePoint.low) ||
+    !Number.isFinite(candlePoint.close)
+  ) {
+    return;
+  }
+  try {
+    seriesRefs.candle.update(candlePoint);
+  } catch (e) {
+    console.error("[chart] candle update failed, fallback to full render", e);
+    renderSeries();
+    return;
+  }
+  try {
+    seriesRefs.volume.update(volumePoint);
+  } catch (e) {
+    console.error("[chart] volume update failed, fallback to full render", e);
+    renderSeries();
+    return;
+  }
+  viewVersion.value += 1;
+}
+
+function scheduleDerivedSeriesRender() {
+  if (realtimeIndicatorTimer) return;
+  realtimeIndicatorTimer = setTimeout(() => {
+    realtimeIndicatorTimer = null;
+    renderDerivedSeries();
+  }, 120);
 }
 
 function resetViewportToLoadedBars() {
@@ -1763,6 +1821,7 @@ function applyChannelSettings(payload) {
 }
 
 function applyRealtimeBarUpdate(update) {
+  realtimeApplyCount += 1;
   const sub = update?.subscription || {};
   if (
     String(sub.symbol || "").trim().toLowerCase() !== String(props.scope?.symbol || "").trim().toLowerCase() ||
@@ -1773,7 +1832,8 @@ function applyRealtimeBarUpdate(update) {
     return;
   }
   state.bars = normalizeBarsAscendingUnique(mergeRealtimeBarUpdate(state.bars, update), "realtime_update");
-  renderSeries();
+  updatePrimarySeriesForRealtime();
+  scheduleDerivedSeriesRender();
 }
 
 function applyReversalSettings(payload) {
@@ -2741,6 +2801,17 @@ watch(
 );
 
 onMounted(async () => {
+  realtimeApplyRateTimer = setInterval(() => {
+    console.info("[rt-rate]", {
+      stage: "applyRealtimeBarUpdate",
+      count_per_sec: Number(realtimeApplyCount || 0),
+      symbol: String(props.scope?.symbol || ""),
+      type: String(props.scope?.type || ""),
+      variety: String(props.scope?.variety || ""),
+      timeframe: String(props.scope?.timeframe || ""),
+    });
+    realtimeApplyCount = 0;
+  }, 1000);
   await syncLayoutAndChartSizes();
   initCharts();
   applyChartSizes();
@@ -2787,6 +2858,10 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
+  if (realtimeApplyRateTimer) {
+    clearInterval(realtimeApplyRateTimer);
+    realtimeApplyRateTimer = null;
+  }
   stopResize();
   if (channelRecalcTimer) {
     clearTimeout(channelRecalcTimer);

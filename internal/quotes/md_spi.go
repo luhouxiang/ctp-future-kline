@@ -48,6 +48,8 @@ type mdSpiOptions struct {
 	onTick func(tickEvent)
 	// onBar 是 bar 旁路回调，供策略和 bus 使用。
 	onBar func(minuteBar)
+	// onPartialBar 在当前分钟 bar 被 tick 更新后立即触发，供图表实时预览使用。
+	onPartialBar func(minuteBar)
 	// onPersistTask 在 bar 已进入落库任务队列时触发，供图表 final 事件使用。
 	onPersistTask func(persistTask)
 }
@@ -179,6 +181,7 @@ func newMdSpiWithStatusAndOptions(store *klineStore, l9Async *l9AsyncCalculator,
 		flowPath:          opts.flowPath,
 		onTick:            opts.onTick,
 		onBar:             opts.onBar,
+		onPartialBar:      opts.onPartialBar,
 		onPersistTask:     opts.onPersistTask,
 	})
 	return spi
@@ -252,6 +255,7 @@ func (p *mdSpi) OnRspUnSubMarketData(pSpecificInstrument ctp.CThostFtdcSpecificI
 
 func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketDataField) {
 	receivedAt := time.Now()
+	onRtnDepthMarketDataRateProbe.Inc()
 	_ = p.runtime.onLiveTick(tickInputData{
 		InstrumentID:    strings.TrimSpace(pDepthMarketData.GetInstrumentID()),
 		ExchangeID:      strings.TrimSpace(pDepthMarketData.GetExchangeID()),

@@ -50,6 +50,8 @@ type runtimeOptions struct {
 	onTick func(tickEvent)
 	// onBar 是 bar 旁路回调。
 	onBar func(minuteBar)
+	// onPartialBar 在当前分钟 bar 被更新后立即触发。
+	onPartialBar func(minuteBar)
 	// onPersistTask 在 bar 进入落库队列时触发。
 	onPersistTask func(persistTask)
 }
@@ -791,6 +793,10 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		}
 		state.lastTick = lastTick
 		state.hasBar = true
+		if s.runtime.opts.onPartialBar != nil {
+			onPartialBarRateProbe.Inc()
+			s.runtime.opts.onPartialBar(state.bar)
+		}
 		return
 	}
 
@@ -848,6 +854,10 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		state.bar.AdjustedTime = adjustedTime
 		state.bar.SourceReceivedAt = now
 		state.lastTick = lastTick
+	}
+	if s.runtime.opts.onPartialBar != nil {
+		onPartialBarRateProbe.Inc()
+		s.runtime.opts.onPartialBar(state.bar)
 	}
 
 	if len(persisted) > 0 {

@@ -132,6 +132,15 @@ func PublishChartFinalBar(bar minuteBar, replay bool) {
 	}
 }
 
+func PublishChartPartialBar(bar minuteBar, replay bool) {
+	defaultChartStreamMu.RLock()
+	stream := defaultChartStream
+	defaultChartStreamMu.RUnlock()
+	if stream != nil {
+		stream.HandlePartialBar(bar, replay)
+	}
+}
+
 func NormalizeChartSubscription(raw ChartSubscription) (ChartSubscription, error) {
 	sub := ChartSubscription{
 		Symbol:    strings.ToLower(strings.TrimSpace(raw.Symbol)),
@@ -205,7 +214,7 @@ func (s *ChartStream) RemoveInterest(raw ChartSubscription) {
 }
 
 func (s *ChartStream) Subscribe() (<-chan ChartBarUpdate, func()) {
-	ch := make(chan ChartBarUpdate, 256)
+	ch := make(chan ChartBarUpdate, 4096)
 	s.mu.Lock()
 	s.subscribers[ch] = struct{}{}
 	s.mu.Unlock()
@@ -267,6 +276,9 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 		updates = append(updates, s.buildPartialUpdatesLocked(root, l9Frames, sessions, replay)...)
 	}
 	s.mu.Unlock()
+	for _, update := range updates {
+		chartPartialKeyRateProbe.Inc(ChartSubscriptionKey(update.Subscription))
+	}
 	s.broadcast(updates)
 }
 
@@ -331,6 +343,56 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 	s.broadcast(updates)
 }
 
+func (s *ChartStream) HandlePartialBar(bar minuteBar, replay bool) {
+	if s == nil || bar.MinuteTime.IsZero() {
+		return
+	}
+	symbol := strings.ToLower(strings.TrimSpace(bar.InstrumentID))
+	kind := "contract"
+	if strings.HasSuffix(symbol, "l9") {
+		kind = "l9"
+	}
+	variety := normalizeVariety(bar.Variety)
+	if variety == "" {
+		variety = normalizeVariety(symbol)
+		if kind == "l9" {
+			variety = strings.TrimSuffix(symbol, "l9")
+		}
+	}
+	if symbol == "" || variety == "" {
+		return
+	}
+	updates := make([]ChartBarUpdate, 0, 8)
+	s.mu.Lock()
+	root := s.ensureRootLocked(symbol, kind, variety)
+	root.exchange = bar.Exchange
+	root.currentPartial = cloneMinuteBarPtr(bar)
+	frames := s.interestedTimeframesLocked(symbol, kind, variety)
+	for _, timeframe := range frames {
+		if timeframe == "1m" {
+			updates = append(updates, ChartBarUpdate{
+				Subscription: ChartSubscription{
+					Symbol:    symbol,
+					Type:      kind,
+					Variety:   variety,
+					Timeframe: timeframe,
+				},
+				Phase:  "partial",
+				Source: chartSourceLabel(replay),
+				Bar:    chartBarFromMinuteBar(bar),
+			})
+		}
+	}
+	if len(frames) > 0 {
+		sessions, err := s.sessionResolver.Sessions(variety)
+		if err == nil && len(sessions) > 0 {
+			updates = append(updates, s.buildPartialUpdatesLocked(root, filterNon1m(frames), sessions, replay)...)
+		}
+	}
+	s.mu.Unlock()
+	s.broadcast(updates)
+}
+
 func (s *ChartStream) broadcast(updates []ChartBarUpdate) {
 	if len(updates) == 0 {
 		return
@@ -343,11 +405,24 @@ func (s *ChartStream) broadcast(updates []ChartBarUpdate) {
 	s.mu.RUnlock()
 	for _, update := range updates {
 		for _, ch := range subs {
-			select {
-			case ch <- update:
-			default:
-			}
+			enqueueChartUpdateLatest(ch, update)
 		}
+	}
+}
+
+func enqueueChartUpdateLatest(ch chan ChartBarUpdate, update ChartBarUpdate) {
+	select {
+	case ch <- update:
+		return
+	default:
+	}
+	select {
+	case <-ch:
+	default:
+	}
+	select {
+	case ch <- update:
+	default:
 	}
 }
 
@@ -622,6 +697,11 @@ func chartBarFromMinuteBar(bar minuteBar) ChartBar {
 		Volume:       bar.Volume,
 		OpenInterest: bar.OpenInterest,
 	}
+}
+
+func cloneMinuteBarPtr(bar minuteBar) *minuteBar {
+	copied := bar
+	return &copied
 }
 
 func sameBarMinute(a minuteBar, b minuteBar) bool {

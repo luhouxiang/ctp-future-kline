@@ -533,6 +533,14 @@ func (s *Server) handleChartSubscribe(conn *websocket.Conn, raw json.RawMessage)
 		added = true
 	}
 	s.mu.Unlock()
+	logger.Info("chart subscribe",
+		"subscription_key", key,
+		"added", added,
+		"symbol", sub.Symbol,
+		"type", sub.Type,
+		"variety", sub.Variety,
+		"timeframe", sub.Timeframe,
+	)
 	if !added {
 		s.chartStream.RemoveInterest(sub)
 	}
@@ -557,6 +565,14 @@ func (s *Server) handleChartUnsubscribe(conn *websocket.Conn, raw json.RawMessag
 		}
 	}
 	s.mu.Unlock()
+	logger.Info("chart unsubscribe",
+		"subscription_key", key,
+		"removed", removed,
+		"symbol", sub.Symbol,
+		"type", sub.Type,
+		"variety", sub.Variety,
+		"timeframe", sub.Timeframe,
+	)
 	if removed && s.chartStream != nil {
 		s.chartStream.RemoveInterest(sub)
 	}
@@ -1745,6 +1761,7 @@ func (s *Server) broadcastEvent(eventType string, data any) {
 }
 
 func (s *Server) broadcastChartUpdate(update quotes.ChartBarUpdate) {
+	broadcastChartUpdateRateProbe.Inc()
 	payload := map[string]any{
 		"type": "chart_bar_update",
 		"data": update,
@@ -1761,6 +1778,7 @@ func (s *Server) broadcastChartUpdate(update quotes.ChartBarUpdate) {
 		}
 	}
 	s.mu.Unlock()
+	broadcastChartUpdateKeyRateProbe.Add(key, len(conns))
 	for _, conn := range conns {
 		if err := s.writeConnJSON(conn, payload); err != nil {
 			s.removeWSConn(conn)
