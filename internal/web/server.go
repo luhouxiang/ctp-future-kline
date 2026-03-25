@@ -462,6 +462,10 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 func (s *Server) writeConnJSON(conn *websocket.Conn, payload any) error {
 	s.wsWriteMu.Lock()
 	defer s.wsWriteMu.Unlock()
+	return s.writeConnJSONLocked(conn, payload)
+}
+
+func (s *Server) writeConnJSONLocked(conn *websocket.Conn, payload any) error {
 	return conn.WriteJSON(payload)
 }
 
@@ -1733,7 +1737,7 @@ func (s *Server) broadcastEvent(eventType string, data any) {
 	defer s.wsWriteMu.Unlock()
 
 	for _, conn := range conns {
-		if err := s.writeConnJSON(conn, payload); err != nil {
+		if err := s.writeConnJSONLocked(conn, payload); err != nil {
 			s.removeWSConn(conn)
 			_ = conn.Close()
 		}

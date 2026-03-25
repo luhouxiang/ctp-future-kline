@@ -275,14 +275,8 @@ func (s *Service) BarsByEnd(symbol string, kind string, variety string, timefram
 		queryPeriod = tf
 	}
 
-	timeExpr, err := resolveQueryTimeExpr(db, queryTable)
-	if err != nil {
-		return BarsResponse{}, err
-	}
-	adjustedExpr, err := resolveAdjustedTimeExpr(db, queryTable, timeExpr)
-	if err != nil {
-		return BarsResponse{}, err
-	}
+	timeExpr := `"DataTime"`
+	adjustedExpr := `"AdjustedTime"`
 
 	query := fmt.Sprintf(`
 SELECT %s AS "qtime","Open","High","Low","Close","Volume","OpenInterest","Exchange",%s AS "__data_time",%s AS "__sort_time"
@@ -958,60 +952,6 @@ func pageSlice(total int, page int, pageSize int) (int, int) {
 
 func searchIndexTargetKey(item SearchItem) string {
 	return strings.ToLower(strings.TrimSpace(item.Symbol)) + "|" + strings.ToLower(strings.TrimSpace(item.Type)) + "|" + normalizeSearchVariety(item.Variety)
-}
-
-func tableHasColumn(db *sql.DB, tableName string, column string) (bool, error) {
-	rows, err := db.Query(`
-SELECT column_name
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = ?`, tableName)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, err
-		}
-		if strings.EqualFold(name, column) {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
-func resolveQueryTimeExpr(db *sql.DB, tableName string) (string, error) {
-	dataTimeCol := ""
-	hasDataTime, err := tableHasColumn(db, tableName, "DataTime")
-	if err != nil {
-		return "", fmt.Errorf("inspect table %s DataTime failed: %w", tableName, err)
-	}
-	if hasDataTime {
-		dataTimeCol = `"DataTime"`
-	} else {
-		hasLegacyTime, err := tableHasColumn(db, tableName, "Time")
-		if err != nil {
-			return "", fmt.Errorf("inspect table %s Time failed: %w", tableName, err)
-		}
-		if !hasLegacyTime {
-			return "", fmt.Errorf("table %s missing both DataTime and Time columns", tableName)
-		}
-		dataTimeCol = `"Time"`
-	}
-	return dataTimeCol, nil
-}
-
-func resolveAdjustedTimeExpr(db *sql.DB, tableName string, fallback string) (string, error) {
-	hasAdjusted, err := tableHasColumn(db, tableName, "AdjustedTime")
-	if err != nil {
-		return "", fmt.Errorf("inspect table %s AdjustedTime failed: %w", tableName, err)
-	}
-	if hasAdjusted {
-		return `"AdjustedTime"`, nil
-	}
-	return fallback, nil
 }
 
 func reverseBars(items []KlineBar) {

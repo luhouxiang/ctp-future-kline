@@ -803,10 +803,7 @@ func loadExistingTimeSet(db *sql.DB, tableName, instrumentID, exchange, period s
 			maxT = bar.MinuteTime
 		}
 	}
-	timeColumn, err := resolveDataTimeColumn(db, tableName)
-	if err != nil {
-		return nil, err
-	}
+	timeColumn := quotes.ColDataTime
 	query := fmt.Sprintf(`
 SELECT "%s"
 FROM "%s"
@@ -879,19 +876,6 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure kline table failed: %w", err)
 	}
-	if err := ensureDataTimeColumn(db, tableName); err != nil {
-		return err
-	}
-	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME`, tableName, quotes.ColAdjustedTime)); err != nil && !strings.Contains(strings.ToLower(err.Error()), "duplicate column") {
-		// modernc sqlite returns "duplicate column name"
-		if !strings.Contains(strings.ToLower(err.Error()), "duplicate column name") {
-			return fmt.Errorf("add AdjustedTime column failed: %w", err)
-		}
-	}
-	if _, err := db.Exec(fmt.Sprintf(`UPDATE "%s" SET "%s"="%s" WHERE "%s" IS NULL`,
-		tableName, quotes.ColAdjustedTime, quotes.ColTime, quotes.ColAdjustedTime)); err != nil {
-		return fmt.Errorf("backfill AdjustedTime failed: %w", err)
-	}
 	if _, err := db.Exec(fmt.Sprintf(`CREATE INDEX "idx_%s_inst_period_adj" ON "%s"("%s","%s","%s" DESC)`,
 		tableName, tableName, quotes.ColInstrumentID, quotes.ColPeriod, quotes.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
@@ -901,45 +885,6 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		return fmt.Errorf("create adjusted index failed: %w", err)
 	}
 	return nil
-}
-
-func ensureDataTimeColumn(db *sql.DB, tableName string) error {
-	hasDataTime, err := tableHasColumn(db, tableName, quotes.ColDataTime)
-	if err != nil {
-		return err
-	}
-	if hasDataTime {
-		return nil
-	}
-	hasLegacyTime, err := tableHasColumn(db, tableName, "Time")
-	if err != nil {
-		return err
-	}
-	if !hasLegacyTime {
-		return fmt.Errorf("table %s missing both %s and Time columns", tableName, quotes.ColDataTime)
-	}
-	if _, err := db.Exec(fmt.Sprintf(`ALTER TABLE "%s" RENAME COLUMN "Time" TO "%s"`, tableName, quotes.ColDataTime)); err != nil {
-		return fmt.Errorf("rename Time to %s failed: %w", quotes.ColDataTime, err)
-	}
-	return nil
-}
-
-func resolveDataTimeColumn(db *sql.DB, tableName string) (string, error) {
-	hasDataTime, err := tableHasColumn(db, tableName, quotes.ColDataTime)
-	if err != nil {
-		return "", err
-	}
-	if hasDataTime {
-		return quotes.ColDataTime, nil
-	}
-	hasLegacyTime, err := tableHasColumn(db, tableName, "Time")
-	if err != nil {
-		return "", err
-	}
-	if hasLegacyTime {
-		return "Time", nil
-	}
-	return "", fmt.Errorf("table %s missing both %s and Time columns", tableName, quotes.ColDataTime)
 }
 
 func tableHasColumn(db *sql.DB, tableName string, column string) (bool, error) {

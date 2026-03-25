@@ -58,14 +58,10 @@ type Manager struct {
 }
 
 const (
-	instrumentTablePrefix    = "future_kline_instrument_1m_"
-	l9TablePrefix            = "future_kline_l9_1m_"
-	instrumentMMTablePrefix  = "future_kline_instrument_mm_"
-	l9MMTablePrefix          = "future_kline_l9_mm_"
-	legacyInstrumentMMPrefix = "future_kline_instrument_1m_mm_"
-	weightedIndexTablePrefix = "future_kline_weighted_index_" // legacy
-	legacyTablePrefix        = "future_kline_"
-	legacyL9TablePrefix      = "future_kline_l9_" // legacy
+	instrumentTablePrefix   = "future_kline_instrument_1m_"
+	l9TablePrefix           = "future_kline_l9_1m_"
+	instrumentMMTablePrefix = "future_kline_instrument_mm_"
+	l9MMTablePrefix         = "future_kline_l9_mm_"
 )
 
 func NewManager(dbPath string, _ time.Duration) *Manager {
@@ -368,16 +364,6 @@ func ensureSchema(tx *sql.Tx) error {
 )`); err != nil {
 		return fmt.Errorf("ensure search index schema failed: %w", err)
 	}
-	if err := dropLegacyColumnIfExists(tx, "kline_search_index", "min_time"); err != nil {
-		return err
-	}
-	if err := dropLegacyColumnIfExists(tx, "kline_search_index", "max_time"); err != nil {
-		return err
-	}
-	if err := dropIndexIfExists(tx, "kline_search_index", "idx_kline_search_time_range"); err != nil {
-		return err
-	}
-
 	stmts := []string{
 		`CREATE INDEX idx_kline_search_symbol_norm ON kline_search_index(symbol_norm)`,
 		`CREATE INDEX idx_kline_search_variety ON kline_search_index(variety)`,
@@ -392,38 +378,6 @@ func ensureSchema(tx *sql.Tx) error {
 		}
 	}
 	return nil
-}
-
-func dropLegacyColumnIfExists(tx *sql.Tx, tableName string, column string) error {
-	hasColumn, err := tableHasColumn(tx, tableName, column)
-	if err != nil {
-		return fmt.Errorf("inspect legacy column %s.%s failed: %w", tableName, column, err)
-	}
-	if !hasColumn {
-		return nil
-	}
-	if _, err := tx.Exec(fmt.Sprintf(`ALTER TABLE %s DROP COLUMN %s`, quoteMySQLIdentifier(tableName), quoteMySQLIdentifier(column))); err != nil {
-		return fmt.Errorf("drop legacy column %s.%s failed: %w", tableName, column, err)
-	}
-	return nil
-}
-
-func dropIndexIfExists(tx *sql.Tx, tableName string, indexName string) error {
-	hasIndex, err := tableHasIndex(tx, tableName, indexName)
-	if err != nil {
-		return fmt.Errorf("inspect legacy index %s.%s failed: %w", tableName, indexName, err)
-	}
-	if !hasIndex {
-		return nil
-	}
-	if _, err := tx.Exec(fmt.Sprintf(`DROP INDEX %s ON %s`, quoteMySQLIdentifier(indexName), quoteMySQLIdentifier(tableName))); err != nil {
-		return fmt.Errorf("drop legacy index %s.%s failed: %w", tableName, indexName, err)
-	}
-	return nil
-}
-
-func quoteMySQLIdentifier(value string) string {
-	return "`" + strings.ReplaceAll(value, "`", "``") + "`"
 }
 
 func isDuplicateIndexErr(err error) bool {
@@ -625,13 +579,11 @@ func normalizeVariety(value string) string {
 
 func tableKindFromName(tableName string) string {
 	switch {
-	case strings.HasPrefix(tableName, instrumentMMTablePrefix), strings.HasPrefix(tableName, legacyInstrumentMMPrefix), strings.HasPrefix(tableName, l9MMTablePrefix):
+	case strings.HasPrefix(tableName, instrumentMMTablePrefix), strings.HasPrefix(tableName, l9MMTablePrefix):
 		return ""
-	case strings.HasPrefix(tableName, l9TablePrefix), strings.HasPrefix(tableName, weightedIndexTablePrefix), strings.HasPrefix(tableName, legacyL9TablePrefix):
+	case strings.HasPrefix(tableName, l9TablePrefix):
 		return "l9"
 	case strings.HasPrefix(tableName, instrumentTablePrefix):
-		return "contract"
-	case strings.HasPrefix(tableName, legacyTablePrefix):
 		return "contract"
 	default:
 		return ""
@@ -640,22 +592,12 @@ func tableKindFromName(tableName string) string {
 
 func extractVarietyFromTableName(tableName string) string {
 	switch {
-	case strings.HasPrefix(tableName, instrumentMMTablePrefix), strings.HasPrefix(tableName, legacyInstrumentMMPrefix), strings.HasPrefix(tableName, l9MMTablePrefix):
+	case strings.HasPrefix(tableName, instrumentMMTablePrefix), strings.HasPrefix(tableName, l9MMTablePrefix):
 		return ""
 	case strings.HasPrefix(tableName, instrumentTablePrefix):
 		return normalizeVariety(strings.TrimPrefix(tableName, instrumentTablePrefix))
 	case strings.HasPrefix(tableName, l9TablePrefix):
 		return normalizeVariety(strings.TrimPrefix(tableName, l9TablePrefix))
-	case strings.HasPrefix(tableName, weightedIndexTablePrefix):
-		return normalizeVariety(strings.TrimPrefix(tableName, weightedIndexTablePrefix))
-	case strings.HasPrefix(tableName, legacyL9TablePrefix):
-		return normalizeVariety(strings.TrimPrefix(tableName, legacyL9TablePrefix))
-	case strings.HasPrefix(tableName, legacyTablePrefix):
-		base := strings.TrimPrefix(tableName, legacyTablePrefix)
-		if strings.HasPrefix(base, "instrument_1m_") || strings.HasPrefix(base, "instrument_mm_") || strings.HasPrefix(base, "instrument_1m_mm_") || strings.HasPrefix(base, "weighted_index_") || strings.HasPrefix(base, "l9_1m_") || strings.HasPrefix(base, "l9_mm_") {
-			return ""
-		}
-		return normalizeVariety(base)
 	default:
 		return ""
 	}
@@ -687,50 +629,6 @@ func normalizeLookupSymbol(symbol string, kind string) (string, string) {
 		return v + "l9", v
 	}
 	return s, normalizeVariety(s)
-}
-
-func tableHasColumn(tx *sql.Tx, tableName string, column string) (bool, error) {
-	rows, err := tx.Query(`
-SELECT column_name
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = ?`, tableName)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, err
-		}
-		if strings.EqualFold(name, column) {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
-}
-
-func tableHasIndex(tx *sql.Tx, tableName string, indexName string) (bool, error) {
-	rows, err := tx.Query(`
-SELECT index_name
-FROM information_schema.statistics
-WHERE table_schema = DATABASE()
-  AND table_name = ?`, tableName)
-	if err != nil {
-		return false, err
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, err
-		}
-		if strings.EqualFold(name, indexName) {
-			return true, nil
-		}
-	}
-	return false, rows.Err()
 }
 
 func renderExecutableSQL(query string, args ...any) string {
