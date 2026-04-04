@@ -19,6 +19,7 @@ import (
 	"sync"
 	"time"
 
+	"ctp-future-kline/internal/appmode"
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/calendar"
 	"ctp-future-kline/internal/chartlayout"
@@ -44,24 +45,38 @@ type Server struct {
 	status *quotes.RuntimeStatusCenter
 	// runtime 是行情主链路启动入口，通常为 quotes.RuntimeManager。
 	runtime runtimeStarter
-	// search 是搜索索引管理器，用于关键字检索 K 线记录。
-	search *searchindex.Manager
-	// query 提供 K 线查询和图表数据接口。
-	query *klinequery.Service
+	// searchRealtime/searchReplay 是不同数据域的索引管理器。
+	searchRealtime *searchindex.Manager
+	searchReplay   *searchindex.Manager
+	// queryRealtime/queryReplay 提供不同数据域的 K 线查询接口。
+	queryRealtime *klinequery.Service
+	queryReplay   *klinequery.Service
 	// calendar 管理交易日历查询与导入。
 	calendar *calendar.Manager
 	// replay 是回放任务调度服务，可为空表示未启用。
 	replay *replay.Service
-	// chart 是图表布局和绘图对象存储服务。
-	chart *chartlayout.Service
+	// chartRealtime/chartReplay 是不同数据域的图表布局服务。
+	chartRealtime *chartlayout.Service
+	chartReplay   *chartlayout.Service
 	// strategy 是策略子系统控制器，可为空表示未启用。
 	strategy *strategy.Manager
-	// trade 是实盘交易服务，可为空表示未启用。
-	trade *trade.Service
-	// dsn 是应用主数据库连接串，供运行期创建附加服务使用。
+	// tradeLive/tradePaperLive/tradePaperReplay 分别对应三种交易后端。
+	tradeLive        *trade.Service
+	tradePaperLive   *trade.Service
+	tradePaperReplay *trade.Service
+	// dsn 是兼容保留的默认 DSN。
 	dsn string
+	// 各逻辑库 DSN。
+	sharedDSN           string
+	realtimeDSN         string
+	replayDSN           string
+	tradeLiveDSN        string
+	tradePaperLiveDSN   string
+	tradePaperReplayDSN string
 	// userConfig 保存用户级配置覆盖项。
 	userConfig *userconfig.Store
+	// currentMode 是服务端权威的全局运行模式。
+	currentMode string
 
 	// mu 保护导入会话和 websocket 连接集合等共享状态。
 	mu sync.Mutex
@@ -85,29 +100,38 @@ type runtimeStarter interface {
 
 func NewServer(cfg config.AppConfig) *Server {
 	status := quotes.NewRuntimeStatusCenter(time.Duration(cfg.Web.MarketOpenStaleSeconds) * time.Second)
-	dsn := dbx.BuildDSN(cfg.DB)
-	cfg.CTP.DBDSN = dsn
-	search := searchindex.NewManager(dsn, 30*time.Second)
+	status.ConfigureQueueMonitoring(cfg.CTP)
+	sharedDSN := dbx.DSNForRole(cfg.DB, dbx.RoleSharedMeta)
+	realtimeDSN := dbx.DSNForRole(cfg.DB, dbx.RoleMarketRealtime)
+	replayDSN := dbx.DSNForRole(cfg.DB, dbx.RoleMarketReplay)
+	tradeLiveDSN := dbx.DSNForRole(cfg.DB, dbx.RoleTradeLive)
+	tradePaperLiveDSN := dbx.DSNForRole(cfg.DB, dbx.RoleTradePaperLive)
+	tradePaperReplayDSN := dbx.DSNForRole(cfg.DB, dbx.RoleTradePaperReplay)
+	cfg.CTP.DBDSN = realtimeDSN
+	searchRealtime := searchindex.NewManager(realtimeDSN, 30*time.Second)
+	searchReplay := searchindex.NewManager(replayDSN, 30*time.Second)
 	s := &Server{
-		cfg:      cfg,
-		dsn:      dsn,
-		status:   status,
-		runtime:  quotes.NewRuntimeManager(cfg.CTP, status),
-		search:   search,
-		query:    klinequery.NewService(dsn, search),
-		calendar: calendar.NewManager(dsn),
-		sessions: make(map[string]*importer.TDXImportSession),
-		wsConns:  make(map[*websocket.Conn]*wsClient),
+		cfg:                 cfg,
+		dsn:                 realtimeDSN,
+		sharedDSN:           sharedDSN,
+		realtimeDSN:         realtimeDSN,
+		replayDSN:           replayDSN,
+		tradeLiveDSN:        tradeLiveDSN,
+		tradePaperLiveDSN:   tradePaperLiveDSN,
+		tradePaperReplayDSN: tradePaperReplayDSN,
+		status:              status,
+		runtime:             quotes.NewRuntimeManager(cfg.CTP, status),
+		searchRealtime:      searchRealtime,
+		searchReplay:        searchReplay,
+		queryRealtime:       klinequery.NewService(realtimeDSN, searchRealtime),
+		queryReplay:         klinequery.NewService(replayDSN, searchReplay),
+		calendar:            calendar.NewManager(sharedDSN),
+		currentMode:         appmode.LiveReal,
+		sessions:            make(map[string]*importer.TDXImportSession),
+		wsConns:             make(map[*websocket.Conn]*wsClient),
 	}
-	if err := dbx.EnsureDatabase(cfg.DB); err != nil {
+	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
-	} else if db, err := dbx.Open(dsn); err != nil {
-		logger.Error("open mysql failed", "error", err)
-	} else {
-		if err := dbx.EnsureDatabaseAndSchema(cfg.DB, db); err != nil {
-			logger.Error("ensure mysql schema failed", "error", err)
-		}
-		_ = db.Close()
 	}
 	if cfg.CTP.IsBusEnabled() {
 		busPath := strings.TrimSpace(cfg.CTP.BusLogPath)
@@ -115,7 +139,7 @@ func NewServer(cfg config.AppConfig) *Server {
 			busPath = filepath.Join(cfg.CTP.FlowPath, "bus")
 		}
 		busLog := bus.NewFileLog(busPath, time.Duration(cfg.CTP.BusFlushMS)*time.Millisecond)
-		db, err := dbx.Open(dsn)
+		db, err := dbx.Open(replayDSN)
 		if err != nil {
 			logger.Error("open replay dedup db failed", "error", err)
 		} else {
@@ -124,7 +148,9 @@ func NewServer(cfg config.AppConfig) *Server {
 				logger.Error("init replay dedup store failed", "error", err)
 			} else {
 				s.replay = replay.NewService(busLog, store, cfg.CTP.IsReplayAllowOrderCommandDispatch())
-				replaySink, sinkErr := quotes.NewReplaySink(cfg.CTP, status)
+				replayCfg := cfg.CTP
+				replayCfg.DBDSN = replayDSN
+				replaySink, sinkErr := quotes.NewReplaySink(replayCfg, status)
 				if sinkErr != nil {
 					logger.Error("init replay quotes sink failed", "error", sinkErr)
 				} else {
@@ -134,34 +160,59 @@ func NewServer(cfg config.AppConfig) *Server {
 			}
 		}
 	}
-	if db, err := dbx.Open(dsn); err != nil {
-		logger.Error("open chart layout db failed", "error", err)
+	if db, err := dbx.Open(dbx.DSNForRole(cfg.DB, dbx.RoleChartUserRealtime)); err != nil {
+		logger.Error("open chart layout realtime db failed", "error", err)
 	} else {
 		store, err := chartlayout.NewStore(db)
 		if err != nil {
-			logger.Error("init chart layout store failed", "error", err)
+			logger.Error("init chart layout realtime store failed", "error", err)
 		} else {
-			s.chart = chartlayout.NewService(store)
+			s.chartRealtime = chartlayout.NewService(store)
 		}
 	}
-	if store, err := userconfig.NewStore(dsn); err != nil {
+	if db, err := dbx.Open(dbx.DSNForRole(cfg.DB, dbx.RoleChartUserReplay)); err != nil {
+		logger.Error("open chart layout replay db failed", "error", err)
+	} else {
+		store, err := chartlayout.NewStore(db)
+		if err != nil {
+			logger.Error("init chart layout replay store failed", "error", err)
+		} else {
+			s.chartReplay = chartlayout.NewService(store)
+		}
+	}
+	if store, err := userconfig.NewStore(sharedDSN); err != nil {
 		logger.Error("init user config store failed", "error", err)
 	} else {
 		s.userConfig = store
+		if mode, ok, loadErr := store.LoadAppMode(userconfig.DefaultOwner); loadErr != nil {
+			logger.Error("load app mode failed", "error", loadErr)
+		} else if ok {
+			s.currentMode = appmode.Normalize(mode)
+		}
 	}
-	if stream, err := quotes.NewChartStream(dsn); err != nil {
+	if stream, err := quotes.NewChartStream(sharedDSN, status.QueueRegistry()); err != nil {
 		logger.Error("init chart stream failed", "error", err)
 	} else {
 		s.chartStream = stream
 		quotes.SetDefaultChartStream(stream)
 	}
 	if cfg.Strategy.IsEnabled() {
-		manager, err := strategy.NewManager(cfg.Strategy, dsn)
+		manager, err := strategy.NewManager(cfg.Strategy, tradeLiveDSN, status.QueueRegistry())
 		if err != nil {
 			logger.Error("init strategy manager failed", "error", err)
 		} else {
 			s.strategy = manager
 		}
+	}
+	if svc, err := trade.NewPaperService(cfg.Trade, "paper_live", tradePaperLiveDSN, status.QueueRegistry()); err != nil {
+		logger.Error("init paper live trade service failed", "error", err)
+	} else {
+		s.tradePaperLive = svc
+	}
+	if svc, err := trade.NewPaperService(cfg.Trade, "paper_replay", tradePaperReplayDSN, status.QueueRegistry()); err != nil {
+		logger.Error("init paper replay trade service failed", "error", err)
+	} else {
+		s.tradePaperReplay = svc
 	}
 	if cfg.Trade.IsEnabled() {
 		if err := s.startTradeService(); err != nil {
@@ -178,13 +229,17 @@ func (s *Server) ListenAddr() string {
 func (s *Server) Run() error {
 	mux := s.Handler()
 	go s.broadcastStatusTicker()
+	go s.broadcastQueueTicker()
 	if s.strategy != nil {
 		if err := s.strategy.Start(); err != nil {
 			logger.Error("start strategy manager failed", "error", err)
 		}
 		go s.forwardStrategyEvents()
 	}
-	if svc := s.getTradeService(); svc != nil {
+	for _, svc := range []*trade.Service{s.tradeLive, s.tradePaperLive, s.tradePaperReplay} {
+		if svc == nil {
+			continue
+		}
 		if err := svc.Start(); err != nil {
 			logger.Error("start trade service failed", "error", err)
 		} else {
@@ -201,6 +256,8 @@ func (s *Server) Run() error {
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/app-mode", s.handleAppMode)
+	mux.HandleFunc("/api/queues", s.handleQueues)
 	mux.HandleFunc("/api/server/start", s.handleStartRuntime)
 	mux.HandleFunc("/api/import/session", s.handleImportSession)
 	mux.HandleFunc("/api/import/session/", s.handleImportDecision)
@@ -300,6 +357,48 @@ func (s *Server) CurrentStatus() quotes.RuntimeSnapshot {
 	return s.status.Snapshot(time.Now())
 }
 
+func (s *Server) currentAppMode() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return appmode.Normalize(s.currentMode)
+}
+
+func (s *Server) setCurrentAppMode(mode string) {
+	s.mu.Lock()
+	s.currentMode = appmode.Normalize(mode)
+	s.mu.Unlock()
+}
+
+func (s *Server) currentDataMode(r *http.Request) string {
+	if r != nil {
+		raw := strings.TrimSpace(r.URL.Query().Get("data_mode"))
+		if raw == "" && r.Method != http.MethodGet && r.Body != nil {
+			// no-op: non-GET endpoints decode body separately and use current mode fallback.
+		}
+		switch strings.ToLower(raw) {
+		case "replay", "replay_paper":
+			return appmode.ReplayPaper
+		case "live", "live_real", "live_paper":
+			return appmode.LiveReal
+		}
+	}
+	return s.currentAppMode()
+}
+
+func (s *Server) queryForMode(mode string) *klinequery.Service {
+	if appmode.UsesRealtimeMarket(mode) {
+		return s.queryRealtime
+	}
+	return s.queryReplay
+}
+
+func (s *Server) chartForMode(mode string) *chartlayout.Service {
+	if appmode.UsesRealtimeMarket(mode) {
+		return s.chartRealtime
+	}
+	return s.chartReplay
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp := map[string]any{"status": s.status.Snapshot(time.Now())}
 	if s.replay != nil {
@@ -308,8 +407,114 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	if s.strategy != nil {
 		resp["strategy"] = s.strategy.Status()
 	}
+	resp["app_mode"] = map[string]any{
+		"mode":            s.currentAppMode(),
+		"uses_realtime":   appmode.UsesRealtimeMarket(s.currentAppMode()),
+		"replay_enabled":  s.currentAppMode() == appmode.ReplayPaper,
+		"trade_backend":   s.currentTradeBackendName(),
+		"chart_data_mode": s.currentChartDataMode(),
+		"kline_data_mode": s.currentChartDataMode(),
+	}
 	resp["trade"] = s.tradeStatusSnapshot()
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleQueues(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	registry := s.status.QueueRegistry()
+	if registry == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"summary": map[string]any{}, "alerts": []any{}, "queues": []any{}})
+		return
+	}
+	writeJSON(w, http.StatusOK, registry.Snapshot())
+}
+
+func (s *Server) currentTradeBackendName() string {
+	switch s.currentAppMode() {
+	case appmode.LivePaper:
+		return "paper_live"
+	case appmode.ReplayPaper:
+		return "paper_replay"
+	default:
+		return "live_trade"
+	}
+}
+
+func (s *Server) tradeAccountIDForMode(mode string) string {
+	switch appmode.Normalize(mode) {
+	case appmode.LivePaper:
+		return "paper_live"
+	case appmode.ReplayPaper:
+		return "paper_replay"
+	default:
+		return s.cfg.Trade.AccountID
+	}
+}
+
+func (s *Server) currentChartDataMode() string {
+	if appmode.UsesRealtimeMarket(s.currentAppMode()) {
+		return "realtime"
+	}
+	return "replay"
+}
+
+func (s *Server) handleAppMode(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		cursor, _, _ := s.userConfig.LoadReplayResumeCursor(s.currentOwner())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mode":                 s.currentAppMode(),
+			"uses_realtime":        appmode.UsesRealtimeMarket(s.currentAppMode()),
+			"trade_backend":        s.currentTradeBackendName(),
+			"chart_data_mode":      s.currentChartDataMode(),
+			"kline_data_mode":      s.currentChartDataMode(),
+			"replay_resume_cursor": cursor,
+		})
+	case http.MethodPost:
+		if s.userConfig == nil {
+			http.Error(w, "user config store unavailable", http.StatusInternalServerError)
+			return
+		}
+		var req struct {
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		nextMode := appmode.Normalize(req.Mode)
+		prevMode := s.currentAppMode()
+		if prevMode == appmode.ReplayPaper && nextMode != appmode.ReplayPaper && s.replay != nil {
+			task, err := s.replay.Stop()
+			if err == nil {
+				cursor := task.LastCursor
+				if cursor == nil {
+					cursor = task.FromCursor
+				}
+				_ = s.userConfig.SaveReplayResumeCursor(s.currentOwner(), cursor)
+			}
+		}
+		if err := s.userConfig.SaveAppMode(s.currentOwner(), nextMode); err != nil {
+			http.Error(w, "save app mode failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		s.setCurrentAppMode(nextMode)
+		cursor, _, _ := s.userConfig.LoadReplayResumeCursor(s.currentOwner())
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":                   true,
+			"mode":                 s.currentAppMode(),
+			"uses_realtime":        appmode.UsesRealtimeMarket(s.currentAppMode()),
+			"trade_backend":        s.currentTradeBackendName(),
+			"chart_data_mode":      s.currentChartDataMode(),
+			"kline_data_mode":      s.currentChartDataMode(),
+			"replay_resume_cursor": cursor,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
 }
 
 func (s *Server) handleStartRuntime(w http.ResponseWriter, r *http.Request) {
@@ -596,7 +801,8 @@ func (s *Server) handleKlineSearch(w http.ResponseWriter, r *http.Request) {
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
 	page, pageSize := parsePageArgs(r.URL.Query().Get("page"), r.URL.Query().Get("page_size"))
 
-	resp, err := s.query.Search(keyword, page, pageSize)
+	querySvc := s.queryForMode(s.currentAppMode())
+	resp, err := querySvc.Search(keyword, page, pageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -616,7 +822,8 @@ func (s *Server) handleKlineIndexRebuildCurrent(w http.ResponseWriter, r *http.R
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
-	if err := s.query.RebuildSearchItems(req.Items); err != nil {
+	querySvc := s.queryForMode(s.currentAppMode())
+	if err := querySvc.RebuildSearchItems(req.Items); err != nil {
 		if errors.Is(err, searchindex.ErrBusy) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -632,7 +839,8 @@ func (s *Server) handleKlineIndexRebuildAll(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	if err := s.query.RebuildAllIndex(); err != nil {
+	querySvc := s.queryForMode(s.currentAppMode())
+	if err := querySvc.RebuildAllIndex(); err != nil {
 		if errors.Is(err, searchindex.ErrBusy) {
 			http.Error(w, err.Error(), http.StatusConflict)
 			return
@@ -653,7 +861,8 @@ func (s *Server) handleKlineIndexRebuildOne(w http.ResponseWriter, r *http.Reque
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
-	item, exists, err := s.query.RebuildSearchItem(req)
+	querySvc := s.queryForMode(s.currentAppMode())
+	item, exists, err := querySvc.RebuildSearchItem(req)
 	if err != nil {
 		if errors.Is(err, searchindex.ErrBusy) {
 			http.Error(w, err.Error(), http.StatusConflict)
@@ -703,7 +912,8 @@ func (s *Server) handleKlineBars(w http.ResponseWriter, r *http.Request) {
 		"limit", limit,
 		"raw_query", r.URL.RawQuery,
 	)
-	resp, err := s.query.BarsByEnd(symbol, kind, variety, timeframe, end, limit)
+	mode := s.currentDataMode(r)
+	resp, err := s.queryForMode(mode).BarsByEnd(symbol, kind, variety, timeframe, end, limit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			logger.Info("api kline bars no rows", "symbol", symbol, "type", kind, "variety", variety)
@@ -739,7 +949,7 @@ func (s *Server) handleInstruments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, pageSize := parsePageArgs(r.URL.Query().Get("page"), r.URL.Query().Get("page_size"))
-	resp, err := s.query.ListContracts(page, pageSize)
+	resp, err := s.queryForMode(s.currentAppMode()).ListContracts(page, pageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -948,6 +1158,10 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "replay is disabled", http.StatusBadRequest)
 		return
 	}
+	if s.currentAppMode() != appmode.ReplayPaper {
+		http.Error(w, "replay is only available in replay_paper mode", http.StatusBadRequest)
+		return
+	}
 	var req replay.StartRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
@@ -961,6 +1175,11 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.TickDir) == "" {
 		req.TickDir = filepath.Join(s.cfg.CTP.FlowPath, "ticks")
+	}
+	if req.FromCursor == nil && s.userConfig != nil {
+		if cursor, ok, err := s.userConfig.LoadReplayResumeCursor(s.currentOwner()); err == nil && ok {
+			req.FromCursor = cursor
+		}
 	}
 	if !req.FullReplay {
 		logger.Info("replay start requested without full replay", "tick_dir", req.TickDir)
@@ -1037,7 +1256,9 @@ func (s *Server) handleReplayStatus(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChartLayout(w http.ResponseWriter, r *http.Request) {
-	if s.chart == nil {
+	mode := s.currentDataMode(r)
+	chartSvc := s.chartForMode(mode)
+	if chartSvc == nil {
 		http.Error(w, "chart layout service unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -1052,7 +1273,7 @@ func (s *Server) handleChartLayout(w http.ResponseWriter, r *http.Request) {
 		variety := strings.TrimSpace(r.URL.Query().Get("variety"))
 		timeframe := strings.TrimSpace(r.URL.Query().Get("timeframe"))
 		logger.Info("api chart layout get", "owner", owner, "symbol", symbol, "type", kind, "variety", variety, "timeframe", timeframe)
-		layout, ok, err := s.chart.Get(owner, symbol, kind, variety, timeframe)
+		layout, ok, err := chartSvc.Get(owner, symbol, kind, variety, timeframe)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -1097,20 +1318,27 @@ func (s *Server) handleChartLayout(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		logger.Info("api chart layout put", "owner", req.Owner, "symbol", req.Symbol, "type", req.Type, "variety", req.Variety, "timeframe", req.Timeframe, "drawing_count", len(req.Drawings))
-		out, err := s.chart.Put(req)
+		out, err := chartSvc.Put(req)
 		if err != nil {
 			// Self-heal for legacy schema: retry once after ensuring latest MySQL schema.
 			if strings.Contains(err.Error(), "Unknown column 'owner'") || strings.Contains(err.Error(), "Unknown column `owner`") {
 				logger.Info("api chart layout put schema mismatch detected, attempting schema ensure and retry")
-				dsn := dbx.BuildDSN(s.cfg.DB)
+				dsn := dbx.DSNForRole(s.cfg.DB, dbx.RoleChartUserRealtime)
+				if mode == appmode.ReplayPaper {
+					dsn = dbx.DSNForRole(s.cfg.DB, dbx.RoleChartUserReplay)
+				}
 				if db, openErr := dbx.Open(dsn); openErr != nil {
 					logger.Error("api chart layout put schema self-heal open db failed", "error", openErr)
 				} else {
-					if ensureErr := dbx.EnsureDatabaseAndSchema(s.cfg.DB, db); ensureErr != nil {
+					roleCfg := dbx.ConfigForRole(s.cfg.DB, dbx.RoleChartUserRealtime)
+					if mode == appmode.ReplayPaper {
+						roleCfg = dbx.ConfigForRole(s.cfg.DB, dbx.RoleChartUserReplay)
+					}
+					if ensureErr := dbx.EnsureDatabaseAndSchema(roleCfg, db); ensureErr != nil {
 						logger.Error("api chart layout put schema self-heal ensure failed", "error", ensureErr)
 					} else {
 						logger.Info("api chart layout put schema self-heal ensure success")
-						out, err = s.chart.Put(req)
+						out, err = chartSvc.Put(req)
 					}
 					_ = db.Close()
 				}
@@ -1143,7 +1371,8 @@ func (s *Server) handleChartLayout(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChartDrawings(w http.ResponseWriter, r *http.Request) {
-	if s.chart == nil {
+	chartSvc := s.chartForMode(s.currentDataMode(r))
+	if chartSvc == nil {
 		http.Error(w, "chart layout service unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -1156,7 +1385,7 @@ func (s *Server) handleChartDrawings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json body", http.StatusBadRequest)
 		return
 	}
-	out, err := s.chart.UpsertDrawing(req)
+	out, err := chartSvc.UpsertDrawing(req)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1165,7 +1394,8 @@ func (s *Server) handleChartDrawings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleChartDrawingsByID(w http.ResponseWriter, r *http.Request) {
-	if s.chart == nil {
+	chartSvc := s.chartForMode(s.currentDataMode(r))
+	if chartSvc == nil {
 		http.Error(w, "chart layout service unavailable", http.StatusInternalServerError)
 		return
 	}
@@ -1183,7 +1413,7 @@ func (s *Server) handleChartDrawingsByID(w http.ResponseWriter, r *http.Request)
 	kind := strings.TrimSpace(r.URL.Query().Get("type"))
 	variety := strings.TrimSpace(r.URL.Query().Get("variety"))
 	timeframe := strings.TrimSpace(r.URL.Query().Get("timeframe"))
-	ok, err := s.chart.DeleteDrawing(owner, symbol, kind, variety, timeframe, id)
+	ok, err := chartSvc.DeleteDrawing(owner, symbol, kind, variety, timeframe, id)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -1433,29 +1663,50 @@ func (s *Server) currentOwner() string {
 func (s *Server) getTradeService() *trade.Service {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.trade
+	switch appmode.Normalize(s.currentMode) {
+	case appmode.LivePaper:
+		return s.tradePaperLive
+	case appmode.ReplayPaper:
+		return s.tradePaperReplay
+	default:
+		return s.tradeLive
+	}
 }
 
 func (s *Server) tradeStatusSnapshot() trade.TradeStatus {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.trade != nil {
-		return s.trade.Status()
+	switch appmode.Normalize(s.currentMode) {
+	case appmode.LivePaper:
+		if s.tradePaperLive != nil {
+			return s.tradePaperLive.Status()
+		}
+	case appmode.ReplayPaper:
+		if s.tradePaperReplay != nil {
+			return s.tradePaperReplay.Status()
+		}
+	default:
+		if s.tradeLive != nil {
+			return s.tradeLive.Status()
+		}
 	}
 	return trade.TradeStatus{
-		Enabled:   s.cfg.Trade.IsEnabled(),
-		AccountID: s.cfg.Trade.AccountID,
-		UpdatedAt: time.Now(),
+		Enabled:             appmode.Normalize(s.currentMode) != appmode.LiveReal || s.cfg.Trade.IsEnabled(),
+		AccountID:           s.tradeAccountIDForMode(appmode.Normalize(s.currentMode)),
+		TraderFront:         appmode.Normalize(s.currentMode) != appmode.LiveReal,
+		TraderLogin:         appmode.Normalize(s.currentMode) != appmode.LiveReal,
+		SettlementConfirmed: appmode.Normalize(s.currentMode) != appmode.LiveReal,
+		UpdatedAt:           time.Now(),
 	}
 }
 
 func (s *Server) startTradeService() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.trade != nil {
+	if s.tradeLive != nil {
 		return nil
 	}
-	svc, err := trade.NewService(s.cfg.Trade, s.cfg.CTP, s.dsn)
+	svc, err := trade.NewService(s.cfg.Trade, s.cfg.CTP, s.tradeLiveDSN, s.status.QueueRegistry())
 	if err != nil {
 		return err
 	}
@@ -1463,15 +1714,15 @@ func (s *Server) startTradeService() error {
 		_ = svc.Close()
 		return err
 	}
-	s.trade = svc
+	s.tradeLive = svc
 	go s.forwardTradeEvents(svc)
 	return nil
 }
 
 func (s *Server) stopTradeService() error {
 	s.mu.Lock()
-	svc := s.trade
-	s.trade = nil
+	svc := s.tradeLive
+	s.tradeLive = nil
 	s.mu.Unlock()
 	if svc == nil {
 		return nil
@@ -1722,6 +1973,17 @@ func (s *Server) broadcastStatusTicker() {
 	}
 }
 
+func (s *Server) broadcastQueueTicker() {
+	ticker := time.NewTicker(1 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		if s.status == nil || s.status.QueueRegistry() == nil {
+			continue
+		}
+		s.broadcastEvent("queue_status_update", s.status.QueueRegistry().Snapshot())
+	}
+}
+
 func (s *Server) statusPayload() map[string]any {
 	out := map[string]any{
 		"status": s.status.Snapshot(time.Now()),
@@ -1835,8 +2097,11 @@ func (h sessionHandler) OnConflict(c importer.ConflictRecord) {
 }
 
 func (h sessionHandler) OnDone(p importer.Progress) {
-	if h.server.search != nil {
-		h.server.search.Invalidate()
+	if h.server.searchRealtime != nil {
+		h.server.searchRealtime.Invalidate()
+	}
+	if h.server.searchReplay != nil {
+		h.server.searchReplay.Invalidate()
 	}
 	logger.Info("import session done",
 		"session_id", h.sessionID,

@@ -240,7 +240,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	expectedByVariety := buildExpectedVarietyInstruments(queriedInstruments, subscribeTargets)
 	var l9Calc *l9AsyncCalculator
 	if s.cfg.IsL9AsyncEnabled() {
-		l9Calc = newL9AsyncCalculator(store, true, 1, expectedByVariety)
+		l9Calc = newL9AsyncCalculator(store, status, true, 1, expectedByVariety)
 	}
 
 	var session *mdSession

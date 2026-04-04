@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 )
 
 type dbWriterWorker struct {
@@ -22,6 +23,8 @@ type dbWriterWorker struct {
 	in            chan any
 	flushBatch    int
 	flushInterval time.Duration
+	queueHandle   *queuewatch.QueueHandle
+	spool         *queuewatch.JSONSpool[persistTask]
 
 	dropCount atomic.Int64
 
@@ -40,6 +43,8 @@ type dbBatchWriter struct {
 	mmDeferredCh       chan any
 	mmDeferredInterval time.Duration
 	mmDeferredBatch    int
+	mmDeferredQueue    *queuewatch.QueueHandle
+	mmDeferredSpool    *queuewatch.JSONSpool[persistTask]
 
 	mu           sync.Mutex
 	ensuredMMTbl map[string]struct{}
@@ -49,8 +54,14 @@ func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCoun
 	if workerCount <= 0 {
 		workerCount = 1
 	}
+	queueCfg := queuewatch.DefaultConfig("")
+	registry := (*queuewatch.Registry)(nil)
+	if status != nil && status.QueueRegistry() != nil {
+		registry = status.QueueRegistry()
+		queueCfg = registry.Config()
+	}
 	if queueCap <= 0 {
-		queueCap = defaultPersistQueueCapacity
+		queueCap = queueCfg.PersistCapacity
 	}
 	if flushBatch <= 0 {
 		flushBatch = defaultDBFlushBatch
@@ -70,14 +81,32 @@ func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCoun
 			minuteCount--
 		}
 	}
+	workerQueueCap := queueCap/workerCount + 1
 
 	out := &dbBatchWriter{
 		minuteWorkers:      make([]*dbWriterWorker, 0, minuteCount),
 		mmWorkers:          make([]*dbWriterWorker, 0, mmCount),
-		mmDeferredCh:       make(chan any, queueCap),
+		mmDeferredCh:       make(chan any, queueCfg.MMDeferredCapacity),
 		mmDeferredInterval: time.Second,
 		mmDeferredBatch:    256,
 		ensuredMMTbl:       make(map[string]struct{}),
+	}
+	if registry != nil {
+		out.mmDeferredQueue = registry.Register(queuewatch.QueueSpec{
+			Name:        "db_mm_deferred",
+			Category:    "quotes_primary",
+			Criticality: "critical",
+			Capacity:    queueCfg.MMDeferredCapacity,
+			LossPolicy:  "spill_to_disk",
+			BasisText:   fmt.Sprintf("mm/L9 延迟去重队列一个共享通道，容量等于 mm_deferred_capacity=%d。", queueCfg.MMDeferredCapacity),
+		})
+		spool, err := queuewatch.NewJSONSpool[persistTask](queueCfg.SpoolDir, out.mmDeferredQueue.Name())
+		if err != nil {
+			logger.Error("init mm deferred spool failed", "error", err)
+		} else {
+			out.mmDeferredSpool = spool
+			out.mmDeferredQueue.ObserveDepth(len(out.mmDeferredCh) + spool.Pending())
+		}
 	}
 	for i := 0; i < minuteCount; i++ {
 		worker := &dbWriterWorker{
@@ -85,22 +114,57 @@ func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCoun
 			status:        status,
 			owner:         out,
 			id:            i,
-			in:            make(chan any, queueCap/workerCount+1),
+			in:            make(chan any, workerQueueCap),
 			flushBatch:    flushBatch,
 			flushInterval: flushInterval,
+		}
+		if registry != nil {
+			worker.queueHandle = registry.Register(queuewatch.QueueSpec{
+				Name:        fmt.Sprintf("db_minute_worker_%02d", i),
+				Category:    "quotes_primary",
+				Criticality: "critical",
+				Capacity:    workerQueueCap,
+				LossPolicy:  "spill_to_disk",
+				BasisText:   fmt.Sprintf("合约 1m DB worker 每个 worker 一个内存队列，容量按 persist_capacity 均分后约为 %d。", workerQueueCap),
+			})
+			spool, err := queuewatch.NewJSONSpool[persistTask](queueCfg.SpoolDir, worker.queueHandle.Name())
+			if err != nil {
+				logger.Error("init minute worker spool failed", "worker_id", i, "error", err)
+			} else {
+				worker.spool = spool
+				worker.queueHandle.ObserveDepth(len(worker.in) + spool.Pending())
+			}
 		}
 		out.minuteWorkers = append(out.minuteWorkers, worker)
 		go worker.run()
 	}
 	for i := 0; i < mmCount; i++ {
+		workerID := minuteCount + i
 		worker := &dbWriterWorker{
 			store:         store,
 			status:        status,
 			owner:         out,
-			id:            minuteCount + i,
-			in:            make(chan any, queueCap/workerCount+1),
+			id:            workerID,
+			in:            make(chan any, workerQueueCap),
 			flushBatch:    flushBatch,
 			flushInterval: flushInterval,
+		}
+		if registry != nil {
+			worker.queueHandle = registry.Register(queuewatch.QueueSpec{
+				Name:        fmt.Sprintf("db_mm_worker_%02d", workerID),
+				Category:    "quotes_primary",
+				Criticality: "critical",
+				Capacity:    workerQueueCap,
+				LossPolicy:  "spill_to_disk",
+				BasisText:   fmt.Sprintf("mm/L9 DB worker 每个 worker 一个内存队列，容量按 persist_capacity 均分后约为 %d。", workerQueueCap),
+			})
+			spool, err := queuewatch.NewJSONSpool[persistTask](queueCfg.SpoolDir, worker.queueHandle.Name())
+			if err != nil {
+				logger.Error("init mm worker spool failed", "worker_id", workerID, "error", err)
+			} else {
+				worker.spool = spool
+				worker.queueHandle.ObserveDepth(len(worker.in) + spool.Pending())
+			}
 		}
 		out.mmWorkers = append(out.mmWorkers, worker)
 		go worker.run()
@@ -116,9 +180,32 @@ func (w *dbBatchWriter) Enqueue(task persistTask) {
 	if task.IsL9 || isMMTableName(task.TableName) {
 		select {
 		case w.mmDeferredCh <- task:
+			depth := len(w.mmDeferredCh)
+			if w.mmDeferredSpool != nil {
+				depth += w.mmDeferredSpool.Pending()
+			}
+			if w.mmDeferredQueue != nil {
+				w.mmDeferredQueue.MarkEnqueued(depth)
+			}
 		default:
-			logger.Warn("mm/l9 deferred queue full, fallback to direct enqueue", "table", task.TableName, "instrument_id", task.InstrumentID)
-			w.enqueueToWorkers(w.mmWorkers, task)
+			if w.mmDeferredSpool != nil {
+				if size, err := w.mmDeferredSpool.Enqueue(task); err == nil {
+					depth := len(w.mmDeferredCh) + w.mmDeferredSpool.Pending()
+					if w.mmDeferredQueue != nil {
+						w.mmDeferredQueue.MarkSpilled(size, depth)
+					}
+					return
+				}
+			}
+			logger.Warn("mm/l9 deferred queue full and spill unavailable, blocking enqueue", "table", task.TableName, "instrument_id", task.InstrumentID)
+			w.mmDeferredCh <- task
+			depth := len(w.mmDeferredCh)
+			if w.mmDeferredSpool != nil {
+				depth += w.mmDeferredSpool.Pending()
+			}
+			if w.mmDeferredQueue != nil {
+				w.mmDeferredQueue.MarkEnqueued(depth)
+			}
 		}
 		return
 	}
@@ -132,9 +219,32 @@ func (w *dbBatchWriter) enqueueToWorkers(workers []*dbWriterWorker, task persist
 	worker := workers[persistWorkerIndex(task.TableName, len(workers))]
 	select {
 	case worker.in <- task:
+		depth := len(worker.in)
+		if worker.spool != nil {
+			depth += worker.spool.Pending()
+		}
+		if worker.queueHandle != nil {
+			worker.queueHandle.MarkEnqueued(depth)
+		}
 	default:
-		worker.dropCount.Add(1)
-		logger.Warn("db persist queue full, dropping task", "table", task.TableName, "instrument_id", task.InstrumentID, "worker_id", worker.id)
+		if worker.spool != nil {
+			if size, err := worker.spool.Enqueue(task); err == nil {
+				depth := len(worker.in) + worker.spool.Pending()
+				if worker.queueHandle != nil {
+					worker.queueHandle.MarkSpilled(size, depth)
+				}
+				return
+			}
+		}
+		worker.in <- task
+		depth := len(worker.in)
+		if worker.spool != nil {
+			depth += worker.spool.Pending()
+		}
+		if worker.queueHandle != nil {
+			worker.queueHandle.MarkEnqueued(depth)
+		}
+		logger.Warn("db persist queue full and spill unavailable, blocking task enqueue", "table", task.TableName, "instrument_id", task.InstrumentID, "worker_id", worker.id)
 	}
 }
 
@@ -164,9 +274,15 @@ func (w *dbBatchWriter) QueueDepth() int {
 	if w == nil {
 		return 0
 	}
-	total := 0
+	total := len(w.mmDeferredCh)
+	if w.mmDeferredSpool != nil {
+		total += w.mmDeferredSpool.Pending()
+	}
 	for _, worker := range w.allWorkers() {
 		total += len(worker.in)
+		if worker.spool != nil {
+			total += worker.spool.Pending()
+		}
 	}
 	return total
 }
@@ -194,6 +310,13 @@ func (w *dbBatchWriter) runMMDeferred() {
 	for {
 		select {
 		case msg := <-w.mmDeferredCh:
+			depth := len(w.mmDeferredCh)
+			if w.mmDeferredSpool != nil {
+				depth += w.mmDeferredSpool.Pending()
+			}
+			if w.mmDeferredQueue != nil {
+				w.mmDeferredQueue.MarkDequeued(depth)
+			}
 			switch v := msg.(type) {
 			case persistTask:
 				pending[deferredTaskKey(v)] = v
@@ -206,9 +329,33 @@ func (w *dbBatchWriter) runMMDeferred() {
 				pending = make(map[string]persistTask)
 				v.done <- nil
 			}
+		default:
+			if w.mmDeferredSpool != nil {
+				if task, ok, _, err := w.mmDeferredSpool.Dequeue(); err == nil && ok {
+					depth := len(w.mmDeferredCh) + w.mmDeferredSpool.Pending()
+					if w.mmDeferredQueue != nil {
+						w.mmDeferredQueue.MarkSpillRecovered(depth)
+						w.mmDeferredQueue.MarkDequeued(depth)
+					}
+					pending[deferredTaskKey(task)] = task
+					if len(pending) >= w.mmDeferredBatch {
+						w.dispatchDeferredPending(pending)
+						pending = make(map[string]persistTask)
+					}
+					continue
+				} else if err != nil {
+					logger.Error("dequeue mm deferred spool failed", "error", err)
+				}
+			}
+		}
+		select {
 		case <-ticker.C:
 			w.dispatchDeferredPending(pending)
 			pending = make(map[string]persistTask)
+		default:
+			if len(pending) == 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
 		}
 	}
 }
@@ -259,18 +406,62 @@ func (w *dbWriterWorker) run() {
 	for {
 		select {
 		case msg := <-w.in:
+			depth := len(w.in)
+			if w.spool != nil {
+				depth += w.spool.Pending()
+			}
+			if w.queueHandle != nil {
+				w.queueHandle.MarkDequeued(depth)
+			}
 			switch v := msg.(type) {
 			case persistTask:
 				buffer = append(buffer, v)
 				if len(buffer) >= w.flushBatch {
-					buffer = w.flush(buffer)
+					if err := w.flush(buffer); err != nil {
+						logger.Error("flush db batch failed", "worker_id", w.id, "error", err)
+					}
+					buffer = buffer[:0]
 				}
 			case dbFlushRequest:
-				buffer = w.flush(buffer)
+				if len(buffer) > 0 {
+					buffer = w.flush(buffer)
+					buffer = buffer[:0]
+				}
 				v.done <- nil
 			}
+		default:
+			if w.spool != nil {
+				if task, ok, _, err := w.spool.Dequeue(); err == nil && ok {
+					depth := len(w.in) + w.spool.Pending()
+					if w.queueHandle != nil {
+						w.queueHandle.MarkSpillRecovered(depth)
+						w.queueHandle.MarkDequeued(depth)
+					}
+					buffer = append(buffer, task)
+					if len(buffer) >= w.flushBatch {
+						if err := w.flush(buffer); err != nil {
+							logger.Error("flush db batch failed", "worker_id", w.id, "error", err)
+						}
+						buffer = buffer[:0]
+					}
+					continue
+				} else if err != nil {
+					logger.Error("dequeue db spool failed", "worker_id", w.id, "error", err)
+				}
+			}
+		}
+		select {
 		case <-ticker.C:
-			buffer = w.flush(buffer)
+			if len(buffer) > 0 {
+				if err := w.flush(buffer); err != nil {
+					logger.Error("flush db batch failed", "worker_id", w.id, "error", err)
+				}
+				buffer = buffer[:0]
+			}
+		default:
+			if len(buffer) == 0 {
+				time.Sleep(5 * time.Millisecond)
+			}
 		}
 	}
 }

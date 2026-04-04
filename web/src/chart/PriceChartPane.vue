@@ -36,6 +36,7 @@ const COLOR_DOWN_MACD = "#2e7d32";
 
 const props = defineProps({
   scope: { type: Object, required: true },
+  dataMode: { type: String, default: "realtime" },
   theme: { type: String, default: "dark" },
   activeTool: { type: String, default: "cursor" },
   drawings: { type: Array, default: () => [] },
@@ -1286,6 +1287,7 @@ async function fetchChunk(endParam) {
     type: props.scope.type,
     variety: props.scope.variety || "",
     timeframe: props.scope.timeframe || "1m",
+    data_mode: props.dataMode || "realtime",
     end: endParam,
     limit: String(CHUNK_SIZE),
   });

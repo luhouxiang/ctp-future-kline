@@ -4,8 +4,12 @@
 package quotes
 
 import (
+	"strings"
 	"sync"
 	"time"
+
+	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/queuewatch"
 )
 
 const (
@@ -16,133 +20,204 @@ const (
 )
 
 type RuntimeSnapshot struct {
-	// State 描述行情主链路的整体状态，如 idle、starting、running、error。
+	// State ?????????????? idle?starting?running?error?
 	State string `json:"state"`
-	// QueryFront 表示查询前置是否已连通。
+	// QueryFront ????????????
 	QueryFront bool `json:"query_front"`
-	// QueryLogin 表示查询会话是否已登录成功。
+	// QueryLogin ??????????????
 	QueryLogin bool `json:"query_login"`
-	// MdFront 表示行情前置是否已连通。
+	// MdFront ????????????
 	MdFront bool `json:"md_front"`
-	// MdLogin 表示行情会话是否已登录成功。
+	// MdLogin ??????????????
 	MdLogin bool `json:"md_login"`
-	// MdSubscribed 表示行情订阅是否已发起且处于有效状态。
+	// MdSubscribed ???????????????????
 	MdSubscribed bool `json:"md_subscribed"`
-	// MdFrontDown 表示最近一次状态是否为行情前置断开。
+	// MdFrontDown ??????????????????
 	MdFrontDown bool `json:"md_front_disconnected"`
-	// MdDownReason 保存行情断开时的 CTP reason code。
+	// MdDownReason ???????? CTP reason code?
 	MdDownReason int `json:"md_disconnect_reason"`
-	// MdReconnectTry 是当前或最近一次自动重连尝试次数。
+	// MdReconnectTry ?????????????????
 	MdReconnectTry int `json:"md_reconnect_attempt"`
-	// MdNextRetryAt 是预计下一次重连时间。
+	// MdNextRetryAt ???????????
 	MdNextRetryAt time.Time `json:"md_next_retry_at"`
-	// NetworkSuspect 表示虽然连接还在，但系统怀疑链路已卡住或无行情。
+	// NetworkSuspect ????????????????????????
 	NetworkSuspect bool `json:"network_suspect"`
-	// TickDedupDrop 是重复 tick 被丢弃的累计次数。
+	// TickDedupDrop ??? tick ?????????
 	TickDedupDrop int64 `json:"tick_dedup_dropped"`
-	// DriftSeconds 是最近一次 tick 业务时间与本地时间的偏移秒数。
+	// DriftSeconds ????? tick ???????????????
 	DriftSeconds float64 `json:"drift_seconds"`
-	// DriftPaused 表示系统当前是否处于时间漂移暂停告警状态。
+	// DriftPaused ?????????????????????
 	DriftPaused bool `json:"drift_paused"`
-	// DriftPauseCnt 是累计进入漂移暂停状态的次数。
+	// DriftPauseCnt ???????????????
 	DriftPauseCnt int64 `json:"drift_pause_count"`
-	// LastDriftInstrument 是最近一次产生漂移指标的合约。
+	// LastDriftInstrument ???????????????
 	LastDriftInstrument string `json:"last_drift_instrument"`
-	// LastDriftAt 是最近一次刷新漂移指标的时间。
+	// LastDriftAt ???????????????
 	LastDriftAt time.Time `json:"last_drift_at"`
-	// UpstreamLagMS 是最近一次 tick 从业务时间到本地接收时间的延迟。
+	// UpstreamLagMS ????? tick ????????????????
 	UpstreamLagMS float64 `json:"upstream_lag_ms"`
-	// CallbackToProcMS 是 CTP 回调到进入处理逻辑之间的延迟。
+	// CallbackToProcMS ? CTP ???????????????
 	CallbackToProcMS float64 `json:"callback_to_process_ms"`
-	// LockWaitMS 是处理链路等待关键锁的耗时。
+	// LockWaitMS ??????????????
 	LockWaitMS float64 `json:"lock_wait_ms"`
-	// SideEffectTickQueueMS 是 tick 旁路事件排队耗时。
+	// SideEffectTickQueueMS ? tick ?????????
 	SideEffectTickQueueMS float64 `json:"side_effect_tick_queue_ms"`
-	// SideEffectBarQueueMS 是 bar 旁路事件排队耗时。
+	// SideEffectBarQueueMS ? bar ?????????
 	SideEffectBarQueueMS float64 `json:"side_effect_bar_queue_ms"`
-	// MinuteStoreMS 是分钟线单次写入存储耗时。
+	// MinuteStoreMS ?????????????
 	MinuteStoreMS float64 `json:"minute_store_ms"`
-	// MMQueueMS 是多周期聚合任务进入队列前的等待耗时。
+	// MMQueueMS ???????????????????
 	MMQueueMS float64 `json:"mm_queue_ms"`
-	// MMRunMS 是多周期聚合实际执行耗时。
+	// MMRunMS ?????????????
 	MMRunMS float64 `json:"mm_run_ms"`
-	// RouterQueueMS 是 tick 从入口到分片路由入队的耗时。
+	// RouterQueueMS ? tick ??????????????
 	RouterQueueMS float64 `json:"router_queue_ms"`
-	// ShardQueueMS 是 tick 在 shard 内排队等待处理的耗时。
+	// ShardQueueMS ? tick ? shard ???????????
 	ShardQueueMS float64 `json:"shard_queue_ms"`
-	// PersistQueueMS 是持久化任务在 DB writer 中排队的耗时。
+	// PersistQueueMS ??????? DB writer ???????
 	PersistQueueMS float64 `json:"persist_queue_ms"`
-	// EndToEndMS 是 tick 从接收到最终落库的总耗时。
+	// EndToEndMS ? tick ?????????????
 	EndToEndMS float64 `json:"end_to_end_ms"`
-	// DBFlushMS 是最近一批数据库 flush 的耗时。
+	// DBFlushMS ???????? flush ????
 	DBFlushMS float64 `json:"db_flush_ms"`
-	// DBFlushRows 是最近一批数据库 flush 的行数。
+	// DBFlushRows ???????? flush ????
 	DBFlushRows int `json:"db_flush_rows"`
-	// DBQueueDepth 是当前 DB writer 队列深度。
+	// DBQueueDepth ??? DB writer ?????
 	DBQueueDepth int `json:"db_queue_depth"`
-	// FileFlushMS 是最近一次文件刷盘耗时。
+	// FileFlushMS ????????????
 	FileFlushMS float64 `json:"file_flush_ms"`
-	// FileQueueDepth 是当前文件写队列深度。
+	// FileQueueDepth ???????????
 	FileQueueDepth int `json:"file_queue_depth"`
-	// ShardBacklog 展示每个行情 shard 当前积压量。
+	// ShardBacklog ?????? shard ??????
 	ShardBacklog []int `json:"shard_backlog"`
-	// DroppedTicks 是因为队列打满等原因被直接丢弃的 tick 数。
+	// DroppedTicks ???????????????? tick ??
 	DroppedTicks int64 `json:"dropped_ticks"`
-	// LateTicks 是时间漂移过大的 tick 计数。
+	// LateTicks ???????? tick ???
 	LateTicks int64 `json:"late_ticks"`
-	// Goroutines 是当前进程 goroutine 数，用于观察运行压力。
+	// Goroutines ????? goroutine ???????????
 	Goroutines int `json:"goroutines"`
-	// LastLatencyInstrument 是最近一次刷新延迟指标时对应的合约。
+	// LastLatencyInstrument ??????????????????
 	LastLatencyInstrument string `json:"last_latency_instrument"`
-	// LastLatencyStage 是最近一次刷新延迟指标的阶段名称。
+	// LastLatencyStage ?????????????????
 	LastLatencyStage string `json:"last_latency_stage"`
-	// ServerTime 是对前端展示的服务端参考时间。
+	// ServerTime ???????????????
 	ServerTime string `json:"server_time"`
-	// LastTickTime 是最近一次成功进入处理链路的 tick 接收时间。
+	// LastTickTime ?????????????? tick ?????
 	LastTickTime time.Time `json:"last_tick_time"`
-	// IsMarketOpen 是根据最近 tick 活跃度推断出的市场是否开市。
+	// IsMarketOpen ????? tick ??????????????
 	IsMarketOpen bool `json:"is_market_open"`
-	// LastError 保存主链路最近一次错误信息。
+	// LastError ??????????????
 	LastError string `json:"last_error"`
-	// UpdatedAt 是快照最后更新时间。
+	// UpdatedAt ??????????
 	UpdatedAt time.Time `json:"updated_at"`
-	// TradingDay 是当前识别到的交易日。
+	// TradingDay ???????????
 	TradingDay string `json:"trading_day"`
-	// SubscribeCount 是当前成功订阅的合约数量。
+	// SubscribeCount ?????????????
 	SubscribeCount int `json:"subscribe_count"`
+	// QueueAlertCount ???????????????
+	QueueAlertCount int `json:"queue_alert_count"`
+	// QueueCriticalCount ??? critical/emergency ?????
+	QueueCriticalCount int `json:"queue_critical_count"`
+	// QueueSpillingCount ?????????????????
+	QueueSpillingCount int `json:"queue_spilling_count"`
 }
 
 type RuntimeStatusCenter struct {
-	// mu 保护 snapshot 和订阅者集合的并发读写。
+	// mu ?? snapshot ????????????
 	mu sync.RWMutex
-	// marketOpenStale 是最近 tick 超过多久后判定市场不再活跃的阈值。
+	// marketOpenStale ??? tick ?????????????????
 	marketOpenStale time.Duration
-	// snapshot 保存当前最新的行情运行状态快照。
+	// snapshot ????????????????
 	snapshot RuntimeSnapshot
-	// subscribers 保存订阅状态更新的监听者。
+	// subscribers ?????????????
 	subscribers map[chan RuntimeSnapshot]struct{}
-	// subscriberBufSize 是状态订阅通道的缓冲大小。
+	// subscriberBufSize ?????????????
 	subscriberBufSize int
+	// queueRegistry ??????????????????
+	queueRegistry *queuewatch.Registry
+	// statusQueue ?? RuntimeStatusCenter ????????????
+	statusQueue *queuewatch.QueueHandle
 }
 
 func NewRuntimeStatusCenter(marketOpenStale time.Duration) *RuntimeStatusCenter {
-	return &RuntimeStatusCenter{
+	cfg := queuewatch.DefaultConfig("")
+	registry := queuewatch.NewRegistry(cfg)
+	center := &RuntimeStatusCenter{
 		marketOpenStale:   marketOpenStale,
 		snapshot:          RuntimeSnapshot{State: RuntimeStateIdle, UpdatedAt: time.Now()},
 		subscribers:       make(map[chan RuntimeSnapshot]struct{}),
-		subscriberBufSize: 16,
+		subscriberBufSize: cfg.StatusSubscriberCapacity,
+		queueRegistry:     registry,
 	}
+	center.statusQueue = registry.Register(queuewatch.QueueSpec{
+		Name:        "runtime_status_subscribers",
+		Category:    "status",
+		Criticality: "best_effort",
+		Capacity:    cfg.StatusSubscriberCapacity,
+		LossPolicy:  "latest_only",
+		BasisText:   "每个状态订阅者一个缓冲通道，容量等于 status_subscriber_capacity。",
+	})
+	return center
+}
+
+func (c *RuntimeStatusCenter) ConfigureQueueMonitoring(ctpCfg config.CTPConfig) {
+	if c == nil || c.queueRegistry == nil {
+		return
+	}
+	cfg := queuewatch.DefaultConfig(ctpCfg.FlowPath)
+	if strings.TrimSpace(ctpCfg.QueueSpoolDir) != "" {
+		cfg.SpoolDir = strings.TrimSpace(ctpCfg.QueueSpoolDir)
+	}
+	cfg.WarnPercent = ctpCfg.QueueAlertWarnPercent
+	cfg.CriticalPercent = ctpCfg.QueueAlertCriticalPercent
+	cfg.EmergencyPercent = ctpCfg.QueueAlertEmergencyPercent
+	cfg.RecoverPercent = ctpCfg.QueueAlertRecoverPercent
+	cfg.ShardCapacity = ctpCfg.ShardCapacity
+	cfg.PersistCapacity = ctpCfg.PersistCapacity
+	cfg.MMDeferredCapacity = ctpCfg.MMDeferredCapacity
+	cfg.L9TaskCapacity = ctpCfg.L9TaskCapacity
+	cfg.FilePerShardCapacity = ctpCfg.FilePerShardCapacity
+	cfg.SideEffectTickCapacity = ctpCfg.SideEffectTickCapacity
+	cfg.SideEffectBarCapacity = ctpCfg.SideEffectBarCapacity
+	cfg.ChartSubscriberCapacity = ctpCfg.ChartSubscriberCapacity
+	cfg.StatusSubscriberCapacity = ctpCfg.StatusSubscriberCapacity
+	cfg.StrategyEventCapacity = ctpCfg.StrategyEventCapacity
+	cfg.TradeEventCapacity = ctpCfg.TradeEventCapacity
+	cfg.TradeGatewayEventCapacity = ctpCfg.TradeGatewayEventCapacity
+	cfg.MDDisconnectCapacity = ctpCfg.MDDisconnectCapacity
+	c.queueRegistry.Configure(cfg)
+	c.mu.Lock()
+	c.subscriberBufSize = cfg.StatusSubscriberCapacity
+	c.mu.Unlock()
+	if c.statusQueue != nil {
+		c.statusQueue.SetBasisText("每个状态订阅者一个缓冲通道，容量等于 status_subscriber_capacity。")
+		c.statusQueue.ObserveDepth(c.maxStatusSubscriberDepth())
+	}
+}
+
+func (c *RuntimeStatusCenter) QueueRegistry() *queuewatch.Registry {
+	if c == nil {
+		return nil
+	}
+	return c.queueRegistry
 }
 
 func (c *RuntimeStatusCenter) Snapshot(now time.Time) RuntimeSnapshot {
 	c.mu.RLock()
-	defer c.mu.RUnlock()
 	out := c.snapshot
+	marketOpenStale := c.marketOpenStale
+	c.mu.RUnlock()
 	if out.LastTickTime.IsZero() {
 		out.IsMarketOpen = false
-		return out
+	} else {
+		out.IsMarketOpen = now.Sub(out.LastTickTime) <= marketOpenStale
 	}
-	out.IsMarketOpen = now.Sub(out.LastTickTime) <= c.marketOpenStale
+	if c.queueRegistry != nil {
+		summary := c.queueRegistry.Snapshot().Summary
+		out.QueueAlertCount = summary.ActiveAlerts
+		out.QueueCriticalCount = summary.CriticalQueues
+		out.QueueSpillingCount = summary.SpillingQueues
+	}
 	return out
 }
 
@@ -156,21 +231,29 @@ func (c *RuntimeStatusCenter) TradingDay() string {
 }
 
 func (c *RuntimeStatusCenter) Subscribe() (<-chan RuntimeSnapshot, func()) {
-	ch := make(chan RuntimeSnapshot, c.subscriberBufSize)
+	c.mu.RLock()
+	bufSize := c.subscriberBufSize
+	current := c.snapshot
+	c.mu.RUnlock()
+	ch := make(chan RuntimeSnapshot, bufSize)
 
 	c.mu.Lock()
 	c.subscribers[ch] = struct{}{}
-	current := c.snapshot
 	c.mu.Unlock()
-
+	if c.statusQueue != nil {
+		c.statusQueue.ObserveDepth(c.maxStatusSubscriberDepth())
+	}
 	ch <- current
 
 	cancel := func() {
 		c.mu.Lock()
-		defer c.mu.Unlock()
 		if _, ok := c.subscribers[ch]; ok {
 			delete(c.subscribers, ch)
 			close(ch)
+		}
+		c.mu.Unlock()
+		if c.statusQueue != nil {
+			c.statusQueue.ObserveDepth(c.maxStatusSubscriberDepth())
 		}
 	}
 	return ch, cancel
@@ -445,6 +528,27 @@ func (c *RuntimeStatusCenter) mutate(fn func(*RuntimeSnapshot)) {
 		select {
 		case ch <- out:
 		default:
+			if c.statusQueue != nil {
+				c.statusQueue.MarkDropped(c.maxStatusSubscriberDepth())
+			}
 		}
 	}
+	if c.statusQueue != nil {
+		c.statusQueue.ObserveDepth(c.maxStatusSubscriberDepth())
+	}
+}
+
+func (c *RuntimeStatusCenter) maxStatusSubscriberDepth() int {
+	if c == nil {
+		return 0
+	}
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	maxDepth := 0
+	for ch := range c.subscribers {
+		if depth := len(ch); depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+	return maxDepth
 }

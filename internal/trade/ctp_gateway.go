@@ -14,6 +14,7 @@ import (
 
 	"ctp-future-kline/internal/config"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 
 	ctp "github.com/kkqy/ctp-go"
 )
@@ -35,10 +36,12 @@ type CTPGateway struct {
 	mu sync.Mutex
 	// started 标记网关是否已经完成启动。
 	started bool
+	// registry 提供统一的队列监控注册表。
+	registry *queuewatch.Registry
 }
 
-func NewCTPGateway(cfg config.CTPConfig, tradeCfg config.TradeConfig) *CTPGateway {
-	g := &CTPGateway{cfg: cfg, tradeCfg: tradeCfg}
+func NewCTPGateway(cfg config.CTPConfig, tradeCfg config.TradeConfig, registry *queuewatch.Registry) *CTPGateway {
+	g := &CTPGateway{cfg: cfg, tradeCfg: tradeCfg, registry: registry}
 	st := TradeStatus{Enabled: tradeCfg.IsEnabled(), AccountID: tradeCfg.AccountID, UpdatedAt: time.Now()}
 	g.status.Store(&st)
 	return g
@@ -54,7 +57,7 @@ func (g *CTPGateway) Start() error {
 		return fmt.Errorf("create trade flow dir failed: %w", err)
 	}
 
-	spi := newCTPTradeSpi(g.tradeCfg.AccountID)
+	spi := newCTPTradeSpi(g.tradeCfg.AccountID, g.registry)
 	api := ctp.CThostFtdcTraderApiCreateFtdcTraderApi(filepath.Clean(g.cfg.FlowPath))
 	api.RegisterSpi(ctp.NewDirectorCThostFtdcTraderSpi(spi))
 	api.RegisterFront(g.cfg.TraderFrontAddr)
@@ -421,6 +424,10 @@ type ctpTradeSpi struct {
 
 	// accountID 是系统内部账户标识，会灌入各类快照对象。
 	accountID string
+	// queueHandle 汇总网关事件订阅广播的深度和丢弃情况。
+	queueHandle *queuewatch.QueueHandle
+	// queueCap 是单个订阅者事件缓冲容量。
+	queueCap int
 
 	// reqIDSeq 生成递增请求号。
 	reqIDSeq atomic.Int64
@@ -460,9 +467,14 @@ type ctpTradeSpi struct {
 	subscribers map[chan GatewayEvent]struct{}
 }
 
-func newCTPTradeSpi(accountID string) *ctpTradeSpi {
+func newCTPTradeSpi(accountID string, registry *queuewatch.Registry) *ctpTradeSpi {
+	queueCfg := queuewatch.DefaultConfig("")
+	if registry != nil {
+		queueCfg = registry.Config()
+	}
 	spi := &ctpTradeSpi{
 		accountID:         accountID,
+		queueCap:          queueCfg.TradeGatewayEventCapacity,
 		frontConnected:    make(chan struct{}, 1),
 		authResp:          make(chan error, 1),
 		loginResp:         make(chan loginResult, 1),
@@ -470,6 +482,16 @@ func newCTPTradeSpi(accountID string) *ctpTradeSpi {
 		queryWaiters:      make(map[int]*queryResult),
 		commandByOrderRef: make(map[string]string),
 		subscribers:       make(map[chan GatewayEvent]struct{}),
+	}
+	if registry != nil {
+		spi.queueHandle = registry.Register(queuewatch.QueueSpec{
+			Name:        "trade_gateway_event_subscribers",
+			Category:    "trade_sidecar",
+			Criticality: "best_effort",
+			Capacity:    spi.queueCap,
+			LossPolicy:  "best_effort",
+			BasisText:   "每个交易网关事件订阅者一个缓冲通道，容量等于 trade_gateway_event_capacity。",
+		})
 	}
 	spi.orderRefSeq.Store(time.Now().Unix() % 1000000)
 	return spi
@@ -498,10 +520,17 @@ func (p *ctpTradeSpi) cancelQuery(reqID int) {
 }
 
 func (p *ctpTradeSpi) Subscribe() chan GatewayEvent {
-	ch := make(chan GatewayEvent, 32)
+	cap := p.queueCap
+	if cap <= 0 {
+		cap = queuewatch.DefaultConfig("").TradeGatewayEventCapacity
+	}
+	ch := make(chan GatewayEvent, cap)
 	p.mu.Lock()
 	p.subscribers[ch] = struct{}{}
 	p.mu.Unlock()
+	if p.queueHandle != nil {
+		p.queueHandle.ObserveDepth(p.maxSubscriberDepth())
+	}
 	return ch
 }
 
@@ -761,9 +790,30 @@ func (p *ctpTradeSpi) broadcast(ev GatewayEvent) {
 	for _, ch := range subs {
 		select {
 		case ch <- ev:
+			if p.queueHandle != nil {
+				p.queueHandle.MarkEnqueued(p.maxSubscriberDepth())
+			}
 		default:
+			if p.queueHandle != nil {
+				p.queueHandle.MarkDropped(p.maxSubscriberDepth())
+			}
 		}
 	}
+	if p.queueHandle != nil {
+		p.queueHandle.ObserveDepth(p.maxSubscriberDepth())
+	}
+}
+
+func (p *ctpTradeSpi) maxSubscriberDepth() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	maxDepth := 0
+	for ch := range p.subscribers {
+		if depth := len(ch); depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+	return maxDepth
 }
 
 func (p *ctpTradeSpi) commandForOrderRef(orderRef string) string {

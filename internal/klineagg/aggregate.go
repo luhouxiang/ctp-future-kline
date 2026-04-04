@@ -112,11 +112,14 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 		return tradingMinuteOrderKey(sessions[i].Start) < tradingMinuteOrderKey(sessions[j].Start)
 	})
 
+	// 先把交易时段展开成“可交易标签分钟”的顺序表。
+	// 后续 1m -> mm 的切桶，不是按自然时钟直接整除，而是按这个交易分钟序列切。
 	minuteOrder, minuteMap, sessionMinutes := buildSessionMinuteMaps(sessions)
 	if len(minuteOrder) == 0 || len(minuteMap) == 0 {
 		return nil, nil
 	}
 
+	// 30m/60m 在业务上允许跨 session 拼接，其它周期严格在 session 内切桶。
 	cross := opts.CrossSessionFor30m1h && (minutes == 30 || minutes == 60)
 
 	out := make([]AggBar, 0, len(bars)/minutes+8)
@@ -134,8 +137,13 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 			continue
 		}
 		day := b.DataTime.Format("2006-01-02")
+		// bucketKey 决定“这一根 1m 属于哪一个 mm 桶”：
+		// - cross=false：按交易日 + session + session 内序号分桶
+		// - cross=true：按交易日 + 全日交易分钟序号分桶
 		bk := buildBucketKey(day, meta, minutes, cross)
 
+		// ExpectedMinutes 是该桶理论上应包含的分钟数；
+		// ActualMinutes 是目前已经落进来的分钟数，供上层判断桶是否完整闭合。
 		expected := expectedMinutesForBucket(minutes, bk, cross, minuteOrder, sessionMinutes)
 		if expected <= 0 {
 			continue
@@ -143,6 +151,7 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 		bucketExpected[bk] = expected
 		bucketActual[bk] += 1
 
+		// 聚合后 bar 的标签时间取该桶的“结束标签分钟”，而不是第一分钟。
 		labelMinute := bucketLabelMinute(minutes, bk, cross, sessions, minuteOrder)
 		if labelMinute < 0 {
 			continue
@@ -162,6 +171,7 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 
 		idx, exists := states[bk]
 		if !exists {
+			// 桶内第一根 1m：初始化聚合 bar。
 			states[bk] = len(out)
 			out = append(out, AggBar{
 				InstrumentID:    b.InstrumentID,
@@ -181,6 +191,7 @@ func Aggregate(bars []MinuteBar, sessions []SessionRange, period string, minutes
 			continue
 		}
 
+		// 桶内后续 1m：更新高低收、累加成交量，并把持仓量推进到最后一分钟的值。
 		a := out[idx]
 		if b.High > a.High {
 			a.High = b.High
@@ -225,6 +236,11 @@ func buildSessionMinuteMaps(sessions []SessionRange) ([]int, map[int]minuteMeta,
 	for _, s := range sessions {
 		ranges = append(ranges, sessiontime.Range{Start: s.Start, End: s.End})
 	}
+	// BuildLabelMinuteMaps 会把夜盘/跨午夜时段展开成一条连续的“标签分钟”序列，
+	// 并给每个分钟附上：
+	// - GlobalSeq：全日交易分钟序号
+	// - SessionID：所属 session
+	// - SessionSeq：session 内序号
 	labelOrder, labelMap, sessionMinutes := sessiontime.BuildLabelMinuteMaps(ranges)
 	minuteOrder := make([]int, 0, len(labelOrder))
 	minuteMap := make(map[int]minuteMeta, len(labelMap))
@@ -242,13 +258,17 @@ func buildSessionMinuteMaps(sessions []SessionRange) ([]int, map[int]minuteMeta,
 
 func buildBucketKey(day string, meta minuteMeta, minutes int, cross bool) bucketKey {
 	if cross {
+		// cross 模式下忽略 session 边界，直接按全日分钟序号切桶。
 		return bucketKey{day: day, session: -1, bucketNo: meta.globalSeq / minutes}
 	}
+	// 非 cross 模式下，每个 session 单独从 0 开始编号切桶。
 	return bucketKey{day: day, session: meta.sessionID, bucketNo: meta.sessionSeq / minutes}
 }
 
 func expectedMinutesForBucket(minutes int, key bucketKey, cross bool, minuteOrder []int, sessionMinutes map[int]int) int {
 	if cross {
+		// cross 模式下，桶完整长度通常等于 minutes；
+		// 只有最后一个桶可能不足 minutes，此时按剩余分钟数计算。
 		start := key.bucketNo * minutes
 		if start >= len(minuteOrder) {
 			return 0
@@ -259,6 +279,8 @@ func expectedMinutesForBucket(minutes int, key bucketKey, cross bool, minuteOrde
 		}
 		return left
 	}
+	// 非 cross 模式下，每个 session 自己计算“还剩多少分钟”，
+	// 因此 session 尾部的最后一个桶也可能是不满 minutes 的短桶。
 	total := sessionMinutes[key.session]
 	start := key.bucketNo * minutes
 	if total <= 0 || start >= total {
@@ -273,6 +295,7 @@ func expectedMinutesForBucket(minutes int, key bucketKey, cross bool, minuteOrde
 
 func bucketLabelMinute(minutes int, key bucketKey, cross bool, sessions []SessionRange, minuteOrder []int) int {
 	if cross {
+		// cross 模式下标签分钟就是该桶最后一个交易分钟。
 		endExclusive := (key.bucketNo + 1) * minutes
 		if endExclusive > 0 && endExclusive <= len(minuteOrder) {
 			return minuteOrder[endExclusive-1]
@@ -286,6 +309,8 @@ func bucketLabelMinute(minutes int, key bucketKey, cross bool, sessions []Sessio
 		return -1
 	}
 	s := sessions[key.session]
+	// 非 cross 模式下标签分钟从 session 的首个标签分钟开始推，
+	// 再钳到 session 结束点，避免标签越过时段边界。
 	candidate := sessiontime.SessionLabelStart(sessiontime.Range{Start: s.Start, End: s.End}) + (key.bucketNo+1)*minutes - 1
 	if candidate > s.End {
 		candidate = s.End

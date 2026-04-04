@@ -16,6 +16,7 @@ import (
 	"ctp-future-kline/internal/klineagg"
 	"ctp-future-kline/internal/klineclock"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 	"ctp-future-kline/internal/sessiontime"
 )
 
@@ -347,6 +348,10 @@ type marketDataShard struct {
 	id int
 	// in 是该 shard 的输入队列。
 	in chan any
+	// queueHandle 汇总该 shard 输入队列的深度、告警和溢写状态。
+	queueHandle *queuewatch.QueueHandle
+	// tickSpool 在内存队列写满时把 tick 顺序溢写到磁盘。
+	tickSpool *queuewatch.JSONSpool[runtimeTick]
 
 	// state 保存该 shard 内各合约的聚合状态。
 	state map[string]*instrumentRuntimeState
@@ -376,9 +381,15 @@ func newMarketDataRuntime(store *klineStore, l9Async *l9AsyncCalculator, status 
 		replayProcessSeen:  make(map[string]struct{}),
 		replayPipelineSeen: make(map[string]struct{}),
 	}
+	queueCfg := queuewatch.DefaultConfig("")
+	registry := (*queuewatch.Registry)(nil)
+	if status != nil && status.QueueRegistry() != nil {
+		registry = status.QueueRegistry()
+		queueCfg = registry.Config()
+	}
 	shardCount := defaultMarketDataShardCount
 	rt.shardQueueDepthGauge = make([]int64, shardCount)
-	rt.dbWriter = newDBBatchWriter(store, status, defaultDBWriterCount, defaultPersistQueueCapacity, defaultDBFlushBatch, defaultDBFlushInterval)
+	rt.dbWriter = newDBBatchWriter(store, status, defaultDBWriterCount, queueCfg.PersistCapacity, defaultDBFlushBatch, defaultDBFlushInterval)
 	if l9Async != nil {
 		l9Async.SetPersistSink(rt.enqueuePersistTasks)
 	}
@@ -387,8 +398,27 @@ func newMarketDataRuntime(store *klineStore, l9Async *l9AsyncCalculator, status 
 		shard := &marketDataShard{
 			runtime: rt,
 			id:      i,
-			in:      make(chan any, defaultShardChannelCapacity),
+			in:      make(chan any, queueCfg.ShardCapacity),
 			state:   make(map[string]*instrumentRuntimeState),
+		}
+		if registry != nil {
+			shard.queueHandle = registry.Register(queuewatch.QueueSpec{
+				Name:        fmt.Sprintf("market_data_shard_%02d", i),
+				Category:    "quotes_primary",
+				Criticality: "critical",
+				Capacity:    queueCfg.ShardCapacity,
+				LossPolicy:  "spill_to_disk",
+				BasisText:   fmt.Sprintf("按合约哈希后每个 shard 一个内存队列，容量等于 shard_capacity=%d。", queueCfg.ShardCapacity),
+			})
+			spool, err := queuewatch.NewJSONSpool[runtimeTick](queueCfg.SpoolDir, shard.queueHandle.Name())
+			if err != nil {
+				logger.Error("init shard queue spool failed", "shard_id", i, "error", err)
+			} else {
+				shard.tickSpool = spool
+				if shard.queueHandle != nil {
+					shard.queueHandle.ObserveDepth(len(shard.in) + shard.tickSpool.Pending())
+				}
+			}
 		}
 		if opts.flowPath != "" {
 			fileWriter, err := newShardFileWriter(opts.flowPath, i, status)
@@ -508,22 +538,54 @@ func (r *marketDataRuntime) enqueue(t runtimeTick) error {
 	if !t.replay && shardID >= 0 && shardID < len(r.shards) && r.shards[shardID].fileWriter != nil {
 		r.shards[shardID].fileWriter.Enqueue(t.tickEvent)
 	}
+	shard := r.shards[shardID]
 	select {
-	case r.shards[shardID].in <- t:
-		atomic.StoreInt64(&r.shardQueueDepthGauge[shardID], int64(len(r.shards[shardID].in)))
+	case shard.in <- t:
+		depth := len(shard.in)
+		if shard.tickSpool != nil {
+			depth += shard.tickSpool.Pending()
+		}
+		atomic.StoreInt64(&r.shardQueueDepthGauge[shardID], int64(depth))
+		if shard.queueHandle != nil {
+			shard.queueHandle.MarkEnqueued(depth)
+		}
 		if r.status != nil {
 			routerQueueMS := routeAt.Sub(t.CallbackAt).Seconds() * 1000
 			r.status.MarkRouterLatency(instrumentID, routerQueueMS)
 		}
 		return nil
 	default:
-		if r.status != nil {
-			r.status.MarkTickDropped()
+		if shard.tickSpool != nil {
+			if size, err := shard.tickSpool.Enqueue(t); err == nil {
+				depth := len(shard.in) + shard.tickSpool.Pending()
+				atomic.StoreInt64(&r.shardQueueDepthGauge[shardID], int64(depth))
+				if shard.queueHandle != nil {
+					shard.queueHandle.MarkSpilled(size, depth)
+				}
+				if r.status != nil {
+					routerQueueMS := routeAt.Sub(t.CallbackAt).Seconds() * 1000
+					r.status.MarkRouterLatency(instrumentID, routerQueueMS)
+				}
+				return nil
+			}
 		}
-		r.maybeWarn("shard_queue_full:"+instrumentID, "market data shard queue full, dropping tick",
+		shard.in <- t
+		depth := len(shard.in)
+		if shard.tickSpool != nil {
+			depth += shard.tickSpool.Pending()
+		}
+		atomic.StoreInt64(&r.shardQueueDepthGauge[shardID], int64(depth))
+		if shard.queueHandle != nil {
+			shard.queueHandle.MarkEnqueued(depth)
+		}
+		if r.status != nil {
+			routerQueueMS := routeAt.Sub(t.CallbackAt).Seconds() * 1000
+			r.status.MarkRouterLatency(instrumentID, routerQueueMS)
+		}
+		r.maybeWarn("shard_queue_spill_fail:"+instrumentID, "market data shard queue full and spill unavailable, blocking enqueue",
 			"instrument_id", instrumentID,
 			"shard_id", shardID,
-			"queue_depth", len(r.shards[shardID].in),
+			"queue_depth", depth,
 		)
 		return nil
 	}
@@ -628,17 +690,61 @@ func (r *marketDataRuntime) enqueuePersistTasks(tasks []persistTask) {
 }
 
 func (s *marketDataShard) run() {
-	for msg := range s.in {
-		switch m := msg.(type) {
-		case runtimeTick:
-			s.processTick(m)
-		case flushRequest:
-			m.done <- s.flush()
-		case stopRequest:
-			close(m.done)
+	for {
+		select {
+		case msg, ok := <-s.in:
+			if !ok {
+				return
+			}
+			if s.handleMessage(msg) {
+				return
+			}
+			continue
+		default:
+		}
+		if s.tickSpool != nil {
+			if tick, ok, _, err := s.tickSpool.Dequeue(); err == nil && ok {
+				depth := len(s.in) + s.tickSpool.Pending()
+				atomic.StoreInt64(&s.runtime.shardQueueDepthGauge[s.id], int64(depth))
+				if s.queueHandle != nil {
+					s.queueHandle.MarkSpillRecovered(depth)
+					s.queueHandle.MarkDequeued(depth)
+				}
+				s.processTick(tick)
+				continue
+			} else if err != nil {
+				logger.Error("dequeue shard spool failed", "shard_id", s.id, "error", err)
+			}
+		}
+		msg, ok := <-s.in
+		if !ok {
+			return
+		}
+		if s.handleMessage(msg) {
 			return
 		}
 	}
+}
+
+func (s *marketDataShard) handleMessage(msg any) bool {
+	switch m := msg.(type) {
+	case runtimeTick:
+		depth := len(s.in)
+		if s.tickSpool != nil {
+			depth += s.tickSpool.Pending()
+		}
+		atomic.StoreInt64(&s.runtime.shardQueueDepthGauge[s.id], int64(depth))
+		if s.queueHandle != nil {
+			s.queueHandle.MarkDequeued(depth)
+		}
+		s.processTick(m)
+	case flushRequest:
+		m.done <- s.flush()
+	case stopRequest:
+		close(m.done)
+		return true
+	}
+	return false
 }
 
 func (s *marketDataShard) processTick(t runtimeTick) {
@@ -919,6 +1025,8 @@ func formatTickForLog(ev tickEvent, raw bool) string {
 
 func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTrace, flush bool) []persistTask {
 	tasks := make([]persistTask, 0, 8)
+
+	// 第一步：先把刚封口的合约 1m bar 变成落库任务。
 	tableName, err := tableNameForVariety(closedBar.Variety)
 	if err == nil {
 		tasks = append(tasks, persistTask{
@@ -935,6 +1043,7 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 	if err == nil && s.runtime.opts.enableMultiMinute {
 		state := s.state[closedBar.InstrumentID]
 		if state != nil {
+			// 第二步：把已封口的 1m bar 喂给聚合器，只产出已经完整闭合的 mm bar。
 			aggBars := state.aggregator.Consume(closedBar, sessions, flush)
 			if mmTable, mmErr := instrumentMMTableName(closedBar.Variety); mmErr == nil {
 				for _, aggBar := range aggBars {
@@ -950,7 +1059,10 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 			}
 		}
 	}
+
 	if s.runtime.l9Async != nil {
+		// 第三步：把这根 1m 记入品种分钟快照，并异步触发一次 L9 计算。
+		// L9 的 1m/mm 不在当前 goroutine 里同步生成，避免拖慢主 shard。
 		s.runtime.l9Async.ObserveMinuteBar(closedBar)
 		s.runtime.l9Async.Submit(closedBar.Variety, closedBar.MinuteTime)
 	}

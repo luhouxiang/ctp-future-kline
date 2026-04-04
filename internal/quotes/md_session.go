@@ -9,6 +9,7 @@ import (
 
 	"ctp-future-kline/internal/config"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 )
 
 type mdSessionOps struct {
@@ -36,6 +37,8 @@ type mdSession struct {
 
 	// disconnectCh 接收 mdSpi 上报的断线 reason。
 	disconnectCh chan int
+	// disconnectQueue 汇总断线信号队列的深度和丢弃情况。
+	disconnectQueue *queuewatch.QueueHandle
 
 	// mu 保护 reconnecting、networkWarned 和 rng。
 	mu sync.Mutex
@@ -59,14 +62,31 @@ func newMDSession(cfg config.CTPConfig, status *RuntimeStatusCenter, subscribeTa
 			logger.Error("md no tick warning", "no_tick_warn_seconds", cfg.NoTickWarnSeconds)
 		}
 	}
-	return &mdSession{
+	queueCfg := queuewatch.DefaultConfig("")
+	registry := (*queuewatch.Registry)(nil)
+	if status != nil && status.QueueRegistry() != nil {
+		registry = status.QueueRegistry()
+		queueCfg = registry.Config()
+	}
+	session := &mdSession{
 		cfg:              cfg,
 		status:           status,
 		subscribeTargets: append([]string(nil), subscribeTargets...),
 		ops:              ops,
-		disconnectCh:     make(chan int, 16),
+		disconnectCh:     make(chan int, queueCfg.MDDisconnectCapacity),
 		rng:              rand.New(rand.NewSource(time.Now().UnixNano())),
 	}
+	if registry != nil {
+		session.disconnectQueue = registry.Register(queuewatch.QueueSpec{
+			Name:        "md_disconnect_signals",
+			Category:    "quotes_sidecar",
+			Criticality: "best_effort",
+			Capacity:    queueCfg.MDDisconnectCapacity,
+			LossPolicy:  "best_effort",
+			BasisText:   "行情断线信号单独排队，容量等于 md_disconnect_capacity，用于在重连触发前吸收短时抖动。",
+		})
+	}
+	return session
 }
 
 func (s *mdSession) Start() {
@@ -77,12 +97,21 @@ func (s *mdSession) Start() {
 func (s *mdSession) NotifyDisconnected(reason int) {
 	select {
 	case s.disconnectCh <- reason:
+		if s.disconnectQueue != nil {
+			s.disconnectQueue.MarkEnqueued(len(s.disconnectCh))
+		}
 	default:
+		if s.disconnectQueue != nil {
+			s.disconnectQueue.MarkDropped(len(s.disconnectCh))
+		}
 	}
 }
 
 func (s *mdSession) disconnectLoop() {
 	for reason := range s.disconnectCh {
+		if s.disconnectQueue != nil {
+			s.disconnectQueue.MarkDequeued(len(s.disconnectCh))
+		}
 		if s.status != nil {
 			s.status.MarkMdFrontDisconnected(reason)
 		}

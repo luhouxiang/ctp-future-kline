@@ -9,6 +9,7 @@ import (
 
 	"ctp-future-kline/internal/klineclock"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 	"ctp-future-kline/internal/sessiontime"
 )
 
@@ -21,9 +22,11 @@ type l9AsyncCalculator struct {
 	store *klineStore
 	clock *klineclock.CalendarResolver
 
-	enabled atomic.Bool
-	tasks   chan l9Task
-	wg      sync.WaitGroup
+	enabled     atomic.Bool
+	tasks       chan l9Task
+	queueHandle *queuewatch.QueueHandle
+	spool       *queuewatch.JSONSpool[l9Task]
+	wg          sync.WaitGroup
 
 	mu                sync.RWMutex
 	expected          map[string]map[string]struct{}
@@ -34,14 +37,20 @@ type l9AsyncCalculator struct {
 	persistSink       func([]persistTask)
 }
 
-func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
+func newL9AsyncCalculator(store *klineStore, status *RuntimeStatusCenter, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
 	if workers <= 0 {
 		workers = 1
+	}
+	queueCfg := queuewatch.DefaultConfig("")
+	registry := (*queuewatch.Registry)(nil)
+	if status != nil && status.QueueRegistry() != nil {
+		registry = status.QueueRegistry()
+		queueCfg = registry.Config()
 	}
 	c := &l9AsyncCalculator{
 		store:             store,
 		clock:             klineclock.NewCalendarResolver(store.DB()),
-		tasks:             make(chan l9Task, defaultL9TaskQueueCapacity),
+		tasks:             make(chan l9Task, queueCfg.L9TaskCapacity),
 		expected:          make(map[string]map[string]struct{}),
 		latest:            make(map[string]minuteBar),
 		minuteBars:        make(map[string]map[int64]map[string]minuteBar),
@@ -49,6 +58,23 @@ func newL9AsyncCalculator(store *klineStore, enabled bool, workers int, expected
 		aggregators:       make(map[string]*closedBarAggregator),
 	}
 	c.enabled.Store(enabled)
+	if registry != nil {
+		c.queueHandle = registry.Register(queuewatch.QueueSpec{
+			Name:        "l9_async_tasks",
+			Category:    "quotes_primary",
+			Criticality: "critical",
+			Capacity:    queueCfg.L9TaskCapacity,
+			LossPolicy:  "spill_to_disk",
+			BasisText:   "L9 ???????????????????????????",
+		})
+		spool, err := queuewatch.NewJSONSpool[l9Task](queueCfg.SpoolDir, c.queueHandle.Name())
+		if err != nil {
+			logger.Error("init l9 task spool failed", "error", err)
+		} else {
+			c.spool = spool
+			c.queueHandle.ObserveDepth(len(c.tasks) + spool.Pending())
+		}
+	}
 	for variety, instruments := range expectedByVariety {
 		nv := normalizeVariety(variety)
 		if nv == "" {
@@ -107,6 +133,9 @@ func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	// 同时维护：
+	// 1) latest：该合约最近一根 1m，用于某分钟缺数据时回退补齐；
+	// 2) minuteBars[variety][minute][instrument]：该品种该分钟各合约的快照。
 	c.latest[bar.InstrumentID] = bar
 	c.instrumentVariety[bar.InstrumentID] = bar.Variety
 	byMinute := c.minuteBars[bar.Variety]
@@ -131,6 +160,7 @@ func (c *l9AsyncCalculator) Submit(variety string, minuteTime time.Time) {
 	if task.variety == "" || task.minuteTime.IsZero() {
 		return
 	}
+	// 这里只负责投递异步任务；真正的加权和落库在 worker 线程中完成。
 	select {
 	case c.tasks <- task:
 	default:
@@ -139,15 +169,63 @@ func (c *l9AsyncCalculator) Submit(variety string, minuteTime time.Time) {
 }
 
 func (c *l9AsyncCalculator) Close() {
+	if c.spool != nil {
+		for {
+			task, ok, _, err := c.spool.Dequeue()
+			if err != nil {
+				logger.Error("drain l9 spool before close failed", "error", err)
+				break
+			}
+			if !ok {
+				break
+			}
+			c.tasks <- task
+			depth := len(c.tasks) + c.spool.Pending()
+			if c.queueHandle != nil {
+				c.queueHandle.MarkSpillRecovered(depth)
+				c.queueHandle.MarkEnqueued(depth)
+			}
+		}
+	}
 	close(c.tasks)
 	c.wg.Wait()
 }
 
 func (c *l9AsyncCalculator) worker() {
 	defer c.wg.Done()
-	for task := range c.tasks {
-		if err := c.computeAndStore(task.variety, task.minuteTime); err != nil {
-			logger.Error("compute l9 failed", "variety", task.variety, "minute", task.minuteTime.Format("2006-01-02 15:04:00"), "error", err)
+	for {
+		select {
+		case task, ok := <-c.tasks:
+			if !ok {
+				return
+			}
+			depth := len(c.tasks)
+			if c.spool != nil {
+				depth += c.spool.Pending()
+			}
+			if c.queueHandle != nil {
+				c.queueHandle.MarkDequeued(depth)
+			}
+			if err := c.computeAndStore(task.variety, task.minuteTime); err != nil {
+				logger.Error("compute l9 failed", "variety", task.variety, "minute", task.minuteTime.Format("2006-01-02 15:04:00"), "error", err)
+			}
+		default:
+			if c.spool != nil {
+				if task, ok, _, err := c.spool.Dequeue(); err == nil && ok {
+					depth := len(c.tasks) + c.spool.Pending()
+					if c.queueHandle != nil {
+						c.queueHandle.MarkSpillRecovered(depth)
+						c.queueHandle.MarkDequeued(depth)
+					}
+					if err := c.computeAndStore(task.variety, task.minuteTime); err != nil {
+						logger.Error("compute l9 failed", "variety", task.variety, "minute", task.minuteTime.Format("2006-01-02 15:04:00"), "error", err)
+					}
+					continue
+				} else if err != nil {
+					logger.Error("dequeue l9 spool failed", "error", err)
+				}
+			}
+			time.Sleep(5 * time.Millisecond)
 		}
 	}
 }
@@ -158,6 +236,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 		return nil
 	}
 
+	// 按持仓量 OpenInterest 做加权，得到该品种当前分钟的 L9 1m bar。
 	totalOI := 0.0
 	weightedOpen := 0.0
 	weightedHigh := 0.0
@@ -186,6 +265,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 		return nil
 	}
 
+	// L9 不是交易所原生合约，统一落成 <variety>l9 / Exchange=L9。
 	l9Bar := minuteBar{
 		Variety:          variety,
 		InstrumentID:     variety + "l9",
@@ -219,6 +299,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 			return err
 		}
 	} else {
+		// runtime 模式下不直接写库，而是复用统一的 persistTask -> dbBatchWriter 链路。
 		tableName, err := tableNameForL9Variety(variety)
 		if err != nil {
 			return err
@@ -240,6 +321,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 
 	sessions, err := c.loadSessions(variety)
 	if err == nil {
+		// L9 1m 生成后，继续沿用同一个聚合器产出 L9 的 5m/15m/30m/1h/120m/1d。
 		for _, bar := range agg.Consume(l9Bar, sessions, false) {
 			if sink == nil {
 				tableName, tableErr := l9MMTableName(variety)
@@ -304,6 +386,8 @@ func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime tim
 			continue
 		}
 		price := latest.Close
+		// 某合约该分钟没有新 bar 时，用最近一根 1m 的价格/OI/结算价补齐，Volume 记为 0；
+		// 这样 L9 不会因为个别合约短时无成交而断档。
 		out = append(out, minuteBar{
 			Variety:          variety,
 			InstrumentID:     instrumentID,

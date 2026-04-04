@@ -40,7 +40,7 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 	}
 	var l9Calc *l9AsyncCalculator
 	if cfg.IsL9AsyncEnabled() {
-		l9Calc = newL9AsyncCalculator(store, true, 1, nil)
+		l9Calc = newL9AsyncCalculator(store, status, true, 1, nil)
 	}
 	spi := newMdSpiWithStatusAndOptions(store, l9Calc, status, mdSpiOptions{
 		tickDedupWindow:   time.Duration(cfg.TickDedupWindowSeconds) * time.Second,

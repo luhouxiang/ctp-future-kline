@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/config"
 	dbx "ctp-future-kline/internal/db"
 )
@@ -13,8 +14,11 @@ import (
 const (
 	DefaultOwner = "admin"
 
-	scopeTrade = "trade"
-	keyEnabled = "enabled"
+	scopeTrade            = "trade"
+	scopeAppMode          = "app_mode"
+	keyEnabled            = "enabled"
+	keyCurrentMode        = "current_mode"
+	keyReplayResumeCursor = "replay_resume_cursor"
 )
 
 // Store 管理用户级配置覆盖项的持久化读写。
@@ -85,10 +89,68 @@ WHERE owner=?
 }
 
 func (s *Store) SaveTradeEnabled(owner string, enabled bool) error {
+	return s.saveValue(owner, scopeTrade, keyEnabled, enabled)
+}
+
+func (s *Store) LoadRawValue(owner, scopeName, itemKey string) ([]byte, bool, error) {
 	if owner == "" {
 		owner = DefaultOwner
 	}
-	raw, err := json.Marshal(enabled)
+	var raw string
+	err := s.db.QueryRow(`
+SELECT value_json
+FROM user_config
+WHERE owner=? AND scope_name=? AND item_key=?
+`, owner, scopeName, itemKey).Scan(&raw)
+	if err == sql.ErrNoRows {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	return []byte(raw), true, nil
+}
+
+func (s *Store) SaveAppMode(owner string, mode string) error {
+	return s.saveValue(owner, scopeAppMode, keyCurrentMode, mode)
+}
+
+func (s *Store) LoadAppMode(owner string) (string, bool, error) {
+	raw, ok, err := s.LoadRawValue(owner, scopeAppMode, keyCurrentMode)
+	if !ok || err != nil {
+		return "", ok, err
+	}
+	var mode string
+	if err := json.Unmarshal(raw, &mode); err != nil {
+		return "", false, err
+	}
+	return mode, true, nil
+}
+
+func (s *Store) SaveReplayResumeCursor(owner string, cursor *bus.FileCursor) error {
+	return s.saveValue(owner, scopeAppMode, keyReplayResumeCursor, cursor)
+}
+
+func (s *Store) LoadReplayResumeCursor(owner string) (*bus.FileCursor, bool, error) {
+	raw, ok, err := s.LoadRawValue(owner, scopeAppMode, keyReplayResumeCursor)
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	if string(raw) == "null" {
+		return nil, true, nil
+	}
+	var cursor bus.FileCursor
+	if err := json.Unmarshal(raw, &cursor); err != nil {
+		return nil, false, err
+	}
+	return &cursor, true, nil
+}
+
+func (s *Store) saveValue(owner, scopeName, itemKey string, value any) error {
+	if owner == "" {
+		owner = DefaultOwner
+	}
+	raw, err := json.Marshal(value)
 	if err != nil {
 		return err
 	}
@@ -98,7 +160,7 @@ VALUES(?,?,?,?,?)
 ON DUPLICATE KEY UPDATE
 value_json=VALUES(value_json),
 updated_at=VALUES(updated_at)
-`, owner, scopeTrade, keyEnabled, string(raw), time.Now())
+`, owner, scopeName, itemKey, string(raw), time.Now())
 	return err
 }
 

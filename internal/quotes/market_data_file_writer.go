@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 )
 
 type fileFlushRequest struct {
@@ -22,6 +23,7 @@ type shardFileWriter struct {
 	status        *RuntimeStatusCenter
 	dir           string
 	in            chan any
+	queueHandle   *queuewatch.QueueHandle
 	flushInterval time.Duration
 	fsyncInterval time.Duration
 	files         map[string]*tickCSVFile
@@ -35,14 +37,31 @@ func newShardFileWriter(baseDir string, shardID int, status *RuntimeStatusCenter
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return nil, err
 	}
+	queueCfg := queuewatch.DefaultConfig("")
+	registry := (*queuewatch.Registry)(nil)
+	if status != nil && status.QueueRegistry() != nil {
+		registry = status.QueueRegistry()
+		queueCfg = registry.Config()
+	}
 	w := &shardFileWriter{
 		shardID:       shardID,
 		status:        status,
 		dir:           dir,
-		in:            make(chan any, defaultFileQueueCapacity/defaultMarketDataShardCount+1),
+		in:            make(chan any, queueCfg.FilePerShardCapacity),
 		flushInterval: 500 * time.Millisecond,
 		fsyncInterval: 5 * time.Second,
 		files:         make(map[string]*tickCSVFile),
+	}
+	if registry != nil {
+		w.queueHandle = registry.Register(queuewatch.QueueSpec{
+			Name:        fmt.Sprintf("tick_file_writer_%02d", shardID),
+			Category:    "quotes_sidecar",
+			Criticality: "best_effort",
+			Capacity:    queueCfg.FilePerShardCapacity,
+			LossPolicy:  "best_effort",
+			BasisText:   fmt.Sprintf("?? shard ? tick ???????? %d?", queueCfg.FilePerShardCapacity),
+		})
+		w.queueHandle.ObserveDepth(len(w.in))
 	}
 	go w.run()
 	return w, nil
@@ -54,7 +73,13 @@ func (w *shardFileWriter) Enqueue(ev tickEvent) {
 	}
 	select {
 	case w.in <- ev:
+		if w.queueHandle != nil {
+			w.queueHandle.MarkEnqueued(len(w.in))
+		}
 	default:
+		if w.queueHandle != nil {
+			w.queueHandle.MarkDropped(len(w.in))
+		}
 		logger.Warn("tick file queue full, dropping event", "shard_id", w.shardID, "instrument_id", ev.InstrumentID)
 	}
 }
@@ -77,6 +102,9 @@ func (w *shardFileWriter) run() {
 	for {
 		select {
 		case msg := <-w.in:
+			if w.queueHandle != nil {
+				w.queueHandle.MarkDequeued(len(w.in))
+			}
 			switch v := msg.(type) {
 			case tickEvent:
 				if err := w.append(v); err != nil {

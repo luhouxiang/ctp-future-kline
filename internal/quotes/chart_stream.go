@@ -10,6 +10,7 @@ import (
 	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/klineagg"
 	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/queuewatch"
 	"ctp-future-kline/internal/sessiontime"
 )
 
@@ -70,6 +71,8 @@ type ChartStream struct {
 	interests   map[string]int
 	subscribers map[chan ChartBarUpdate]struct{}
 	roots       map[string]*chartRootState
+	queueHandle *queuewatch.QueueHandle
+	queueCap    int
 }
 
 var (
@@ -77,19 +80,35 @@ var (
 	defaultChartStreamMu sync.RWMutex
 )
 
-func NewChartStream(dsn string) (*ChartStream, error) {
+func NewChartStream(dsn string, registry *queuewatch.Registry) (*ChartStream, error) {
 	db, err := dbx.Open(strings.TrimSpace(dsn))
 	if err != nil {
 		return nil, err
 	}
-	return &ChartStream{
+	queueCfg := queuewatch.DefaultConfig("")
+	if registry != nil {
+		queueCfg = registry.Config()
+	}
+	stream := &ChartStream{
 		db:              db,
 		clock:           klineclock.NewCalendarResolver(db),
 		sessionResolver: newSessionResolver(db),
 		interests:       make(map[string]int),
 		subscribers:     make(map[chan ChartBarUpdate]struct{}),
 		roots:           make(map[string]*chartRootState),
-	}, nil
+		queueCap:        queueCfg.ChartSubscriberCapacity,
+	}
+	if registry != nil {
+		stream.queueHandle = registry.Register(queuewatch.QueueSpec{
+			Name:        "chart_stream_subscribers",
+			Category:    "web_realtime",
+			Criticality: "best_effort",
+			Capacity:    queueCfg.ChartSubscriberCapacity,
+			LossPolicy:  "latest_only",
+			BasisText:   "?????????????????????????",
+		})
+	}
+	return stream, nil
 }
 
 func (s *ChartStream) Close() error {
@@ -214,10 +233,17 @@ func (s *ChartStream) RemoveInterest(raw ChartSubscription) {
 }
 
 func (s *ChartStream) Subscribe() (<-chan ChartBarUpdate, func()) {
-	ch := make(chan ChartBarUpdate, 4096)
+	cap := s.queueCap
+	if cap <= 0 {
+		cap = queuewatch.DefaultConfig("").ChartSubscriberCapacity
+	}
+	ch := make(chan ChartBarUpdate, cap)
 	s.mu.Lock()
 	s.subscribers[ch] = struct{}{}
 	s.mu.Unlock()
+	if s.queueHandle != nil {
+		s.queueHandle.ObserveDepth(s.maxSubscriberDepth())
+	}
 	return ch, func() {
 		s.mu.Lock()
 		if _, ok := s.subscribers[ch]; ok {
@@ -405,25 +431,35 @@ func (s *ChartStream) broadcast(updates []ChartBarUpdate) {
 	s.mu.RUnlock()
 	for _, update := range updates {
 		for _, ch := range subs {
-			enqueueChartUpdateLatest(ch, update)
+			if dropped := enqueueChartUpdateLatest(ch, update); dropped > 0 && s.queueHandle != nil {
+				s.queueHandle.MarkDropped(s.maxSubscriberDepth())
+			} else if s.queueHandle != nil {
+				s.queueHandle.MarkEnqueued(s.maxSubscriberDepth())
+			}
 		}
+	}
+	if s.queueHandle != nil {
+		s.queueHandle.ObserveDepth(s.maxSubscriberDepth())
 	}
 }
 
-func enqueueChartUpdateLatest(ch chan ChartBarUpdate, update ChartBarUpdate) {
+func enqueueChartUpdateLatest(ch chan ChartBarUpdate, update ChartBarUpdate) int {
 	select {
 	case ch <- update:
-		return
+		return 0
 	default:
 	}
+	dropped := 0
 	select {
 	case <-ch:
+		dropped = 1
 	default:
 	}
 	select {
 	case ch <- update:
 	default:
 	}
+	return dropped
 }
 
 func (s *ChartStream) interestedTimeframesLocked(symbol string, kind string, variety string) []string {
@@ -723,4 +759,19 @@ func chartSourceLabel(replay bool) string {
 		return "replay"
 	}
 	return "realtime"
+}
+
+func (s *ChartStream) maxSubscriberDepth() int {
+	if s == nil {
+		return 0
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	maxDepth := 0
+	for ch := range s.subscribers {
+		if depth := len(ch); depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+	return maxDepth
 }

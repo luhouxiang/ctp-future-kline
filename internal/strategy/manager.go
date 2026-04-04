@@ -15,6 +15,7 @@ import (
 
 	"ctp-future-kline/internal/config"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 )
 
 type Manager struct {
@@ -22,21 +23,27 @@ type Manager struct {
 	store *Store
 	exec  *ExecutionEngine
 
-	mu         sync.RWMutex
-	cmd        *exec.Cmd
-	connReady  bool
-	lastError  string
-	lastHealth time.Time
-	client     *StrategyServiceClient
-	connClose  func() error
-	events     map[chan EventEnvelope]struct{}
-	instances  map[string]StrategyInstance
+	mu          sync.RWMutex
+	cmd         *exec.Cmd
+	connReady   bool
+	lastError   string
+	lastHealth  time.Time
+	client      *StrategyServiceClient
+	connClose   func() error
+	events      map[chan EventEnvelope]struct{}
+	instances   map[string]StrategyInstance
+	queueHandle *queuewatch.QueueHandle
+	queueCap    int
 }
 
-func NewManager(cfg config.StrategyConfig, dsn string) (*Manager, error) {
+func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Registry) (*Manager, error) {
 	store, err := NewStore(dsn)
 	if err != nil {
 		return nil, err
+	}
+	queueCfg := queuewatch.DefaultConfig("")
+	if registry != nil {
+		queueCfg = registry.Config()
 	}
 	m := &Manager{
 		cfg:       cfg,
@@ -44,6 +51,17 @@ func NewManager(cfg config.StrategyConfig, dsn string) (*Manager, error) {
 		exec:      NewExecutionEngine(),
 		events:    make(map[chan EventEnvelope]struct{}),
 		instances: make(map[string]StrategyInstance),
+		queueCap:  queueCfg.StrategyEventCapacity,
+	}
+	if registry != nil {
+		m.queueHandle = registry.Register(queuewatch.QueueSpec{
+			Name:        "strategy_event_subscribers",
+			Category:    "strategy",
+			Criticality: "best_effort",
+			Capacity:    queueCfg.StrategyEventCapacity,
+			LossPolicy:  "best_effort",
+			BasisText:   "????/??????? Web???????????????",
+		})
 	}
 	if items, err := store.ListInstances(); err == nil {
 		for _, item := range items {
@@ -599,15 +617,25 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 }
 
 func (m *Manager) Subscribe() (<-chan EventEnvelope, func()) {
-	ch := make(chan EventEnvelope, 32)
+	cap := m.queueCap
+	if cap <= 0 {
+		cap = queuewatch.DefaultConfig("").StrategyEventCapacity
+	}
+	ch := make(chan EventEnvelope, cap)
 	m.mu.Lock()
 	m.events[ch] = struct{}{}
 	m.mu.Unlock()
+	if m.queueHandle != nil {
+		m.queueHandle.ObserveDepth(m.maxEventDepth())
+	}
 	return ch, func() {
 		m.mu.Lock()
 		delete(m.events, ch)
 		close(ch)
 		m.mu.Unlock()
+		if m.queueHandle != nil {
+			m.queueHandle.ObserveDepth(m.maxEventDepth())
+		}
 	}
 }
 
@@ -617,9 +645,30 @@ func (m *Manager) broadcast(typ string, data any) {
 	for ch := range m.events {
 		select {
 		case ch <- EventEnvelope{Type: typ, Data: data}:
+			if m.queueHandle != nil {
+				m.queueHandle.MarkEnqueued(m.maxEventDepth())
+			}
 		default:
+			if m.queueHandle != nil {
+				m.queueHandle.MarkDropped(m.maxEventDepth())
+			}
 		}
 	}
+	if m.queueHandle != nil {
+		m.queueHandle.ObserveDepth(m.maxEventDepth())
+	}
+}
+
+func (m *Manager) maxEventDepth() int {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	maxDepth := 0
+	for ch := range m.events {
+		if depth := len(ch); depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+	return maxDepth
 }
 
 func (m *Manager) setError(err error) {

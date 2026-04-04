@@ -37,6 +37,9 @@ const status = reactive({
   trading_day: '',
   is_market_open: false,
   subscribe_count: 0,
+  queue_alert_count: 0,
+  queue_critical_count: 0,
+  queue_spilling_count: 0,
   last_error: '',
 })
 
@@ -102,6 +105,16 @@ const replayLoading = reactive({
   resuming: false,
   stopping: false,
   fetchingStatus: false,
+})
+
+const appMode = reactive({
+  mode: 'live_real',
+  uses_realtime: true,
+  trade_backend: 'live_trade',
+  chart_data_mode: 'realtime',
+  kline_data_mode: 'realtime',
+  replay_resume_cursor: null,
+  switching: false,
 })
 
 const strategyStatus = reactive({
@@ -212,6 +225,10 @@ let lastLargeDriftLogKey = ''
 
 const marketBadgeClass = computed(() => (status.is_market_open ? 'badge open' : 'badge closed'))
 const marketBadgeText = computed(() => (status.is_market_open ? '开市中' : '非开市'))
+const isReplayAppMode = computed(() => appMode.mode === 'replay_paper')
+const isPaperAppMode = computed(() => appMode.mode === 'live_paper' || appMode.mode === 'replay_paper')
+const tradePanelTitle = computed(() => (isPaperAppMode.value ? '模拟交易' : '实盘交易'))
+const tradeEnableLabel = computed(() => (isPaperAppMode.value ? '启用模拟交易' : '启用实盘交易'))
 const formattedTradingDay = computed(() => {
   const raw = String(status.trading_day || '').trim()
   if (!raw) return ''
@@ -229,7 +246,7 @@ const totalPages = computed(() => {
   return Math.ceil(searchState.total / searchForm.pageSize)
 })
 const replayStatus = computed(() => String(replayState.status || '').trim())
-const replayEnabled = computed(() => replaySupported.value)
+const replayEnabled = computed(() => replaySupported.value && isReplayAppMode.value)
 const strategyEnabled = computed(() => !!strategyStatus.enabled)
 const canStartReplay = computed(() => replayEnabled.value && ['idle', 'done', 'error', 'stopped', ''].includes(replayStatus.value) && !replayLoading.starting)
 const canPauseReplay = computed(() => replayEnabled.value && replayStatus.value === 'running' && !replayLoading.pausing)
@@ -336,6 +353,11 @@ function applyReplayState(snapshot) {
   Object.assign(replayState, snapshot)
 }
 
+function applyAppModeSnapshot(snapshot) {
+  if (!snapshot || typeof snapshot !== 'object') return
+  Object.assign(appMode, snapshot)
+}
+
 function applyStrategyStatus(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return
   Object.assign(strategyStatus, snapshot)
@@ -362,6 +384,9 @@ async function fetchStatus() {
   } else {
     replaySupported.value = false
   }
+  if (data.app_mode) {
+    applyAppModeSnapshot(data.app_mode)
+  }
   if (data.strategy) {
     applyStrategyStatus(data.strategy)
   }
@@ -370,7 +395,19 @@ async function fetchStatus() {
   }
 }
 
+async function fetchAppMode() {
+  const resp = await fetch('/api/app-mode')
+  if (!resp.ok) {
+    throw new Error(`app-mode http ${resp.status}`)
+  }
+  applyAppModeSnapshot(await resp.json())
+}
+
 async function fetchReplayStatus() {
+  if (!isReplayAppMode.value) {
+    replayLoading.fetchingStatus = false
+    return
+  }
   replayLoading.fetchingStatus = true
   try {
     const resp = await fetch('/api/replay/status')
@@ -437,6 +474,9 @@ async function refreshTradeData() {
 }
 
 async function toggleTradeEnabled(enabled) {
+  if (isPaperAppMode.value) {
+    return
+  }
   tradeConfigSaving.value = true
   try {
     const resp = await fetch('/api/trade/config', {
@@ -629,6 +669,7 @@ async function startReplay() {
   const payload = {
     topics: parseCSVInput(replayForm.topicsText),
     sources,
+    data_mode: appMode.kline_data_mode,
     mode: replayForm.mode || 'realtime',
     speed: Number(replayForm.speed) || 1,
     tick_dir: tickDir,
@@ -854,6 +895,7 @@ async function runSearch(resetPage = false) {
       keyword: searchForm.keyword.trim(),
       page: String(searchForm.page),
       page_size: String(searchForm.pageSize),
+      data_mode: appMode.kline_data_mode,
     })
     const resp = await fetch(`/api/kline/search?${params}`)
     if (!resp.ok) {
@@ -957,6 +999,7 @@ async function openChart(item) {
     symbol: refreshedItem.symbol,
     type: refreshedItem.type,
     variety: refreshedItem.variety || '',
+    data_mode: appMode.kline_data_mode,
   })
   const url = `/chart?${params.toString()}`
   console.log('[openChart] params', {
@@ -967,6 +1010,34 @@ async function openChart(item) {
   })
   addLog(`openChart symbol=${refreshedItem.symbol} type=${refreshedItem.type} variety=${refreshedItem.variety || ''}`)
   window.open(url, '_blank')
+}
+
+async function setAppMode(mode) {
+  if (!mode || mode === appMode.mode || appMode.switching) return
+  appMode.switching = true
+  try {
+    const resp = await fetch('/api/app-mode', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ mode }),
+    })
+    if (!resp.ok) {
+      addLog(`切换运行模式失败: ${await resp.text()}`)
+      return
+    }
+    applyAppModeSnapshot(await resp.json())
+    addLog(`运行模式已切换: ${appMode.mode}`)
+    await fetchStatus()
+    if (isReplayAppMode.value) {
+      await fetchReplayStatus()
+    }
+    await fetchTradeBundle()
+    await runSearch(false)
+  } catch (error) {
+    addLog(`切换运行模式失败: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    appMode.switching = false
+  }
 }
 
 function connectWS() {
@@ -1080,6 +1151,7 @@ function connectWS() {
 onMounted(async () => {
   defaultTimeRange()
   try {
+    await fetchAppMode()
     await fetchStatus()
   } catch (error) {
     addLog(`状态获取失败: ${error.message}`)
@@ -1121,6 +1193,12 @@ onUnmounted(() => {
         <button @click="startServer">启动服务器</button>
         <span>WebSocket: {{ wsConnected ? '已连接' : '未连接' }}</span>
         <span :class="marketBadgeClass">{{ marketBadgeText }}</span>
+        <span>运行模式:</span>
+        <select :value="appMode.mode" :disabled="appMode.switching" @change="setAppMode($event.target.value)">
+          <option value="live_real">实时实盘</option>
+          <option value="live_paper">实时模拟</option>
+          <option value="replay_paper">回放模拟</option>
+        </select>
       </div>
     </div>
 
@@ -1170,7 +1248,8 @@ onUnmounted(() => {
 
     <div class="panel">
       <h3>Replay 控制与监控</h3>
-      <p v-if="!replayEnabled" class="error-text">Replay 未启用</p>
+      <p v-if="!isReplayAppMode" class="error-text">当前模式不是回放模拟，回放按钮已禁用</p>
+      <p v-else-if="!replayEnabled" class="error-text">Replay 未启用</p>
       <div class="row">
         <button :disabled="!canStartReplay" @click="startReplay">
           {{ replayLoading.starting ? '启动中...' : '开始回放' }}
@@ -1384,17 +1463,17 @@ onUnmounted(() => {
     </div>
 
     <div class="panel">
-      <h3>实盘交易</h3>
+      <h3>{{ tradePanelTitle }}</h3>
       <div class="row">
         <button class="secondary" @click="refreshTradeData">刷新查询</button>
         <label class="checkbox-inline">
           <input
             type="checkbox"
             :checked="tradeStatus.enabled"
-            :disabled="tradeConfigSaving"
+            :disabled="tradeConfigSaving || isPaperAppMode"
             @change="toggleTradeEnabled($event.target.checked)"
           />
-          启用实盘交易
+          {{ tradeEnableLabel }}
         </label>
       </div>
       <div class="status-grid">

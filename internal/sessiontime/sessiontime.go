@@ -131,6 +131,10 @@ func LabelMinute(rawMinute int, sessions []Range) (int, bool) {
 		if s.Start < s.End {
 			labelStart = s.Start + 1
 		}
+		// 分钟标签使用“结束标签分钟”：
+		// - 09:00:xx 这一分钟被标成 09:01
+		// - 09:01:xx 被标成 09:02
+		// 这样每根 1m 的 DataTime 表示该分钟结束时刻，而不是开始时刻。
 		label := rawMinute + 1
 		if label < labelStart {
 			label = labelStart
@@ -174,6 +178,7 @@ func BuildLabelMinuteMaps(sessions []Range) ([]int, map[int]MinuteMeta, map[int]
 			global += 1
 			local += 1
 		}
+		// 这里统计的是“标签分钟”的数量，而不是自然钟表分钟数量。
 		sessionMinutes[sid] = local
 	}
 	return minuteOrder, minuteMap, sessionMinutes
@@ -194,7 +199,10 @@ func appendRange(out *[]Range, start int, end int) {
 
 func firstLabelMinute(s Range) int {
 	if s.Start < s.End {
+		// 日盘场景下，session 从 09:00 开始交易，但第一根 1m 标签是 09:01。
 		return s.Start + 1
 	}
+	// 跨午夜场景会被 appendRange 拆成两段；落到 00:00-xx 这一段时，
+	// 第一根标签直接从该段结束点起算，不再额外 +1。
 	return s.End
 }

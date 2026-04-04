@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -41,6 +42,22 @@ type DBConfig struct {
 	Password string `json:"password"`
 	// Database 是业务库名称。
 	Database string `json:"database"`
+	// SharedMetaDatabase 是公用数据与设置库。
+	SharedMetaDatabase string `json:"shared_meta_database"`
+	// MarketRealtimeDatabase 是实时行情与实时 K 线库。
+	MarketRealtimeDatabase string `json:"market_realtime_database"`
+	// MarketReplayDatabase 是回放行情与回放 K 线库。
+	MarketReplayDatabase string `json:"market_replay_database"`
+	// TradeLiveDatabase 是实时实盘账户库。
+	TradeLiveDatabase string `json:"trade_realtime_live_database"`
+	// TradePaperLiveDatabase 是实时模拟账户库。
+	TradePaperLiveDatabase string `json:"trade_sim_realtime_database"`
+	// TradePaperReplayDatabase 是回放模拟账户库。
+	TradePaperReplayDatabase string `json:"trade_sim_replay_database"`
+	// ChartUserRealtimeDatabase 是实时图表用户数据。
+	ChartUserRealtimeDatabase string `json:"chart_user_realtime_database"`
+	// ChartUserReplayDatabase 是回放图表用户数据。
+	ChartUserReplayDatabase string `json:"chart_user_replay_database"`
 	// Params 保存附加 DSN 参数，例如字符集、时区等。
 	Params string `json:"params"`
 }
@@ -112,6 +129,42 @@ type CTPConfig struct {
 	ReplayDefaultSpeed float64 `json:"replay_default_speed"`
 	// ReplayAllowOrderCommand 控制回放期间是否允许派发订单指令。
 	ReplayAllowOrderCommand *bool `json:"replay_allow_order_command_dispatch"`
+	// QueueSpoolDir 是关键业务队列的磁盘溢写目录。
+	QueueSpoolDir string `json:"queue_spool_dir"`
+	// QueueAlertWarnPercent 是队列预警阈值。
+	QueueAlertWarnPercent int `json:"queue_alert_warn_percent"`
+	// QueueAlertCriticalPercent 是队列严重告警阈值。
+	QueueAlertCriticalPercent int `json:"queue_alert_critical_percent"`
+	// QueueAlertEmergencyPercent 是队列紧急告警阈值。
+	QueueAlertEmergencyPercent int `json:"queue_alert_emergency_percent"`
+	// QueueAlertRecoverPercent 是队列恢复到 normal 的滞回阈值。
+	QueueAlertRecoverPercent int `json:"queue_alert_recover_percent"`
+	// ShardCapacity 是每个行情 shard 输入队列的内存容量。
+	ShardCapacity int `json:"shard_capacity"`
+	// PersistCapacity 是 DB writer 总内存队列容量。
+	PersistCapacity int `json:"persist_capacity"`
+	// MMDeferredCapacity 是 mm/L9 延迟去重队列容量。
+	MMDeferredCapacity int `json:"mm_deferred_capacity"`
+	// L9TaskCapacity 是 L9 异步任务队列容量。
+	L9TaskCapacity int `json:"l9_task_capacity"`
+	// FilePerShardCapacity 是每个 shard tick 文件写队列容量。
+	FilePerShardCapacity int `json:"file_per_shard_capacity"`
+	// SideEffectTickCapacity 是 tick 旁路事件队列容量。
+	SideEffectTickCapacity int `json:"side_effect_tick_capacity"`
+	// SideEffectBarCapacity 是 bar 旁路事件队列容量。
+	SideEffectBarCapacity int `json:"side_effect_bar_capacity"`
+	// ChartSubscriberCapacity 是图表订阅者通道容量。
+	ChartSubscriberCapacity int `json:"chart_subscriber_capacity"`
+	// StatusSubscriberCapacity 是运行状态订阅者通道容量。
+	StatusSubscriberCapacity int `json:"status_subscriber_capacity"`
+	// StrategyEventCapacity 是策略事件订阅广播容量。
+	StrategyEventCapacity int `json:"strategy_event_capacity"`
+	// TradeEventCapacity 是交易服务事件订阅广播容量。
+	TradeEventCapacity int `json:"trade_event_capacity"`
+	// TradeGatewayEventCapacity 是交易网关事件订阅广播容量。
+	TradeGatewayEventCapacity int `json:"trade_gateway_event_capacity"`
+	// MDDisconnectCapacity 是行情断线信号队列容量。
+	MDDisconnectCapacity int `json:"md_disconnect_capacity"`
 	// DBDSN 是运行时补入的数据库连接串，不从 JSON 直接读取。
 	DBDSN string `json:"-"`
 }
@@ -355,6 +408,75 @@ func (c *AppConfig) Validate() error {
 		v := true
 		c.CTP.ReplayAllowOrderCommand = &v
 	}
+	if strings.TrimSpace(c.CTP.QueueSpoolDir) == "" {
+		c.CTP.QueueSpoolDir = filepath.Join(c.CTP.FlowPath, "queue_spool")
+	}
+	if c.CTP.QueueAlertWarnPercent == 0 {
+		c.CTP.QueueAlertWarnPercent = 60
+	}
+	if c.CTP.QueueAlertCriticalPercent == 0 {
+		c.CTP.QueueAlertCriticalPercent = 80
+	}
+	if c.CTP.QueueAlertEmergencyPercent == 0 {
+		c.CTP.QueueAlertEmergencyPercent = 95
+	}
+	if c.CTP.QueueAlertRecoverPercent == 0 {
+		c.CTP.QueueAlertRecoverPercent = 50
+	}
+	if c.CTP.ShardCapacity == 0 {
+		c.CTP.ShardCapacity = 8192
+	}
+	if c.CTP.PersistCapacity == 0 {
+		c.CTP.PersistCapacity = 16384
+	}
+	if c.CTP.MMDeferredCapacity == 0 {
+		c.CTP.MMDeferredCapacity = 16384
+	}
+	if c.CTP.L9TaskCapacity == 0 {
+		c.CTP.L9TaskCapacity = 4096
+	}
+	if c.CTP.FilePerShardCapacity == 0 {
+		c.CTP.FilePerShardCapacity = 1025
+	}
+	if c.CTP.SideEffectTickCapacity == 0 {
+		c.CTP.SideEffectTickCapacity = 16384
+	}
+	if c.CTP.SideEffectBarCapacity == 0 {
+		c.CTP.SideEffectBarCapacity = 4096
+	}
+	if c.CTP.ChartSubscriberCapacity == 0 {
+		c.CTP.ChartSubscriberCapacity = 4096
+	}
+	if c.CTP.StatusSubscriberCapacity == 0 {
+		c.CTP.StatusSubscriberCapacity = 16
+	}
+	if c.CTP.StrategyEventCapacity == 0 {
+		c.CTP.StrategyEventCapacity = 32
+	}
+	if c.CTP.TradeEventCapacity == 0 {
+		c.CTP.TradeEventCapacity = 64
+	}
+	if c.CTP.TradeGatewayEventCapacity == 0 {
+		c.CTP.TradeGatewayEventCapacity = 32
+	}
+	if c.CTP.MDDisconnectCapacity == 0 {
+		c.CTP.MDDisconnectCapacity = 16
+	}
+	if c.CTP.QueueAlertWarnPercent <= 0 || c.CTP.QueueAlertWarnPercent >= 100 {
+		return errors.New("ctp.queue_alert_warn_percent must be in (0,100)")
+	}
+	if c.CTP.QueueAlertCriticalPercent <= c.CTP.QueueAlertWarnPercent || c.CTP.QueueAlertCriticalPercent >= 100 {
+		return errors.New("ctp.queue_alert_critical_percent must be in (warn,100)")
+	}
+	if c.CTP.QueueAlertEmergencyPercent <= c.CTP.QueueAlertCriticalPercent || c.CTP.QueueAlertEmergencyPercent > 200 {
+		return errors.New("ctp.queue_alert_emergency_percent must be in (critical,200]")
+	}
+	if c.CTP.QueueAlertRecoverPercent <= 0 || c.CTP.QueueAlertRecoverPercent >= c.CTP.QueueAlertWarnPercent {
+		return errors.New("ctp.queue_alert_recover_percent must be in (0,warn)")
+	}
+	if c.CTP.ShardCapacity <= 0 || c.CTP.PersistCapacity <= 0 || c.CTP.MMDeferredCapacity <= 0 || c.CTP.L9TaskCapacity <= 0 || c.CTP.FilePerShardCapacity <= 0 || c.CTP.SideEffectTickCapacity <= 0 || c.CTP.SideEffectBarCapacity <= 0 || c.CTP.ChartSubscriberCapacity <= 0 || c.CTP.StatusSubscriberCapacity <= 0 || c.CTP.StrategyEventCapacity <= 0 || c.CTP.TradeEventCapacity <= 0 || c.CTP.TradeGatewayEventCapacity <= 0 || c.CTP.MDDisconnectCapacity <= 0 {
+		return errors.New("ctp queue capacities must be > 0")
+	}
 	if c.Calendar.AutoUpdateOnStart == nil {
 		v := true
 		c.Calendar.AutoUpdateOnStart = &v
@@ -390,6 +512,34 @@ func (c *AppConfig) Validate() error {
 	}
 	if c.DB.Database == "" {
 		c.DB.Database = "future_kline"
+	}
+	logicalPrefix := strings.TrimSuffix(c.DB.Database, "_kline")
+	if logicalPrefix == "" {
+		logicalPrefix = c.DB.Database
+	}
+	if c.DB.SharedMetaDatabase == "" {
+		c.DB.SharedMetaDatabase = logicalPrefix + "_shared_meta"
+	}
+	if c.DB.MarketRealtimeDatabase == "" {
+		c.DB.MarketRealtimeDatabase = logicalPrefix + "_market_realtime"
+	}
+	if c.DB.MarketReplayDatabase == "" {
+		c.DB.MarketReplayDatabase = logicalPrefix + "_market_replay"
+	}
+	if c.DB.TradeLiveDatabase == "" {
+		c.DB.TradeLiveDatabase = logicalPrefix + "_trade_live_realtime"
+	}
+	if c.DB.TradePaperLiveDatabase == "" {
+		c.DB.TradePaperLiveDatabase = logicalPrefix + "_trade_sim_realtime"
+	}
+	if c.DB.TradePaperReplayDatabase == "" {
+		c.DB.TradePaperReplayDatabase = logicalPrefix + "_trade_sim_replay"
+	}
+	if c.DB.ChartUserRealtimeDatabase == "" {
+		c.DB.ChartUserRealtimeDatabase = logicalPrefix + "_chart_user_realtime"
+	}
+	if c.DB.ChartUserReplayDatabase == "" {
+		c.DB.ChartUserReplayDatabase = logicalPrefix + "_chart_user_replay"
 	}
 	if c.DB.Params == "" {
 		c.DB.Params = "parseTime=true&loc=Local&multiStatements=false"

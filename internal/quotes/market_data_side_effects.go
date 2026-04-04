@@ -7,15 +7,18 @@ import (
 	"time"
 
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/queuewatch"
 )
 
 type marketDataSideEffects struct {
 	tickCh chan tickEvent
 	barCh  chan minuteBar
 
-	onTick func(tickEvent)
-	onBar  func(minuteBar)
-	status *RuntimeStatusCenter
+	tickQueue *queuewatch.QueueHandle
+	barQueue  *queuewatch.QueueHandle
+	onTick    func(tickEvent)
+	onBar     func(minuteBar)
+	status    *RuntimeStatusCenter
 
 	wg sync.WaitGroup
 
@@ -25,18 +28,45 @@ type marketDataSideEffects struct {
 }
 
 func newMarketDataSideEffects(status *RuntimeStatusCenter, onTick func(tickEvent), onBar func(minuteBar)) *marketDataSideEffects {
+	queueCfg := queuewatch.DefaultConfig("")
+	registry := (*queuewatch.Registry)(nil)
+	if status != nil && status.QueueRegistry() != nil {
+		registry = status.QueueRegistry()
+		queueCfg = registry.Config()
+	}
 	s := &marketDataSideEffects{
-		tickCh: make(chan tickEvent, 16384),
-		barCh:  make(chan minuteBar, 4096),
+		tickCh: make(chan tickEvent, queueCfg.SideEffectTickCapacity),
+		barCh:  make(chan minuteBar, queueCfg.SideEffectBarCapacity),
 		onTick: onTick,
 		onBar:  onBar,
 		status: status,
+	}
+	if registry != nil {
+		s.tickQueue = registry.Register(queuewatch.QueueSpec{
+			Name:        "side_effect_tick",
+			Category:    "quotes_sidecar",
+			Criticality: "best_effort",
+			Capacity:    queueCfg.SideEffectTickCapacity,
+			LossPolicy:  "best_effort",
+			BasisText:   "tick ???????????/????????????",
+		})
+		s.barQueue = registry.Register(queuewatch.QueueSpec{
+			Name:        "side_effect_bar",
+			Category:    "quotes_sidecar",
+			Criticality: "best_effort",
+			Capacity:    queueCfg.SideEffectBarCapacity,
+			LossPolicy:  "best_effort",
+			BasisText:   "bar ???????????/????????????",
+		})
 	}
 	if onTick != nil {
 		s.wg.Add(1)
 		go func() {
 			defer s.wg.Done()
 			for ev := range s.tickCh {
+				if s.tickQueue != nil {
+					s.tickQueue.MarkDequeued(len(s.tickCh))
+				}
 				now := time.Now()
 				queueMS := 0.0
 				if !ev.SideEffectEnqueuedAt.IsZero() {
@@ -58,6 +88,9 @@ func newMarketDataSideEffects(status *RuntimeStatusCenter, onTick func(tickEvent
 		go func() {
 			defer s.wg.Done()
 			for ev := range s.barCh {
+				if s.barQueue != nil {
+					s.barQueue.MarkDequeued(len(s.barCh))
+				}
 				now := time.Now()
 				queueMS := 0.0
 				if !ev.SideEffectEnqueuedAt.IsZero() {
@@ -82,7 +115,13 @@ func (s *marketDataSideEffects) PublishTick(ev tickEvent) {
 	}
 	select {
 	case s.tickCh <- ev:
+		if s.tickQueue != nil {
+			s.tickQueue.MarkEnqueued(len(s.tickCh))
+		}
 	default:
+		if s.tickQueue != nil {
+			s.tickQueue.MarkDropped(len(s.tickCh))
+		}
 		s.logDropLocked("tick", ev.InstrumentID)
 	}
 }
@@ -93,7 +132,13 @@ func (s *marketDataSideEffects) PublishBar(ev minuteBar) {
 	}
 	select {
 	case s.barCh <- ev:
+		if s.barQueue != nil {
+			s.barQueue.MarkEnqueued(len(s.barCh))
+		}
 	default:
+		if s.barQueue != nil {
+			s.barQueue.MarkDropped(len(s.barCh))
+		}
 		s.logDropLocked("bar", ev.InstrumentID)
 	}
 }

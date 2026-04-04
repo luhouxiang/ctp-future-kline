@@ -122,6 +122,24 @@ func TestLoadSuccessAndDefaults(t *testing.T) {
 	if !cfg.CTP.IsReplayAllowOrderCommandDispatch() {
 		t.Fatal("IsReplayAllowOrderCommandDispatch() = false, want true")
 	}
+	if cfg.CTP.QueueSpoolDir != filepath.Join(".", "flow", "queue_spool") {
+		t.Fatalf("QueueSpoolDir = %q, want %q", cfg.CTP.QueueSpoolDir, filepath.Join(".", "flow", "queue_spool"))
+	}
+	if cfg.CTP.QueueAlertWarnPercent != 60 || cfg.CTP.QueueAlertCriticalPercent != 80 || cfg.CTP.QueueAlertEmergencyPercent != 95 || cfg.CTP.QueueAlertRecoverPercent != 50 {
+		t.Fatalf("unexpected queue alert defaults: warn=%d critical=%d emergency=%d recover=%d", cfg.CTP.QueueAlertWarnPercent, cfg.CTP.QueueAlertCriticalPercent, cfg.CTP.QueueAlertEmergencyPercent, cfg.CTP.QueueAlertRecoverPercent)
+	}
+	if cfg.CTP.ShardCapacity != 8192 || cfg.CTP.PersistCapacity != 16384 || cfg.CTP.MMDeferredCapacity != 16384 || cfg.CTP.L9TaskCapacity != 4096 {
+		t.Fatalf("unexpected primary queue defaults: shard=%d persist=%d mm=%d l9=%d", cfg.CTP.ShardCapacity, cfg.CTP.PersistCapacity, cfg.CTP.MMDeferredCapacity, cfg.CTP.L9TaskCapacity)
+	}
+	if cfg.CTP.FilePerShardCapacity != 1025 || cfg.CTP.SideEffectTickCapacity != 16384 || cfg.CTP.SideEffectBarCapacity != 4096 {
+		t.Fatalf("unexpected side queue defaults: file=%d tick=%d bar=%d", cfg.CTP.FilePerShardCapacity, cfg.CTP.SideEffectTickCapacity, cfg.CTP.SideEffectBarCapacity)
+	}
+	if cfg.CTP.ChartSubscriberCapacity != 4096 || cfg.CTP.StatusSubscriberCapacity != 16 {
+		t.Fatalf("unexpected subscriber defaults: chart=%d status=%d", cfg.CTP.ChartSubscriberCapacity, cfg.CTP.StatusSubscriberCapacity)
+	}
+	if cfg.CTP.StrategyEventCapacity != 32 || cfg.CTP.TradeEventCapacity != 64 || cfg.CTP.TradeGatewayEventCapacity != 32 || cfg.CTP.MDDisconnectCapacity != 16 {
+		t.Fatalf("unexpected event queue defaults: strategy=%d trade=%d gateway=%d md_disconnect=%d", cfg.CTP.StrategyEventCapacity, cfg.CTP.TradeEventCapacity, cfg.CTP.TradeGatewayEventCapacity, cfg.CTP.MDDisconnectCapacity)
+	}
 	if cfg.DB.Driver != "mysql" {
 		t.Fatalf("DB.Driver = %q, want mysql", cfg.DB.Driver)
 	}
@@ -136,6 +154,30 @@ func TestLoadSuccessAndDefaults(t *testing.T) {
 	}
 	if cfg.DB.Database != "future_kline" {
 		t.Fatalf("DB.Database = %q, want future_kline", cfg.DB.Database)
+	}
+	if cfg.DB.SharedMetaDatabase != "future_shared_meta" {
+		t.Fatalf("DB.SharedMetaDatabase = %q, want future_shared_meta", cfg.DB.SharedMetaDatabase)
+	}
+	if cfg.DB.MarketRealtimeDatabase != "future_market_realtime" {
+		t.Fatalf("DB.MarketRealtimeDatabase = %q, want future_market_realtime", cfg.DB.MarketRealtimeDatabase)
+	}
+	if cfg.DB.MarketReplayDatabase != "future_market_replay" {
+		t.Fatalf("DB.MarketReplayDatabase = %q, want future_market_replay", cfg.DB.MarketReplayDatabase)
+	}
+	if cfg.DB.TradeLiveDatabase != "future_trade_live_realtime" {
+		t.Fatalf("DB.TradeLiveDatabase = %q, want future_trade_live_realtime", cfg.DB.TradeLiveDatabase)
+	}
+	if cfg.DB.TradePaperLiveDatabase != "future_trade_sim_realtime" {
+		t.Fatalf("DB.TradePaperLiveDatabase = %q, want future_trade_sim_realtime", cfg.DB.TradePaperLiveDatabase)
+	}
+	if cfg.DB.TradePaperReplayDatabase != "future_trade_sim_replay" {
+		t.Fatalf("DB.TradePaperReplayDatabase = %q, want future_trade_sim_replay", cfg.DB.TradePaperReplayDatabase)
+	}
+	if cfg.DB.ChartUserRealtimeDatabase != "future_chart_user_realtime" {
+		t.Fatalf("DB.ChartUserRealtimeDatabase = %q, want future_chart_user_realtime", cfg.DB.ChartUserRealtimeDatabase)
+	}
+	if cfg.DB.ChartUserReplayDatabase != "future_chart_user_replay" {
+		t.Fatalf("DB.ChartUserReplayDatabase = %q, want future_chart_user_replay", cfg.DB.ChartUserReplayDatabase)
 	}
 	if cfg.Trade.IsEnabled() {
 		t.Fatal("Trade.IsEnabled() = true, want false by default")
@@ -409,6 +451,30 @@ func TestLoadInvalidReplaySpeed(t *testing.T) {
 	_, err := config.Load(path)
 	if err == nil || !strings.Contains(err.Error(), "replay_default_speed") {
 		t.Fatalf("Load() error = %v, want replay speed validation error", err)
+	}
+}
+
+func TestLoadInvalidQueueAlertThresholds(t *testing.T) {
+	t.Parallel()
+
+	path := writeTempConfig(t, `{
+  "ctp": {
+    "flow_path": "./flow",
+    "trader_front_addr": "tcp://180.168.146.187:10201",
+    "md_front_addr": "tcp://180.168.146.187:10211",
+    "broker_id": "9999",
+    "app_id": "simnow_client_test",
+    "auth_code": "0000000000000000",
+    "user_id": "888888",
+    "password": "simnowpassword",
+    "queue_alert_warn_percent": 90,
+    "queue_alert_critical_percent": 80
+  }
+}`)
+
+	_, err := config.Load(path)
+	if err == nil || !strings.Contains(err.Error(), "queue_alert_critical_percent") {
+		t.Fatalf("Load() error = %v, want queue alert threshold validation error", err)
 	}
 }
 

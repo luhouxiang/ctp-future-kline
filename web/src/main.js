@@ -1,6 +1,7 @@
 import { createApp } from 'vue'
 import App from './App.vue'
 import TradingTerminal from './chart/TradingTerminal.vue'
+import QueueMonitorView from './QueueMonitorView.vue'
 import './style.css'
 
 function resolveDebugFlag(key) {
@@ -86,5 +87,5 @@ function setupClientLogBridge() {
 
 setupClientLogBridge()
 
-const component = window.location.pathname === '/chart' ? TradingTerminal : App
+const component = window.location.pathname === '/chart' ? TradingTerminal : (window.location.pathname === '/queues' ? QueueMonitorView : App)
 createApp(component).mount('#app')

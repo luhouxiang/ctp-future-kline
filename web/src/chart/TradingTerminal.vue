@@ -67,6 +67,7 @@ let chartWSReconnectTimer = null
 let chartWSReconnectAttempt = 0
 const realtimeStatus = ref('connecting')
 const activeChartSubscriptionKey = ref('')
+const dataMode = ref('realtime')
 const DRAWING_TYPE_LABELS = {
   trendline: '趋势线',
   hline: '水平线',
@@ -274,7 +275,7 @@ const objectTreeRows = computed(() => {
 async function loadLayout() {
   if (!scope.symbol || !scope.type) return
   try {
-    const qs = new URLSearchParams({ owner: owner.value || 'admin', symbol: scope.symbol, type: scope.type, variety: scope.variety || '', timeframe: scope.timeframe || '1m' })
+    const qs = new URLSearchParams({ owner: owner.value || 'admin', symbol: scope.symbol, type: scope.type, variety: scope.variety || '', timeframe: scope.timeframe || '1m', data_mode: dataMode.value })
     const resp = await fetch(`/api/chart/layout?${qs.toString()}`)
     if (!resp.ok) return
     const data = await resp.json()
@@ -288,7 +289,7 @@ async function flushSave() {
   if (!scope.symbol || !scope.type) return
   saveStatus.value = 'saving'
   try {
-    const resp = await fetch('/api/chart/layout', {
+    const resp = await fetch(`/api/chart/layout?data_mode=${encodeURIComponent(dataMode.value)}`, {
       method: 'PUT',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(layoutPayload.value),
@@ -307,7 +308,8 @@ function flushSaveOnUnload() {
   if (!scope.symbol || !scope.type) return
   try {
     const body = JSON.stringify(layoutPayload.value)
-    navigator.sendBeacon('/api/chart/layout', new Blob([body], { type: 'application/json' }))
+    const url = `/api/chart/layout?data_mode=${encodeURIComponent(dataMode.value)}`
+    navigator.sendBeacon(url, new Blob([body], { type: 'application/json' }))
   } catch {
     // ignore
   }
@@ -380,6 +382,7 @@ async function fetchKeyboardSpriteItems() {
       keyword: query,
       page: '1',
       page_size: '20',
+      data_mode: dataMode.value,
     })
     const resp = await fetch(`/api/kline/search?${params.toString()}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -737,6 +740,15 @@ watch(
 
 onMounted(async () => {
   getParams()
+  try {
+    const resp = await fetch('/api/app-mode')
+    if (resp.ok) {
+      const data = await resp.json()
+      dataMode.value = data?.kline_data_mode || 'realtime'
+    }
+  } catch {
+    dataMode.value = 'realtime'
+  }
   await fetchWatchlist()
   await loadLayout()
   connectChartWS()
@@ -789,6 +801,7 @@ onUnmounted(() => {
         <PriceChartPane
           ref="paneRef"
           :scope="scope"
+          :data-mode="dataMode"
           :theme="layout.theme"
           :active-tool="activeTool"
           :drawings="drawings"

@@ -1429,3 +1429,54 @@ select {
   text-overflow: ellipsis;
   font-variant-numeric: tabular-nums;
 }
+
+.queue-monitor-page {
+  max-width: 1400px;
+}
+
+.queue-alert-list {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 12px;
+}
+
+.queue-alert-card {
+  border-radius: 10px;
+  padding: 12px;
+  border: 1px solid #d7e2ef;
+  background: #f8fbff;
+}
+
+.queue-table-wrap {
+  overflow: auto;
+}
+
+.queue-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 900px;
+}
+
+.queue-table th,
+.queue-table td {
+  border-bottom: 1px solid #dbe5ef;
+  padding: 10px 12px;
+  text-align: left;
+  vertical-align: top;
+}
+
+.queue-level.normal {
+  background: transparent;
+}
+
+.queue-level.warn {
+  background: rgba(255, 214, 102, 0.18);
+}
+
+.queue-level.critical {
+  background: rgba(255, 143, 111, 0.18);
+}
+
+.queue-level.emergency {
+  background: rgba(220, 53, 69, 0.16);
+}

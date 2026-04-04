@@ -138,7 +138,7 @@ func BuildBarTimes(tradingDay time.Time, hhmm int, provider PrevTradingDayProvid
 	tradingDay = normalizeDay(tradingDay)
 	base := time.Date(tradingDay.Year(), tradingDay.Month(), tradingDay.Day(), hour, minute, 0, 0, time.Local)
 
-	// day session keeps same timestamp.
+	// 日盘直接落在交易日本身，不需要额外时间轴修正。
 	if hhmm >= 800 && hhmm <= 1600 {
 		return base, base, nil
 	}
@@ -156,8 +156,13 @@ func BuildBarTimes(tradingDay time.Time, hhmm int, provider PrevTradingDayProvid
 
 	adjDate := prev
 	if hhmm < 800 {
+		// 凌晨时段虽然业务上仍属于 tradingDay，但在连续时间轴上应该跟在前一晚后面，
+		// 所以要把 00:xx~07:xx 调整到“上一交易日 + 1 天”的自然日上。
 		adjDate = prev.AddDate(0, 0, 1)
 	}
+	// 夜盘 21:xx~23:xx 会被挂到上一交易日的时间轴；
+	// 这样 AdjustedTime 可以把 21:00 -> 23:59 -> 00:00 -> 02:30 排成一条连续序列，
+	// 避免直接使用 tradingDay 时出现“夜盘看起来跑到第二天晚上”的错位。
 	adjusted := time.Date(adjDate.Year(), adjDate.Month(), adjDate.Day(), hour, minute, 0, 0, time.Local)
 	return base, adjusted, nil
 }

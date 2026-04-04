@@ -60,10 +60,10 @@ func main() {
 	// Ensure the first line in file logs is the backend version.
 	logger.Debug("config loaded", "config_path", resolvedConfigPath)
 	logger.Info("log files enabled", "base_log_path", logPath, "level", cfg.Log.Level)
-	if err := dbx.EnsureDatabase(cfg.DB); err != nil {
+	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
 	}
-	dsn := dbx.BuildDSN(cfg.DB)
+	dsn := dbx.DSNForRole(cfg.DB, dbx.RoleSharedMeta)
 	db, err := dbx.Open(dsn)
 	if err != nil {
 		logger.Error("open mysql failed", "error", err)
@@ -86,8 +86,8 @@ func main() {
 		_ = overrideStore.Close()
 	}
 	_ = db.Close()
-	cfg.CTP.DBDSN = dsn
-	cm := calendar.NewManager(dsn)
+	cfg.CTP.DBDSN = dbx.DSNForRole(cfg.DB, dbx.RoleMarketRealtime)
+	cm := calendar.NewManager(dbx.DSNForRole(cfg.DB, dbx.RoleSharedMeta))
 	if err := cm.EnsureOnStart(calendar.Config{
 		AutoUpdateOnStart:  cfg.Calendar.IsAutoUpdateOnStart(),
 		MinFutureOpenDays:  cfg.Calendar.MinFutureOpenDays,
