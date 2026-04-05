@@ -127,8 +127,6 @@ type instrumentRuntimeState struct {
 	hasPrevGeneratedBarVolume bool
 	// currentTradingDay 记录当前状态对应的业务交易日。
 	currentTradingDay string
-	// lastFingerprint 保存最近一次去重指纹状态。
-	lastFingerprint tickFingerprintState
 	// lastVolumes 是最近一次看到的累计成交量。
 	lastVolumes int
 	// aggregator 负责把连续 1m bar 进一步聚合成 mm 和日线等结果。
@@ -836,46 +834,6 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	if currentTradingDay != "" {
 		state.currentTradingDay = currentTradingDay
 	}
-
-	fingerprint := buildTickDedupFingerprint(tickInputData{
-		InstrumentID:   instrumentID,
-		ExchangeID:     exchangeID,
-		ActionDay:      t.ActionDay,
-		TradingDay:     t.TradingDay,
-		UpdateTime:     t.UpdateTime,
-		UpdateMillisec: t.UpdateMillisec,
-		BidPrice1:      t.BidPrice1,
-		AskPrice1:      t.AskPrice1,
-	}, price, currentVol, openInterest)
-	if s.runtime.opts.tickDedupWindow > 0 && fingerprint == state.lastFingerprint.fingerprint && now.Sub(state.lastFingerprint.at) <= s.runtime.opts.tickDedupWindow {
-		if s.runtime.status != nil {
-			s.runtime.status.MarkTickDedupDropped()
-		}
-		prevTick := state.lastFingerprint.tick
-		dupKind := "runtime_normalized_duplicate"
-		if sameRawMarketData(prevTick, t.tickEvent) {
-			dupKind = "upstream_raw_duplicate"
-		}
-		logArgs := []any{
-			"instrument_id", instrumentID,
-			"duplicate_kind", dupKind,
-			"dedup_window_ms", s.runtime.opts.tickDedupWindow.Milliseconds(),
-			"since_previous_ms", now.Sub(state.lastFingerprint.at).Milliseconds(),
-		}
-		if t.replay && dupKind == "upstream_raw_duplicate" {
-			s.runtime.maybeWarn("tick_dedup_replay:"+instrumentID, "tick dedup dropped in replay", logArgs...)
-		} else {
-			logArgs = append(logArgs,
-				"effective_prev", formatTickForLog(prevTick, false),
-				"effective_curr", formatTickForLog(t.tickEvent, false),
-				"raw_prev", formatTickForLog(prevTick, true),
-				"raw_curr", formatTickForLog(t.tickEvent, true),
-			)
-			s.runtime.maybeWarn("tick_dedup:"+instrumentID+":"+dupKind, "tick dedup dropped", logArgs...)
-		}
-		return
-	}
-	state.lastFingerprint = tickFingerprintState{fingerprint: fingerprint, at: now, tick: t.tickEvent}
 
 	upstreamLagMS := now.Sub(adjustedTickTime).Seconds() * 1000
 	shardQueueMS := dequeuedAt.Sub(t.ProcessStartedAt).Seconds() * 1000
