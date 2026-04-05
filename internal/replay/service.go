@@ -287,6 +287,19 @@ func (s *Service) Resume() (TaskSnapshot, error) {
 	return s.snapshot, nil
 }
 
+func (s *Service) UpdateSpeed(speed float64) (TaskSnapshot, error) {
+	if speed <= 0 {
+		return s.Status(), fmt.Errorf("invalid replay speed: %v", speed)
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.snapshot.Status != StatusRunning && s.snapshot.Status != StatusPaused {
+		return s.snapshot, fmt.Errorf("replay task not active")
+	}
+	s.snapshot.Speed = speed
+	return s.snapshot, nil
+}
+
 func (s *Service) Stop() (TaskSnapshot, error) {
 	s.mu.Lock()
 	cancel := s.cancel
@@ -352,15 +365,8 @@ func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode
 		if mode == "realtime" {
 			if !prevOccurred.IsZero() && !ev.OccurredAt.IsZero() {
 				delta := ev.OccurredAt.Sub(prevOccurred)
-				if delta > 0 {
-					wait := time.Duration(float64(delta) / speed)
-					timer := time.NewTimer(wait)
-					select {
-					case <-iterCtx.Done():
-						timer.Stop()
-						return iterCtx.Err()
-					case <-timer.C:
-					}
+				if err := s.waitRealtimeDelta(iterCtx, taskID, delta, speed); err != nil {
+					return err
 				}
 			}
 			if !ev.OccurredAt.IsZero() {
@@ -421,6 +427,50 @@ func (s *Service) waitIfPaused(ctx context.Context, taskID string) error {
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
+}
+
+func (s *Service) currentSpeed(taskID string, fallback float64) float64 {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.snapshot.TaskID != taskID || s.snapshot.Speed <= 0 {
+		return fallback
+	}
+	return s.snapshot.Speed
+}
+
+func (s *Service) waitRealtimeDelta(ctx context.Context, taskID string, delta time.Duration, fallbackSpeed float64) error {
+	if delta <= 0 {
+		return nil
+	}
+	remaining := delta
+	const maxSleepSlice = 100 * time.Millisecond
+	for remaining > 0 {
+		if err := s.waitIfPaused(ctx, taskID); err != nil {
+			return err
+		}
+		speed := s.currentSpeed(taskID, fallbackSpeed)
+		if speed <= 0 {
+			speed = fallbackSpeed
+		}
+		wait := time.Duration(float64(remaining) / speed)
+		if wait > maxSleepSlice {
+			wait = maxSleepSlice
+		}
+		if wait <= 0 {
+			wait = time.Millisecond
+		}
+		startedAt := time.Now()
+		timer := time.NewTimer(wait)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
+		}
+		elapsed := time.Since(startedAt)
+		remaining -= time.Duration(float64(elapsed) * speed)
+	}
+	return nil
 }
 
 func (s *Service) dispatch(ctx context.Context, ev bus.BusEvent) (int64, int64, error) {

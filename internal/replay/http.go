@@ -14,6 +14,11 @@ type ActionResponse struct {
 	Task TaskSnapshot `json:"task"`
 }
 
+type SpeedUpdateRequest struct {
+	// Speed 是新的回放速度倍率。
+	Speed float64 `json:"speed"`
+}
+
 type StatusResponse struct {
 	// Task 是当前回放任务快照。
 	Task TaskSnapshot `json:"task"`

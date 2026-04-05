@@ -284,6 +284,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/replay/pause", s.handleReplayPause)
 	mux.HandleFunc("/api/replay/resume", s.handleReplayResume)
 	mux.HandleFunc("/api/replay/stop", s.handleReplayStop)
+	mux.HandleFunc("/api/replay/speed", s.handleReplaySpeed)
 	mux.HandleFunc("/api/replay/status", s.handleReplayStatus)
 	mux.HandleFunc("/api/chart/layout", s.handleChartLayout)
 	mux.HandleFunc("/api/chart/drawings", s.handleChartDrawings)
@@ -1419,6 +1420,28 @@ func (s *Server) handleReplayStop(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	task, err := s.replay.Stop()
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, replay.ActionResponse{OK: true, Task: task})
+}
+
+func (s *Server) handleReplaySpeed(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.replay == nil {
+		http.Error(w, "replay is disabled", http.StatusBadRequest)
+		return
+	}
+	var req replay.SpeedUpdateRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	task, err := s.replay.UpdateSpeed(req.Speed)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

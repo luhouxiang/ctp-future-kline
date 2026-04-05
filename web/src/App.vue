@@ -104,6 +104,7 @@ const replayLoading = reactive({
   pausing: false,
   resuming: false,
   stopping: false,
+  updatingSpeed: false,
   fetchingStatus: false,
 })
 
@@ -389,6 +390,9 @@ function localDateTimeToISO(value) {
 function applyReplayState(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return
   Object.assign(replayState, snapshot)
+  if (Number.isFinite(Number(snapshot.speed)) && Number(snapshot.speed) > 0) {
+    replayForm.speed = Number(snapshot.speed)
+  }
 }
 
 function applyAppModeSnapshot(snapshot) {
@@ -802,6 +806,46 @@ async function stopReplay() {
     addLog(`回放停止失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
     replayLoading.stopping = false
+  }
+}
+
+async function updateReplaySpeed() {
+  const speed = Number(replayForm.speed)
+  if (!Number.isFinite(speed) || speed <= 0) {
+    addLog('回放调速失败: speed 必须大于 0')
+    return
+  }
+  if (!['running', 'paused'].includes(replayStatus.value)) {
+    return
+  }
+  if (replayLoading.updatingSpeed) {
+    return
+  }
+  if (Number(replayState.speed || 0) === speed) {
+    return
+  }
+  replayLoading.updatingSpeed = true
+  try {
+    const resp = await fetch('/api/replay/speed', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ speed }),
+    })
+    if (!resp.ok) {
+      const message = (await resp.text()) || `http ${resp.status}`
+      addLog(`回放调速失败: ${message}`)
+      replayForm.speed = Number(replayState.speed || 1)
+      return
+    }
+    const data = await resp.json()
+    applyReplayState(data.task || {})
+    replayForm.speed = Number(data.task?.speed || speed)
+    addLog(`回放速度已更新: ${replayForm.speed}x`)
+  } catch (error) {
+    replayForm.speed = Number(replayState.speed || 1)
+    addLog(`回放调速失败: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    replayLoading.updatingSpeed = false
   }
 }
 
@@ -1396,7 +1440,7 @@ onUnmounted(() => {
           <option value="realtime">realtime</option>
         </select>
         <label>速度</label>
-        <input v-model.number="replayForm.speed" :disabled="!replayEnabled" type="number" min="0.1" step="0.1" />
+        <input v-model.number="replayForm.speed" :disabled="!replayEnabled || replayLoading.updatingSpeed" type="number" min="0.1" step="0.1" @change="updateReplaySpeed" />
         <label>Tick目录</label>
         <input v-model="replayForm.tickDir" :disabled="!replayEnabled" placeholder="flow/ticks" />
         <label>全部回放</label>

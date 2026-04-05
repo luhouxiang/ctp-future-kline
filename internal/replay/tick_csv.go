@@ -124,15 +124,8 @@ func (s *Service) runTickDir(ctx context.Context, taskID string, req StartReques
 		if mode == "realtime" {
 			if !prevOccurred.IsZero() && !item.Time.IsZero() {
 				delta := item.Time.Sub(prevOccurred)
-				if delta > 0 {
-					wait := time.Duration(float64(delta) / speed)
-					timer := time.NewTimer(wait)
-					select {
-					case <-ctx.Done():
-						timer.Stop()
-						return
-					case <-timer.C:
-					}
+				if err := s.waitRealtimeDelta(ctx, taskID, delta, speed); err != nil {
+					return
 				}
 			}
 			if !item.Time.IsZero() {
