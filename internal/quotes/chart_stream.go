@@ -41,24 +41,35 @@ type ChartBarUpdate struct {
 }
 
 type ChartQuoteSnapshot struct {
-	Symbol          string   `json:"symbol"`
-	Type            string   `json:"type"`
-	Variety         string   `json:"variety"`
-	DataMode        string   `json:"data_mode"`
-	LatestPrice     *float64 `json:"latest_price,omitempty"`
-	BidPrice1       *float64 `json:"bid_price1,omitempty"`
-	AskPrice1       *float64 `json:"ask_price1,omitempty"`
-	SettlementPrice *float64 `json:"settlement_price,omitempty"`
-	Volume          *int64   `json:"volume,omitempty"`
-	OpenInterest    *float64 `json:"open_interest,omitempty"`
-	ReferencePrice  *float64 `json:"reference_price,omitempty"`
-	Change          *float64 `json:"change,omitempty"`
-	ChangePct       *float64 `json:"change_pct,omitempty"`
-	Open            *float64 `json:"open,omitempty"`
-	High            *float64 `json:"high,omitempty"`
-	Low             *float64 `json:"low,omitempty"`
-	Close           *float64 `json:"close,omitempty"`
-	Time            string   `json:"time,omitempty"`
+	Symbol             string   `json:"symbol"`
+	Type               string   `json:"type"`
+	Variety            string   `json:"variety"`
+	DataMode           string   `json:"data_mode"`
+	LatestPrice        *float64 `json:"latest_price,omitempty"`
+	BidPrice1          *float64 `json:"bid_price1,omitempty"`
+	BidVolume1         *int64   `json:"bid_volume1,omitempty"`
+	AskPrice1          *float64 `json:"ask_price1,omitempty"`
+	AskVolume1         *int64   `json:"ask_volume1,omitempty"`
+	PreSettlementPrice *float64 `json:"pre_settlement_price,omitempty"`
+	PreClosePrice      *float64 `json:"pre_close_price,omitempty"`
+	PreOpenInterest    *float64 `json:"pre_open_interest,omitempty"`
+	SettlementPrice    *float64 `json:"settlement_price,omitempty"`
+	Volume             *int64   `json:"volume,omitempty"`
+	CurrentVolume      *int64   `json:"current_volume,omitempty"`
+	Turnover           *float64 `json:"turnover,omitempty"`
+	OpenInterest       *float64 `json:"open_interest,omitempty"`
+	OIDelta            *float64 `json:"oi_delta,omitempty"`
+	ReferencePrice     *float64 `json:"reference_price,omitempty"`
+	Change             *float64 `json:"change,omitempty"`
+	ChangePct          *float64 `json:"change_pct,omitempty"`
+	Open               *float64 `json:"open,omitempty"`
+	High               *float64 `json:"high,omitempty"`
+	Low                *float64 `json:"low,omitempty"`
+	Close              *float64 `json:"close,omitempty"`
+	UpperLimitPrice    *float64 `json:"upper_limit_price,omitempty"`
+	LowerLimitPrice    *float64 `json:"lower_limit_price,omitempty"`
+	AveragePrice       *float64 `json:"average_price,omitempty"`
+	Time               string   `json:"time,omitempty"`
 }
 
 type ChartQuoteTickRow struct {
@@ -78,27 +89,47 @@ type ChartQuoteUpdate struct {
 }
 
 type chartTickSnapshot struct {
-	instrumentID    string
-	exchange        string
-	variety         string
-	minuteTime      time.Time
-	adjustedTime    time.Time
-	adjustedTick    time.Time
-	receivedAt      time.Time
-	price           float64
-	volume          int64
-	openInterest    float64
-	settlementPrice float64
-	bidPrice1       float64
-	askPrice1       float64
-	updateTime      string
-	updateMillisec  int
+	instrumentID       string
+	exchange           string
+	exchangeInstID     string
+	variety            string
+	minuteTime         time.Time
+	adjustedTime       time.Time
+	adjustedTick       time.Time
+	receivedAt         time.Time
+	price              float64
+	preSettlementPrice float64
+	preClosePrice      float64
+	preOpenInterest    float64
+	openPrice          float64
+	highestPrice       float64
+	lowestPrice        float64
+	volume             int64
+	turnover           float64
+	openInterest       float64
+	closePrice         float64
+	settlementPrice    float64
+	upperLimitPrice    float64
+	lowerLimitPrice    float64
+	averagePrice       float64
+	preDelta           float64
+	currDelta          float64
+	bidPrice1          float64
+	bidVolume1         int64
+	askPrice1          float64
+	askVolume1         int64
+	updateTime         string
+	updateMillisec     int
 }
 
 type chartQuoteTickRow struct {
-	at       time.Time
-	price    float64
-	dataMode string
+	at           time.Time
+	price        float64
+	volume       int64
+	openInterest float64
+	bidPrice1    float64
+	askPrice1    float64
+	dataMode     string
 }
 
 type chartRootState struct {
@@ -432,21 +463,37 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 			root.latestTicks = make(map[string]chartTickSnapshot)
 		}
 		root.latestTicks[instrumentID] = chartTickSnapshot{
-			instrumentID:    instrumentID,
-			exchange:        strings.TrimSpace(ev.ExchangeID),
-			variety:         variety,
-			minuteTime:      minuteTime,
-			adjustedTime:    adjustedTime,
-			adjustedTick:    adjustedTickTime,
-			receivedAt:      ev.ReceivedAt,
-			price:           ev.LastPrice,
-			volume:          int64(ev.Volume),
-			openInterest:    ev.OpenInterest,
-			settlementPrice: ev.SettlementPrice,
-			bidPrice1:       ev.BidPrice1,
-			askPrice1:       ev.AskPrice1,
-			updateTime:      strings.TrimSpace(ev.UpdateTime),
-			updateMillisec:  ev.UpdateMillisec,
+			instrumentID:       instrumentID,
+			exchange:           strings.TrimSpace(ev.ExchangeID),
+			exchangeInstID:     strings.TrimSpace(ev.ExchangeInstID),
+			variety:            variety,
+			minuteTime:         minuteTime,
+			adjustedTime:       adjustedTime,
+			adjustedTick:       adjustedTickTime,
+			receivedAt:         ev.ReceivedAt,
+			price:              ev.LastPrice,
+			preSettlementPrice: ev.PreSettlementPrice,
+			preClosePrice:      ev.PreClosePrice,
+			preOpenInterest:    ev.PreOpenInterest,
+			openPrice:          ev.OpenPrice,
+			highestPrice:       ev.HighestPrice,
+			lowestPrice:        ev.LowestPrice,
+			volume:             int64(ev.Volume),
+			turnover:           ev.Turnover,
+			openInterest:       ev.OpenInterest,
+			closePrice:         ev.ClosePrice,
+			settlementPrice:    ev.SettlementPrice,
+			upperLimitPrice:    ev.UpperLimitPrice,
+			lowerLimitPrice:    ev.LowerLimitPrice,
+			averagePrice:       ev.AveragePrice,
+			preDelta:           ev.PreDelta,
+			currDelta:          ev.CurrDelta,
+			bidPrice1:          ev.BidPrice1,
+			bidVolume1:         int64(ev.BidVolume1),
+			askPrice1:          ev.AskPrice1,
+			askVolume1:         int64(ev.AskVolume1),
+			updateTime:         strings.TrimSpace(ev.UpdateTime),
+			updateMillisec:     ev.UpdateMillisec,
 		}
 		s.updateL9PartialLocked(root, minuteTime, adjustedTime)
 		if len(l9Frames) > 0 {
@@ -713,29 +760,49 @@ func (s *ChartStream) ensureRootLocked(symbol string, kind string, variety strin
 func (s *ChartStream) updateContractPartialLocked(root *chartRootState, ev tickEvent, minuteTime time.Time, adjustedTime time.Time, dataMode string) {
 	price := ev.LastPrice
 	root.pushRecentTickLocked(chartQuoteTickRow{
-		at:       combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
-		price:    price,
-		dataMode: dataMode,
+		at:           combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
+		price:        price,
+		volume:       int64(ev.Volume),
+		openInterest: ev.OpenInterest,
+		bidPrice1:    ev.BidPrice1,
+		askPrice1:    ev.AskPrice1,
+		dataMode:     dataMode,
 	})
 	if root.latestTicks == nil {
 		root.latestTicks = make(map[string]chartTickSnapshot)
 	}
 	root.latestTicks[root.symbol] = chartTickSnapshot{
-		instrumentID:    root.symbol,
-		exchange:        strings.TrimSpace(ev.ExchangeID),
-		variety:         root.variety,
-		minuteTime:      minuteTime,
-		adjustedTime:    adjustedTime,
-		adjustedTick:    combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
-		receivedAt:      ev.ReceivedAt,
-		price:           price,
-		volume:          int64(ev.Volume),
-		openInterest:    ev.OpenInterest,
-		settlementPrice: ev.SettlementPrice,
-		bidPrice1:       ev.BidPrice1,
-		askPrice1:       ev.AskPrice1,
-		updateTime:      strings.TrimSpace(ev.UpdateTime),
-		updateMillisec:  ev.UpdateMillisec,
+		instrumentID:       root.symbol,
+		exchange:           strings.TrimSpace(ev.ExchangeID),
+		exchangeInstID:     strings.TrimSpace(ev.ExchangeInstID),
+		variety:            root.variety,
+		minuteTime:         minuteTime,
+		adjustedTime:       adjustedTime,
+		adjustedTick:       combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
+		receivedAt:         ev.ReceivedAt,
+		price:              price,
+		preSettlementPrice: ev.PreSettlementPrice,
+		preClosePrice:      ev.PreClosePrice,
+		preOpenInterest:    ev.PreOpenInterest,
+		openPrice:          ev.OpenPrice,
+		highestPrice:       ev.HighestPrice,
+		lowestPrice:        ev.LowestPrice,
+		volume:             int64(ev.Volume),
+		turnover:           ev.Turnover,
+		openInterest:       ev.OpenInterest,
+		closePrice:         ev.ClosePrice,
+		settlementPrice:    ev.SettlementPrice,
+		upperLimitPrice:    ev.UpperLimitPrice,
+		lowerLimitPrice:    ev.LowerLimitPrice,
+		averagePrice:       ev.AveragePrice,
+		preDelta:           ev.PreDelta,
+		currDelta:          ev.CurrDelta,
+		bidPrice1:          ev.BidPrice1,
+		bidVolume1:         int64(ev.BidVolume1),
+		askPrice1:          ev.AskPrice1,
+		askVolume1:         int64(ev.AskVolume1),
+		updateTime:         strings.TrimSpace(ev.UpdateTime),
+		updateMillisec:     ev.UpdateMillisec,
 	}
 	if root.currentPartial == nil || !root.currentPartial.MinuteTime.Equal(minuteTime) {
 		root.currentPartial = &minuteBar{
@@ -776,6 +843,48 @@ func (root *chartRootState) pushRecentTickLocked(row chartQuoteTickRow) {
 	root.recentTicks = append([]chartQuoteTickRow{row}, root.recentTicks...)
 	if len(root.recentTicks) > recentQuoteTickLimit {
 		root.recentTicks = root.recentTicks[:recentQuoteTickLimit]
+	}
+}
+
+func quoteReferencePrice(tick chartTickSnapshot) float64 {
+	if tick.preSettlementPrice > 0 {
+		return tick.preSettlementPrice
+	}
+	if tick.preClosePrice > 0 {
+		return tick.preClosePrice
+	}
+	return 0
+}
+
+func quoteCurrentVolume(rows []chartQuoteTickRow) int64 {
+	if len(rows) == 0 {
+		return 0
+	}
+	if len(rows) == 1 {
+		return rows[0].volume
+	}
+	delta := rows[0].volume - rows[1].volume
+	if delta < 0 {
+		return 0
+	}
+	return delta
+}
+
+func quoteOIDelta(rows []chartQuoteTickRow) float64 {
+	if len(rows) < 2 {
+		return 0
+	}
+	return rows[0].openInterest - rows[1].openInterest
+}
+
+func quoteTickNature(row chartQuoteTickRow) string {
+	switch {
+	case row.askPrice1 > 0 && row.price >= row.askPrice1:
+		return "主动买"
+	case row.bidPrice1 > 0 && row.price <= row.bidPrice1:
+		return "主动卖"
+	default:
+		return "中性"
 	}
 }
 
@@ -923,20 +1032,83 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 		if tick.bidPrice1 > 0 {
 			snapshot.BidPrice1 = floatPtr(tick.bidPrice1)
 		}
+		if tick.bidVolume1 > 0 {
+			snapshot.BidVolume1 = int64Ptr(tick.bidVolume1)
+		}
 		if tick.askPrice1 > 0 {
 			snapshot.AskPrice1 = floatPtr(tick.askPrice1)
 		}
+		if tick.askVolume1 > 0 {
+			snapshot.AskVolume1 = int64Ptr(tick.askVolume1)
+		}
+		if tick.preSettlementPrice > 0 {
+			snapshot.PreSettlementPrice = floatPtr(tick.preSettlementPrice)
+		}
+		if tick.preClosePrice > 0 {
+			snapshot.PreClosePrice = floatPtr(tick.preClosePrice)
+		}
+		if tick.preOpenInterest > 0 {
+			snapshot.PreOpenInterest = floatPtr(tick.preOpenInterest)
+		}
 		if tick.settlementPrice > 0 {
 			snapshot.SettlementPrice = floatPtr(tick.settlementPrice)
 		}
+		if tick.turnover > 0 {
+			snapshot.Turnover = floatPtr(tick.turnover)
+		}
+		if tick.upperLimitPrice > 0 {
+			snapshot.UpperLimitPrice = floatPtr(tick.upperLimitPrice)
+		}
+		if tick.lowerLimitPrice > 0 {
+			snapshot.LowerLimitPrice = floatPtr(tick.lowerLimitPrice)
+		}
+		if tick.averagePrice > 0 {
+			snapshot.AveragePrice = floatPtr(tick.averagePrice)
+		}
 		snapshot.OpenInterest = floatPtr(tick.openInterest)
+		if currentVolume := quoteCurrentVolume(root.recentTicks); currentVolume > 0 {
+			snapshot.CurrentVolume = int64Ptr(currentVolume)
+		}
+		if oiDelta := quoteOIDelta(root.recentTicks); oiDelta != 0 {
+			snapshot.OIDelta = floatPtr(oiDelta)
+		}
+		if referencePrice := quoteReferencePrice(tick); referencePrice > 0 {
+			snapshot.ReferencePrice = floatPtr(referencePrice)
+			change := tick.price - referencePrice
+			snapshot.Change = floatPtr(change)
+			snapshot.ChangePct = floatPtr(change / referencePrice)
+		}
 		snapshot.Time = formatQuoteTickTime(tick.adjustedTick, tick.updateTime, tick.updateMillisec)
 	} else if tick, ok := latestL9Tick(root); ok {
 		snapshot.LatestPrice = floatPtr(tick.price)
+		if tick.preSettlementPrice > 0 {
+			snapshot.PreSettlementPrice = floatPtr(tick.preSettlementPrice)
+		}
+		if tick.preClosePrice > 0 {
+			snapshot.PreClosePrice = floatPtr(tick.preClosePrice)
+		}
 		if tick.settlementPrice > 0 {
 			snapshot.SettlementPrice = floatPtr(tick.settlementPrice)
 		}
+		if tick.turnover > 0 {
+			snapshot.Turnover = floatPtr(tick.turnover)
+		}
+		if tick.upperLimitPrice > 0 {
+			snapshot.UpperLimitPrice = floatPtr(tick.upperLimitPrice)
+		}
+		if tick.lowerLimitPrice > 0 {
+			snapshot.LowerLimitPrice = floatPtr(tick.lowerLimitPrice)
+		}
+		if tick.averagePrice > 0 {
+			snapshot.AveragePrice = floatPtr(tick.averagePrice)
+		}
 		snapshot.OpenInterest = floatPtr(tick.openInterest)
+		if referencePrice := quoteReferencePrice(tick); referencePrice > 0 {
+			snapshot.ReferencePrice = floatPtr(referencePrice)
+			change := tick.price - referencePrice
+			snapshot.Change = floatPtr(change)
+			snapshot.ChangePct = floatPtr(change / referencePrice)
+		}
 		snapshot.Time = formatQuoteTickTime(tick.adjustedTick, tick.updateTime, tick.updateMillisec)
 	} else if root.currentPartial == nil && len(root.history1m) == 0 {
 		return ChartQuoteUpdate{}, false
@@ -963,10 +1135,28 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 	}
 	if root.kind == "contract" {
 		ticks = make([]ChartQuoteTickRow, 0, len(root.recentTicks))
-		for _, item := range root.recentTicks {
+		for idx, item := range root.recentTicks {
+			var volume *int64
+			if idx+1 < len(root.recentTicks) {
+				delta := item.volume - root.recentTicks[idx+1].volume
+				if delta < 0 {
+					delta = 0
+				}
+				volume = int64Ptr(delta)
+			} else {
+				volume = int64Ptr(item.volume)
+			}
+			var oiDelta *float64
+			if idx+1 < len(root.recentTicks) {
+				delta := item.openInterest - root.recentTicks[idx+1].openInterest
+				oiDelta = floatPtr(delta)
+			}
 			ticks = append(ticks, ChartQuoteTickRow{
 				Time:     item.at.Format("15:04:05"),
 				Price:    floatPtr(item.price),
+				Volume:   volume,
+				OIDelta:  oiDelta,
+				Nature:   quoteTickNature(item),
 				DataMode: item.dataMode,
 			})
 		}

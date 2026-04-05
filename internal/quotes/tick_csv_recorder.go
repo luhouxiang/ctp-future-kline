@@ -70,20 +70,36 @@ func (r *tickCSVRecorder) Append(ev tickEvent) error {
 		r.writers[inst] = f
 	}
 
-	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%d\n",
+	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%s,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%.8f,%d,%d,%d\n",
 		ev.ReceivedAt.Format("2006-01-02 15:04:05.000"),
 		ev.InstrumentID,
 		ev.ExchangeID,
+		ev.ExchangeInstID,
 		ev.TradingDay,
 		ev.ActionDay,
 		ev.UpdateTime,
 		ev.LastPrice,
+		ev.PreSettlementPrice,
+		ev.PreClosePrice,
+		ev.PreOpenInterest,
+		ev.OpenPrice,
+		ev.HighestPrice,
+		ev.LowestPrice,
 		ev.Volume,
+		ev.Turnover,
 		ev.OpenInterest,
+		ev.ClosePrice,
 		ev.SettlementPrice,
+		ev.UpperLimitPrice,
+		ev.LowerLimitPrice,
+		ev.AveragePrice,
+		ev.PreDelta,
+		ev.CurrDelta,
 		ev.BidPrice1,
 		ev.AskPrice1,
 		ev.UpdateMillisec,
+		ev.BidVolume1,
+		ev.AskVolume1,
 	)
 	if _, err := f.writer.WriteString(line); err != nil {
 		return fmt.Errorf("write tick csv failed: %w", err)
@@ -159,7 +175,7 @@ func (r *tickCSVRecorder) openFileLocked(instrumentID string) (*tickCSVFile, err
 	}
 	writer := bufio.NewWriter(file)
 	if stat.Size() == 0 {
-		header := "received_at,instrument_id,exchange_id,trading_day,action_day,update_time,last_price,volume,open_interest,settlement_price,bid_price1,ask_price1,update_millisec\n"
+		header := "received_at,instrument_id,exchange_id,exchange_inst_id,trading_day,action_day,update_time,last_price,pre_settlement_price,pre_close_price,pre_open_interest,open_price,highest_price,lowest_price,volume,turnover,open_interest,close_price,settlement_price,upper_limit_price,lower_limit_price,average_price,pre_delta,curr_delta,bid_price1,ask_price1,update_millisec,bid_volume1,ask_volume1\n"
 		if _, err := writer.WriteString(header); err != nil {
 			_ = file.Close()
 			return nil, fmt.Errorf("write tick csv header failed: %w", err)

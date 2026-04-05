@@ -41,4 +41,3 @@ export function mergeRealtimeBarUpdate(rawBars, update) {
   }
   return bars;
 }
-

@@ -86,18 +86,45 @@ type tickEvent struct {
 	SideEffectHandledAt time.Time
 	// LastPrice 是最新成交价，也是分钟线价格主字段。
 	LastPrice float64
+	// PreSettlementPrice 是昨结算价。
+	PreSettlementPrice float64
+	// PreClosePrice 是昨收盘价。
+	PreClosePrice float64
+	// PreOpenInterest 是昨持仓量。
+	PreOpenInterest float64
+	// OpenPrice 是今开盘价。
+	OpenPrice float64
+	// HighestPrice 是当日最高价。
+	HighestPrice float64
+	// LowestPrice 是当日最低价。
+	LowestPrice float64
 	// Volume 是 CTP 返回的累计成交量。
 	Volume int
+	// Turnover 是累计成交额。
+	Turnover float64
 	// OpenInterest 是当前持仓量。
 	OpenInterest float64
+	// ClosePrice 是今收盘价。
+	ClosePrice float64
 	// SettlementPrice 是结算价；异常极值会在入站时清洗为 0。
 	SettlementPrice float64
+	// UpperLimitPrice 是涨停价。
+	UpperLimitPrice float64
+	// LowerLimitPrice 是跌停价。
+	LowerLimitPrice float64
+	// AveragePrice 是均价。
+	AveragePrice float64
+	// PreDelta / CurrDelta 保留原始 delta 字段，便于后续扩展和排障。
+	PreDelta  float64
+	CurrDelta float64
 	// BidPrice1 是买一价。
 	BidPrice1 float64
 	// AskPrice1 是卖一价。
 	AskPrice1  float64
 	BidVolume1 int
 	AskVolume1 int
+	// ExchangeInstID 是交易所合约代码。
+	ExchangeInstID string
 }
 
 type tickInputData struct {
@@ -105,6 +132,8 @@ type tickInputData struct {
 	InstrumentID string
 	// ExchangeID 是从 CTP 回调直接取出的交易所代码。
 	ExchangeID string
+	// ExchangeInstID 是交易所合约代码。
+	ExchangeInstID string
 	// ActionDay 是原始自然日字段。
 	ActionDay string
 	// TradingDay 是原始交易日字段。
@@ -119,12 +148,32 @@ type tickInputData struct {
 	CallbackAt time.Time
 	// LastPrice 是原始最新价。
 	LastPrice float64
+	// PreSettlementPrice 是昨结算价。
+	PreSettlementPrice float64
+	// PreClosePrice 是昨收盘价。
+	PreClosePrice float64
+	// PreOpenInterest 是昨持仓量。
+	PreOpenInterest float64
+	// OpenPrice / HighestPrice / LowestPrice / ClosePrice / AveragePrice 是日内参考价。
+	OpenPrice    float64
+	HighestPrice float64
+	LowestPrice  float64
+	ClosePrice   float64
+	AveragePrice float64
 	// Volume 是原始累计成交量。
 	Volume int
+	// Turnover 是原始累计成交额。
+	Turnover float64
 	// OpenInterest 是原始持仓量。
 	OpenInterest float64
 	// SettlementPrice 是原始结算价，进入 runtime 前已允许做清洗。
 	SettlementPrice float64
+	// UpperLimitPrice / LowerLimitPrice 是涨跌停价。
+	UpperLimitPrice float64
+	LowerLimitPrice float64
+	// PreDelta / CurrDelta 保留原始 delta 字段。
+	PreDelta  float64
+	CurrDelta float64
 	// BidPrice1 是原始买一价。
 	BidPrice1 float64
 	// AskPrice1 是原始卖一价。
@@ -262,22 +311,36 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 	receivedAt := time.Now()
 	onRtnDepthMarketDataRateProbe.Inc()
 	_ = p.runtime.onLiveTick(tickInputData{
-		InstrumentID:    strings.TrimSpace(pDepthMarketData.GetInstrumentID()),
-		ExchangeID:      strings.TrimSpace(pDepthMarketData.GetExchangeID()),
-		ActionDay:       strings.TrimSpace(pDepthMarketData.GetActionDay()),
-		TradingDay:      strings.TrimSpace(pDepthMarketData.GetTradingDay()),
-		UpdateTime:      strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
-		UpdateMillisec:  pDepthMarketData.GetUpdateMillisec(),
-		ReceivedAt:      receivedAt,
-		CallbackAt:      receivedAt,
-		LastPrice:       pDepthMarketData.GetLastPrice(),
-		Volume:          pDepthMarketData.GetVolume(),
-		OpenInterest:    pDepthMarketData.GetOpenInterest(),
-		SettlementPrice: sanitizeSettlementPrice(pDepthMarketData.GetSettlementPrice()),
-		BidPrice1:       pDepthMarketData.GetBidPrice1(),
-		AskPrice1:       pDepthMarketData.GetAskPrice1(),
-		BidVolume1:      pDepthMarketData.GetBidVolume1(),
-		AskVolume1:      pDepthMarketData.GetAskVolume1(),
+		InstrumentID:       strings.TrimSpace(pDepthMarketData.GetInstrumentID()),
+		ExchangeID:         strings.TrimSpace(pDepthMarketData.GetExchangeID()),
+		ExchangeInstID:     strings.TrimSpace(pDepthMarketData.GetExchangeInstID()),
+		ActionDay:          strings.TrimSpace(pDepthMarketData.GetActionDay()),
+		TradingDay:         strings.TrimSpace(pDepthMarketData.GetTradingDay()),
+		UpdateTime:         strings.TrimSpace(pDepthMarketData.GetUpdateTime()),
+		UpdateMillisec:     pDepthMarketData.GetUpdateMillisec(),
+		ReceivedAt:         receivedAt,
+		CallbackAt:         receivedAt,
+		LastPrice:          pDepthMarketData.GetLastPrice(),
+		PreSettlementPrice: sanitizeSettlementPrice(pDepthMarketData.GetPreSettlementPrice()),
+		PreClosePrice:      pDepthMarketData.GetPreClosePrice(),
+		PreOpenInterest:    pDepthMarketData.GetPreOpenInterest(),
+		OpenPrice:          pDepthMarketData.GetOpenPrice(),
+		HighestPrice:       pDepthMarketData.GetHighestPrice(),
+		LowestPrice:        pDepthMarketData.GetLowestPrice(),
+		Volume:             pDepthMarketData.GetVolume(),
+		Turnover:           pDepthMarketData.GetTurnover(),
+		OpenInterest:       pDepthMarketData.GetOpenInterest(),
+		ClosePrice:         pDepthMarketData.GetClosePrice(),
+		SettlementPrice:    sanitizeSettlementPrice(pDepthMarketData.GetSettlementPrice()),
+		UpperLimitPrice:    pDepthMarketData.GetUpperLimitPrice(),
+		LowerLimitPrice:    pDepthMarketData.GetLowerLimitPrice(),
+		AveragePrice:       pDepthMarketData.GetAveragePrice(),
+		PreDelta:           pDepthMarketData.GetPreDelta(),
+		CurrDelta:          pDepthMarketData.GetCurrDelta(),
+		BidPrice1:          pDepthMarketData.GetBidPrice1(),
+		AskPrice1:          pDepthMarketData.GetAskPrice1(),
+		BidVolume1:         pDepthMarketData.GetBidVolume1(),
+		AskVolume1:         pDepthMarketData.GetAskVolume1(),
 	})
 }
 

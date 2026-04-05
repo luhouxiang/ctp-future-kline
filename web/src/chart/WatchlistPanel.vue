@@ -190,17 +190,45 @@ function displayPrice(v) {
   return num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
 }
 
+function displaySignedPrice(v) {
+  const num = Number(v)
+  if (!Number.isFinite(num)) return '-'
+  const text = displayPrice(num)
+  return num > 0 ? `+${text}` : text
+}
+
+function displayPercent(v) {
+  const num = Number(v)
+  if (!Number.isFinite(num)) return '-'
+  const pct = num * 100
+  const text = pct.toFixed(2)
+  return pct > 0 ? `+${text}%` : `${text}%`
+}
+
 const quoteDisplay = computed(() => {
   const snapshot = props.quoteSnapshot || {}
   return {
+    askVolume: displayNumber(snapshot.ask_volume1),
     ask: displayPrice(snapshot.ask_price1),
+    bidVolume: displayNumber(snapshot.bid_volume1),
     bid: displayPrice(snapshot.bid_price1),
     last: displayPrice(snapshot.latest_price),
     totalVolume: displayNumber(snapshot.volume),
-    currentVolume: '-',
-    totalAmount: '-',
-    upperLimit: '-',
-    lowerLimit: '-',
+    currentVolume: displayNumber(snapshot.current_volume),
+    totalAmount: displayPrice(snapshot.turnover),
+    openInterest: displayNumber(snapshot.open_interest),
+    oiDelta: displaySignedPrice(snapshot.oi_delta),
+    open: displayPrice(snapshot.open),
+    high: displayPrice(snapshot.high),
+    low: displayPrice(snapshot.low),
+    preSettlement: displayPrice(snapshot.pre_settlement_price),
+    preClose: displayPrice(snapshot.pre_close_price),
+    settlement: displayPrice(snapshot.settlement_price),
+    average: displayPrice(snapshot.average_price),
+    upperLimit: displayPrice(snapshot.upper_limit_price),
+    lowerLimit: displayPrice(snapshot.lower_limit_price),
+    change: displaySignedPrice(snapshot.change),
+    changePct: displayPercent(snapshot.change_pct),
   }
 })
 
@@ -209,6 +237,9 @@ const quoteTicks = computed(() => {
   return rows.map((row) => ({
     time: row?.time || '-',
     price: displayPrice(row?.price),
+    volume: displayNumber(row?.volume),
+    oiDelta: displaySignedPrice(row?.oi_delta),
+    nature: row?.nature || '-',
   }))
 })
 </script>
@@ -220,10 +251,14 @@ const quoteTicks = computed(() => {
         <div class="tv-quote-strip">
           <span class="tv-quote-strip-label">卖出</span>
           <span class="tv-quote-strip-value">{{ quoteDisplay.ask }}</span>
+          <span class="tv-quote-strip-label">卖量</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.askVolume }}</span>
         </div>
         <div class="tv-quote-strip">
           <span class="tv-quote-strip-label">买入</span>
           <span class="tv-quote-strip-value">{{ quoteDisplay.bid }}</span>
+          <span class="tv-quote-strip-label">买量</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.bidVolume }}</span>
         </div>
         <div class="tv-quote-strip tv-quote-strip-split">
           <span class="tv-quote-strip-label">现价</span>
@@ -238,6 +273,38 @@ const quoteTicks = computed(() => {
           <span class="tv-quote-strip-value">{{ quoteDisplay.totalAmount }}</span>
         </div>
         <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">持仓</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.openInterest }}</span>
+          <span class="tv-quote-strip-label">仓差</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.oiDelta }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">今开</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.open }}</span>
+          <span class="tv-quote-strip-label">最高</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.high }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">最低</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.low }}</span>
+          <span class="tv-quote-strip-label">昨结</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.preSettlement }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">昨收</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.preClose }}</span>
+          <span class="tv-quote-strip-label">结算</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.settlement }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">均价</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.average }}</span>
+          <span class="tv-quote-strip-label">涨跌</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.change }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">涨跌幅</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.changePct }}</span>
           <span class="tv-quote-strip-label">涨停</span>
           <span class="tv-quote-strip-value">{{ quoteDisplay.upperLimit }}</span>
           <span class="tv-quote-strip-label">跌停</span>
@@ -257,9 +324,9 @@ const quoteTicks = computed(() => {
           <div v-for="(row, idx) in quoteTicks" :key="`${row.time}-${idx}`" class="tv-quote-tick-row">
             <span>{{ row.time }}</span>
             <span>{{ row.price }}</span>
-            <span>-</span>
-            <span>-</span>
-            <span>-</span>
+            <span>{{ row.volume }}</span>
+            <span>{{ row.oiDelta }}</span>
+            <span>{{ row.nature }}</span>
           </div>
         </div>
         <div v-else class="tv-object-empty">暂无 tick 明细</div>

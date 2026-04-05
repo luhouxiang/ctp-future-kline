@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/logger"
@@ -62,6 +63,8 @@ type tickPayload struct {
 	InstrumentID string `json:"InstrumentID"`
 	// ExchangeID 是交易所代码。
 	ExchangeID string `json:"ExchangeID"`
+	// ExchangeInstID 是交易所合约代码。
+	ExchangeInstID string `json:"ExchangeInstID"`
 	// ActionDay 是自然日。
 	ActionDay string `json:"ActionDay"`
 	// TradingDay 是业务交易日。
@@ -74,16 +77,41 @@ type tickPayload struct {
 	ReceivedAt time.Time `json:"ReceivedAt"`
 	// LastPrice 是最新价。
 	LastPrice float64 `json:"LastPrice"`
+	// PreSettlementPrice 是昨结算价。
+	PreSettlementPrice float64 `json:"PreSettlementPrice"`
+	// PreClosePrice 是昨收盘价。
+	PreClosePrice float64 `json:"PreClosePrice"`
+	// PreOpenInterest 是昨持仓量。
+	PreOpenInterest float64 `json:"PreOpenInterest"`
+	// OpenPrice / HighestPrice / LowestPrice / ClosePrice / AveragePrice 是日内价格参考。
+	OpenPrice    float64 `json:"OpenPrice"`
+	HighestPrice float64 `json:"HighestPrice"`
+	LowestPrice  float64 `json:"LowestPrice"`
 	// Volume 是累计成交量。
 	Volume int `json:"Volume"`
+	// Turnover 是累计成交额。
+	Turnover float64 `json:"Turnover"`
 	// OpenInterest 是持仓量。
 	OpenInterest float64 `json:"OpenInterest"`
+	// ClosePrice 是今收盘价。
+	ClosePrice float64 `json:"ClosePrice"`
 	// SettlementPrice 是结算价。
 	SettlementPrice float64 `json:"SettlementPrice"`
+	// UpperLimitPrice / LowerLimitPrice 是涨跌停价。
+	UpperLimitPrice float64 `json:"UpperLimitPrice"`
+	LowerLimitPrice float64 `json:"LowerLimitPrice"`
+	// AveragePrice 是均价。
+	AveragePrice float64 `json:"AveragePrice"`
+	// PreDelta / CurrDelta 保留原始 delta 字段。
+	PreDelta  float64 `json:"PreDelta"`
+	CurrDelta float64 `json:"CurrDelta"`
 	// BidPrice1 是买一价。
 	BidPrice1 float64 `json:"BidPrice1"`
 	// AskPrice1 是卖一价。
 	AskPrice1 float64 `json:"AskPrice1"`
+	// BidVolume1 / AskVolume1 是买一量和卖一量。
+	BidVolume1 int `json:"BidVolume1"`
+	AskVolume1 int `json:"AskVolume1"`
 }
 
 // runTickDir 负责执行“从 tick CSV 目录回放”的主循环。
@@ -271,12 +299,14 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 	reader := csv.NewReader(f)
 	reader.FieldsPerRecord = -1
 
-	if _, err := reader.Read(); err != nil {
+	header, err := reader.Read()
+	if err != nil {
 		if err == io.EOF {
 			return nil, nil
 		}
 		return nil, fmt.Errorf("read tick csv header failed: %s: %w", name, err)
 	}
+	index := buildTickCSVHeaderIndex(header)
 
 	topics := bus.BuildSet(req.Topics)
 	if len(topics) > 0 {
@@ -305,14 +335,14 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 			return nil, fmt.Errorf("read tick csv record failed: %s:%d: %w", name, lineNo+1, err)
 		}
 		lineNo++
-		if len(record) != 13 {
-			return nil, fmt.Errorf("tick csv record malformed: %s:%d", name, lineNo)
+		if len(record) == 0 {
+			continue
 		}
 		if shouldSkipTickCSVRecord(name, lineNo, req.FromCursor) {
 			continue
 		}
 
-		payload, occurredAt, err := parseTickCSVRecord(record)
+		payload, occurredAt, err := parseTickCSVRecord(record, index)
 		if err != nil {
 			return nil, fmt.Errorf("parse tick csv record failed: %s:%d: %w", name, lineNo, err)
 		}
@@ -399,8 +429,78 @@ func shouldSkipTickCSVRecord(name string, lineNo int64, cursor *bus.FileCursor) 
 }
 
 // parseTickCSVRecord 把一行新格式 CSV 解析成 tickPayload，并返回该行用于排序和回放推进的时间。
-func parseTickCSVRecord(record []string) (tickPayload, time.Time, error) {
-	receivedAt, err := parseTickCSVTime(record[0], []string{
+func buildTickCSVHeaderIndex(header []string) map[string]int {
+	index := make(map[string]int, len(header))
+	for i, item := range header {
+		key := normalizeTickCSVHeaderKey(item)
+		if key == "" {
+			continue
+		}
+		index[key] = i
+	}
+	return index
+}
+
+func normalizeTickCSVHeaderKey(raw string) string {
+	key := strings.TrimSpace(raw)
+	if key == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(key) + 4)
+	for i, r := range key {
+		if r == ' ' || r == '-' {
+			b.WriteByte('_')
+			continue
+		}
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				prev := rune(key[i-1])
+				if prev != '_' && prev != ' ' && prev != '-' && !(prev >= 'A' && prev <= 'Z') {
+					b.WriteByte('_')
+				}
+			}
+			b.WriteRune(r + ('a' - 'A'))
+			continue
+		}
+		b.WriteRune(unicode.ToLower(r))
+	}
+	return b.String()
+}
+
+func tickCSVString(record []string, index map[string]int, key string) string {
+	if pos, ok := index[key]; ok && pos >= 0 && pos < len(record) {
+		return strings.TrimSpace(record[pos])
+	}
+	return ""
+}
+
+func tickCSVFloat(record []string, index map[string]int, key string) (float64, error) {
+	raw := tickCSVString(record, index, key)
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return v, nil
+}
+
+func tickCSVInt(record []string, index map[string]int, key string) (int, error) {
+	raw := tickCSVString(record, index, key)
+	if raw == "" {
+		return 0, nil
+	}
+	v, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, fmt.Errorf("%s: %w", key, err)
+	}
+	return v, nil
+}
+
+func parseTickCSVRecord(record []string, index map[string]int) (tickPayload, time.Time, error) {
+	receivedAt, err := parseTickCSVTime(tickCSVString(record, index, "received_at"), []string{
 		"2006-01-02 15:04:05.000",
 		"2006-01-02 15:04:05",
 		time.RFC3339Nano,
@@ -408,49 +508,125 @@ func parseTickCSVRecord(record []string) (tickPayload, time.Time, error) {
 	if err != nil {
 		return tickPayload{}, time.Time{}, fmt.Errorf("received_at: %w", err)
 	}
-	lastPrice, err := strconv.ParseFloat(strings.TrimSpace(record[6]), 64)
+	lastPrice, err := tickCSVFloat(record, index, "last_price")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("last_price: %w", err)
+		return tickPayload{}, time.Time{}, err
 	}
-	volume, err := strconv.Atoi(strings.TrimSpace(record[7]))
+	preSettlementPrice, err := tickCSVFloat(record, index, "pre_settlement_price")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("volume: %w", err)
+		return tickPayload{}, time.Time{}, err
 	}
-	openInterest, err := strconv.ParseFloat(strings.TrimSpace(record[8]), 64)
+	preClosePrice, err := tickCSVFloat(record, index, "pre_close_price")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("open_interest: %w", err)
+		return tickPayload{}, time.Time{}, err
 	}
-	settlementPrice, err := strconv.ParseFloat(strings.TrimSpace(record[9]), 64)
+	preOpenInterest, err := tickCSVFloat(record, index, "pre_open_interest")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("settlement_price: %w", err)
+		return tickPayload{}, time.Time{}, err
 	}
-	bidPrice1, err := strconv.ParseFloat(strings.TrimSpace(record[10]), 64)
+	openPrice, err := tickCSVFloat(record, index, "open_price")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("bid_price1: %w", err)
+		return tickPayload{}, time.Time{}, err
 	}
-	askPrice1, err := strconv.ParseFloat(strings.TrimSpace(record[11]), 64)
+	highestPrice, err := tickCSVFloat(record, index, "highest_price")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("ask_price1: %w", err)
+		return tickPayload{}, time.Time{}, err
 	}
-	updateMillisec, err := strconv.Atoi(strings.TrimSpace(record[12]))
+	lowestPrice, err := tickCSVFloat(record, index, "lowest_price")
 	if err != nil {
-		return tickPayload{}, time.Time{}, fmt.Errorf("update_millisec: %w", err)
+		return tickPayload{}, time.Time{}, err
+	}
+	volume, err := tickCSVInt(record, index, "volume")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	turnover, err := tickCSVFloat(record, index, "turnover")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	openInterest, err := tickCSVFloat(record, index, "open_interest")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	closePrice, err := tickCSVFloat(record, index, "close_price")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	settlementPrice, err := tickCSVFloat(record, index, "settlement_price")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	upperLimitPrice, err := tickCSVFloat(record, index, "upper_limit_price")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	lowerLimitPrice, err := tickCSVFloat(record, index, "lower_limit_price")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	averagePrice, err := tickCSVFloat(record, index, "average_price")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	preDelta, err := tickCSVFloat(record, index, "pre_delta")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	currDelta, err := tickCSVFloat(record, index, "curr_delta")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	bidPrice1, err := tickCSVFloat(record, index, "bid_price1")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	askPrice1, err := tickCSVFloat(record, index, "ask_price1")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	updateMillisec, err := tickCSVInt(record, index, "update_millisec")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	bidVolume1, err := tickCSVInt(record, index, "bid_volume1")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
+	}
+	askVolume1, err := tickCSVInt(record, index, "ask_volume1")
+	if err != nil {
+		return tickPayload{}, time.Time{}, err
 	}
 
 	payload := tickPayload{
-		InstrumentID:    strings.TrimSpace(record[1]),
-		ExchangeID:      strings.TrimSpace(record[2]),
-		TradingDay:      strings.TrimSpace(record[3]),
-		ActionDay:       strings.TrimSpace(record[4]),
-		UpdateTime:      strings.TrimSpace(record[5]),
-		ReceivedAt:      receivedAt,
-		LastPrice:       lastPrice,
-		Volume:          volume,
-		OpenInterest:    openInterest,
-		SettlementPrice: settlementPrice,
-		BidPrice1:       bidPrice1,
-		AskPrice1:       askPrice1,
-		UpdateMillisec:  updateMillisec,
+		InstrumentID:       tickCSVString(record, index, "instrument_id"),
+		ExchangeID:         tickCSVString(record, index, "exchange_id"),
+		ExchangeInstID:     tickCSVString(record, index, "exchange_inst_id"),
+		TradingDay:         tickCSVString(record, index, "trading_day"),
+		ActionDay:          tickCSVString(record, index, "action_day"),
+		UpdateTime:         tickCSVString(record, index, "update_time"),
+		ReceivedAt:         receivedAt,
+		LastPrice:          lastPrice,
+		PreSettlementPrice: preSettlementPrice,
+		PreClosePrice:      preClosePrice,
+		PreOpenInterest:    preOpenInterest,
+		OpenPrice:          openPrice,
+		HighestPrice:       highestPrice,
+		LowestPrice:        lowestPrice,
+		Volume:             volume,
+		Turnover:           turnover,
+		OpenInterest:       openInterest,
+		ClosePrice:         closePrice,
+		SettlementPrice:    settlementPrice,
+		UpperLimitPrice:    upperLimitPrice,
+		LowerLimitPrice:    lowerLimitPrice,
+		AveragePrice:       averagePrice,
+		PreDelta:           preDelta,
+		CurrDelta:          currDelta,
+		BidPrice1:          bidPrice1,
+		AskPrice1:          askPrice1,
+		UpdateMillisec:     updateMillisec,
+		BidVolume1:         bidVolume1,
+		AskVolume1:         askVolume1,
 	}
 	return payload, receivedAt, nil
 }
