@@ -95,7 +95,9 @@ type tickEvent struct {
 	// BidPrice1 是买一价。
 	BidPrice1 float64
 	// AskPrice1 是卖一价。
-	AskPrice1 float64
+	AskPrice1  float64
+	BidVolume1 int
+	AskVolume1 int
 }
 
 type tickInputData struct {
@@ -126,7 +128,9 @@ type tickInputData struct {
 	// BidPrice1 是原始买一价。
 	BidPrice1 float64
 	// AskPrice1 是原始卖一价。
-	AskPrice1 float64
+	AskPrice1  float64
+	BidVolume1 int
+	AskVolume1 int
 }
 
 type minuteTickSnapshot struct {
@@ -272,6 +276,8 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 		SettlementPrice: sanitizeSettlementPrice(pDepthMarketData.GetSettlementPrice()),
 		BidPrice1:       pDepthMarketData.GetBidPrice1(),
 		AskPrice1:       pDepthMarketData.GetAskPrice1(),
+		BidVolume1:      pDepthMarketData.GetBidVolume1(),
+		AskVolume1:      pDepthMarketData.GetAskVolume1(),
 	})
 }
 

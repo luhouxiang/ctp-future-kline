@@ -9,6 +9,8 @@ const props = defineProps({
   saveStatus: { type: String, default: 'idle' },
   activeTool: { type: String, default: 'cursor' },
   theme: { type: String, default: 'dark' },
+  rightPanelOpen: { type: Boolean, default: true },
+  activeRightTab: { type: String, default: 'quote' },
   channelDebug: { type: Boolean, default: false },
   reversalSettings: { type: Object, default: () => ({}) },
   lightweightOnly: { type: Boolean, default: false },
@@ -17,6 +19,8 @@ const props = defineProps({
 const emit = defineEmits([
   'set-timeframe',
   'set-theme',
+  'set-active-right-tab',
+  'toggle-right-sidebar',
   'set-tool',
   'delete-selected',
   'toggle-channel-debug',
@@ -71,10 +75,11 @@ function applyReversalSettings(force = false) {
 <template>
   <div class="tv-topbar">
     <div class="tv-brand">{{ props.symbol || '--' }} • {{ props.type }} <small>{{ props.variety }}</small></div>
-    <div class="tv-group">
+    <div class="tv-group tv-timeframe-group">
       <button v-for="f in frames" :key="f" class="tv-btn" :class="{ active: props.timeframe === f }" @click="emit('set-timeframe', f)">{{ f }}</button>
     </div>
-    <div class="tv-group">
+    <div class="tv-toolbar-spacer"></div>
+    <div class="tv-group tv-main-actions">
       <button class="tv-btn" :class="{ active: props.activeTool === 'cursor' }" @click="emit('set-tool', 'cursor')">光标</button>
       <button class="tv-btn danger" @click="emit('delete-selected')">删除</button>
       <button v-if="!props.lightweightOnly" class="tv-btn" :class="{ active: props.channelDebug }" @click="emit('toggle-channel-debug')">通道调试</button>
@@ -100,6 +105,11 @@ function applyReversalSettings(force = false) {
       <button class="tv-btn" :class="{ active: props.theme === 'dark' }" @click="emit('set-theme', 'dark')">深色</button>
       <button class="tv-btn" :class="{ active: props.theme === 'light' }" @click="emit('set-theme', 'light')">浅色</button>
     </div>
-    <div class="tv-save">保存状态: {{ props.saveStatus }}</div>
+    <div class="tv-group tv-right-panel-actions">
+      <button class="tv-btn" :class="{ active: props.activeRightTab === 'quote' }" @click="emit('set-active-right-tab', 'quote')">盘口</button>
+      <button class="tv-btn" :class="{ active: props.activeRightTab === 'watchlist' }" @click="emit('set-active-right-tab', 'watchlist')">观察列表</button>
+      <button class="tv-btn" :class="{ active: props.activeRightTab === 'object_tree' }" @click="emit('set-active-right-tab', 'object_tree')">对象树</button>
+      <button class="tv-btn" @click="emit('toggle-right-sidebar')">{{ props.rightPanelOpen ? '收起' : '展开' }}</button>
+    </div>
   </div>
 </template>

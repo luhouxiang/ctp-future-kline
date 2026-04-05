@@ -35,7 +35,9 @@ const layout = reactive({
 
 const drawings = ref([])
 const watchlist = ref([])
-const activeRightTab = ref('watchlist')
+const activeRightTab = ref('quote')
+const quoteSnapshot = ref({})
+const quoteTicks = ref([])
 const selectedDrawingId = ref('')
 const saveStatus = ref('idle')
 const activeTool = ref('cursor')
@@ -54,7 +56,7 @@ const reversalState = reactive({
   persistVersion: 0,
   selected_id: '',
 })
-const watchlistWidth = ref(280)
+const watchlistWidth = ref(340)
 const minWatchlistWidth = 180
 const maxWatchlistWidth = 520
 let resizeMeta = null
@@ -94,8 +96,8 @@ function normalizeReversalSettingsOff(raw) {
 function applyLightweightDefaults(layoutData = {}) {
   layout.theme = layoutData.theme || 'dark'
   layout.panes.right_watchlist_open = layoutData.panes?.right_watchlist_open ?? true
-  watchlistWidth.value = Number(layoutData.panes?.right_watchlist_width || 280)
-  if (!Number.isFinite(watchlistWidth.value)) watchlistWidth.value = 280
+  watchlistWidth.value = Number(layoutData.panes?.right_watchlist_width || 340)
+  if (!Number.isFinite(watchlistWidth.value)) watchlistWidth.value = 340
   if (watchlistWidth.value < minWatchlistWidth) watchlistWidth.value = minWatchlistWidth
   if (watchlistWidth.value > maxWatchlistWidth) watchlistWidth.value = maxWatchlistWidth
   layout.indicators.ma20 = true
@@ -112,9 +114,14 @@ function applyLightweightDefaults(layoutData = {}) {
   reversalState.results = { lines: [], events: [] }
   reversalState.persistVersion = 0
   reversalState.selected_id = ''
-  activeRightTab.value = 'watchlist'
+  activeRightTab.value = String(layoutData.panes?.right_active_tab || 'quote')
+  if (!['quote', 'watchlist', 'object_tree', 'channel', 'reversal'].includes(activeRightTab.value)) {
+    activeRightTab.value = 'quote'
+  }
   drawings.value = (layoutData.drawings || []).map((d) => normalizeDrawingForSave(d))
   selectedDrawingId.value = ''
+  quoteSnapshot.value = {}
+  quoteTicks.value = []
 }
 
 const keyboardSprite = reactive({
@@ -201,6 +208,7 @@ const layoutPayload = computed(() => ({
   panes: {
     ...layout.panes,
     right_watchlist_width: watchlistWidth.value,
+    right_active_tab: activeRightTab.value,
   },
   indicators: layout.indicators,
   channels: {
@@ -520,6 +528,11 @@ function applyAppModeSnapshot(snapshot) {
   dataMode.value = nextMode
 }
 
+function resetQuotePanel() {
+  quoteSnapshot.value = {}
+  quoteTicks.value = []
+}
+
 function sendChartWS(type, data) {
   if (!chartWS || chartWS.readyState !== WebSocket.OPEN) return false
   chartWS.send(JSON.stringify({ type, data }))
@@ -532,9 +545,12 @@ function syncChartSubscription() {
   if (activeChartSubscriptionKey.value && activeChartSubscriptionKey.value !== nextKey) {
     const [symbol, type, variety, timeframe, data_mode] = activeChartSubscriptionKey.value.split('|')
     sendChartWS('chart_unsubscribe', { symbol, type, variety, timeframe, data_mode })
+    sendChartWS('quote_unsubscribe', { symbol, type, variety, timeframe, data_mode })
     activeChartSubscriptionKey.value = ''
+    resetQuotePanel()
   }
   if (!next || !sendChartWS('chart_subscribe', next)) return
+  sendChartWS('quote_subscribe', next)
   activeChartSubscriptionKey.value = nextKey
 }
 
@@ -557,6 +573,7 @@ function connectChartWS() {
     chartWSReconnectAttempt = 0
     if (activeChartSubscriptionKey.value) {
       activeChartSubscriptionKey.value = ''
+      resetQuotePanel()
       await paneRef.value?.reload?.()
     }
     syncChartSubscription()
@@ -570,6 +587,21 @@ function connectChartWS() {
     }
     if (msg?.type === 'chart_bar_update' && msg.data) {
       paneRef.value?.applyRealtimeBarUpdate?.(msg.data)
+      return
+    }
+    if (msg?.type === 'quote_snapshot_update' && msg.data) {
+      const sub = msg.data?.subscription || {}
+      const key = chartSubscriptionKey({
+        symbol: sub.symbol,
+        type: sub.type,
+        variety: sub.variety,
+        timeframe: sub.timeframe,
+        data_mode: sub.data_mode,
+      })
+      if (key === activeChartSubscriptionKey.value) {
+        quoteSnapshot.value = msg.data?.snapshot || {}
+        quoteTicks.value = Array.isArray(msg.data?.ticks) ? msg.data.ticks : []
+      }
       return
     }
     if (msg?.type === 'app_mode_update' && msg.data) {
@@ -599,8 +631,10 @@ function closeChartWS() {
   const current = currentChartSubscription()
   if (current) {
     sendChartWS('chart_unsubscribe', current)
+    sendChartWS('quote_unsubscribe', current)
   }
   activeChartSubscriptionKey.value = ''
+  resetQuotePanel()
   if (chartWS) {
     try {
       chartWS.close()
@@ -743,6 +777,13 @@ watch(
 )
 
 watch(
+  () => activeRightTab.value,
+  () => {
+    scheduleSave()
+  },
+)
+
+watch(
   () => keyboardSprite.query,
   () => {
     if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
@@ -799,6 +840,8 @@ onUnmounted(() => {
       :variety="scope.variety"
       :timeframe="scope.timeframe"
       :theme="layout.theme"
+      :right-panel-open="layout.panes.right_watchlist_open"
+      :active-right-tab="activeRightTab"
       :save-status="saveStatus"
       :active-tool="activeTool"
       :channel-debug="channelDebug"
@@ -806,6 +849,8 @@ onUnmounted(() => {
       :lightweight-only="lightweightOnly"
       @set-timeframe="onSetTimeframe"
       @set-theme="onSetTheme"
+      @set-active-right-tab="activeRightTab = $event"
+      @toggle-right-sidebar="layout.panes.right_watchlist_open = !layout.panes.right_watchlist_open"
       @set-tool="onSetTool"
       @delete-selected="onDeleteSelected"
       @toggle-channel-debug="onToggleChannelDebug"
@@ -844,30 +889,33 @@ onUnmounted(() => {
         @pointerdown="startResizeWatchlist"
       ></div>
 
-      <WatchlistPanel
-        :open="layout.panes.right_watchlist_open"
-        :items="watchlist"
-        :current="scope.symbol"
-        :drawings="objectTreeRows"
-        :channels="channelState"
-        :reversal="{
-          settings: reversalState.settings,
-          results: reversalState.results,
-          selected_id: reversalState.selected_id || ''
-        }"
-        :lightweight-only="lightweightOnly"
-        :selected-drawing-id="selectedDrawingId"
-        :active-tab="activeRightTab"
-        @toggle="layout.panes.right_watchlist_open = !layout.panes.right_watchlist_open"
-        @select="onSelectWatch"
-        @set-active-tab="activeRightTab = $event"
-        @select-drawing="onSelectDrawing"
-        @toggle-drawing-visible="onToggleDrawingVisible"
-        @delete-drawing="onDeleteDrawingById"
-        @channel-action="onChannelAction"
-        @channel-settings="onChannelSettings"
-        @reversal-action="onReversalAction"
-      />
+      <div class="tv-right-sidebar">
+        <WatchlistPanel
+          :open="layout.panes.right_watchlist_open"
+          :items="watchlist"
+          :current="scope.symbol"
+          :quote-snapshot="quoteSnapshot"
+          :quote-ticks="quoteTicks"
+          :drawings="objectTreeRows"
+          :channels="channelState"
+          :reversal="{
+            settings: reversalState.settings,
+            results: reversalState.results,
+            selected_id: reversalState.selected_id || ''
+          }"
+          :lightweight-only="lightweightOnly"
+          :selected-drawing-id="selectedDrawingId"
+          :active-tab="activeRightTab"
+          @select="onSelectWatch"
+          @set-active-tab="activeRightTab = $event"
+          @select-drawing="onSelectDrawing"
+          @toggle-drawing-visible="onToggleDrawingVisible"
+          @delete-drawing="onDeleteDrawingById"
+          @channel-action="onChannelAction"
+          @channel-settings="onChannelSettings"
+          @reversal-action="onReversalAction"
+        />
+      </div>
     </div>
 
     <KeyboardSprite

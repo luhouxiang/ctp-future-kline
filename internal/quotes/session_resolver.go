@@ -80,7 +80,11 @@ func (r *sessionResolver) Sessions(variety string) ([]sessiontime.Range, error) 
 	if err != nil {
 		return nil, err
 	}
-	logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "db", "session_text", raw, "is_completed", completed)
+	sessionText, err := sessiontime.SessionJSONText(raw)
+	if err != nil {
+		return nil, err
+	}
+	logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "db", "session_text", sessionText, "is_completed", completed)
 	r.mu.Lock()
 	r.cache[variety] = append([]sessiontime.Range(nil), ranges...)
 	r.mu.Unlock()

@@ -57,6 +57,7 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		enableMultiMinute: cfg.IsMultiMinuteEnabled(),
 		flowPath:          cfg.FlowPath,
 		onTick: func(t tickEvent) {
+			PublishReplayChartTick(t)
 			strategy.PublishReplayTick(strategy.TickEvent{
 				InstrumentID:    t.InstrumentID,
 				ExchangeID:      t.ExchangeID,

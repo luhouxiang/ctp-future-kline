@@ -292,3 +292,67 @@ func TestBroadcastEventDoesNotBlockChartBroadcast(t *testing.T) {
 		t.Fatalf("unexpected second message: %#v", chartMsg)
 	}
 }
+
+func TestBroadcastQuoteUpdateOnlyToMatchingSubscribers(t *testing.T) {
+	s := &Server{
+		status:  quotes.NewRuntimeStatusCenter(time.Minute),
+		wsConns: make(map[*websocket.Conn]*wsClient),
+	}
+	ts := httptest.NewServer(http.HandlerFunc(s.handleWS))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	conn1, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial conn1 failed: %v", err)
+	}
+	defer conn1.Close()
+	_, _, _ = conn1.ReadMessage()
+
+	conn2, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial conn2 failed: %v", err)
+	}
+	defer conn2.Close()
+	_, _, _ = conn2.ReadMessage()
+
+	sub := quotes.ChartSubscription{Symbol: "ag2605", Type: "contract", Variety: "ag", Timeframe: "5m", DataMode: "replay"}
+	key := quotes.ChartSubscriptionKey(sub)
+	serverConn1 := findServerConnForClient(t, s, conn1)
+	if serverConn1 == nil {
+		t.Fatal("server conn1 not registered")
+	}
+	s.mu.Lock()
+	s.wsConns[serverConn1].quoteSubs[key] = sub
+	s.mu.Unlock()
+
+	price := 17111.0
+	s.broadcastQuoteUpdate(quotes.ChartQuoteUpdate{
+		Subscription: sub,
+		Source:       "replay",
+		Snapshot: quotes.ChartQuoteSnapshot{
+			Symbol:      "ag2605",
+			Type:        "contract",
+			Variety:     "ag",
+			DataMode:    "replay",
+			LatestPrice: &price,
+			Time:        "21:01:09",
+		},
+	})
+
+	_ = conn1.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = conn2.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	var got1, got2 map[string]any
+	err1 := conn1.ReadJSON(&got1)
+	err2 := conn2.ReadJSON(&got2)
+	received := 0
+	if err1 == nil && got1["type"] == "quote_snapshot_update" {
+		received++
+	}
+	if err2 == nil && got2["type"] == "quote_snapshot_update" {
+		received++
+	}
+	if received != 1 {
+		t.Fatalf("expected exactly one subscribed client to receive quote update, got conn1 err=%v msg=%#v conn2 err=%v msg=%#v", err1, got1, err2, got2)
+	}
+}

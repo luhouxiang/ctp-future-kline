@@ -6,9 +6,11 @@ const props = defineProps({
   open: { type: Boolean, default: true },
   items: { type: Array, default: () => [] },
   current: { type: String, default: '' },
+  quoteSnapshot: { type: Object, default: () => ({}) },
+  quoteTicks: { type: Array, default: () => [] },
   drawings: { type: Array, default: () => [] },
   selectedDrawingId: { type: String, default: '' },
-  activeTab: { type: String, default: 'reversal' },
+  activeTab: { type: String, default: 'quote' },
   channels: { type: Object, default: () => ({ rows: [], selected_id: '', settings: {}, detail: null }) },
   reversal: { type: Object, default: () => ({ settings: {}, results: { lines: [], events: [] }, selected_id: '' }) },
   lightweightOnly: { type: Boolean, default: false },
@@ -175,29 +177,96 @@ function statusLabel(s) {
   if (v === 'rejected') return '已拒绝'
   return '自动'
 }
+
+function displayNumber(v, digits = 0) {
+  const num = Number(v)
+  if (!Number.isFinite(num)) return '-'
+  return digits > 0 ? num.toFixed(digits) : String(num)
+}
+
+function displayPrice(v) {
+  const num = Number(v)
+  if (!Number.isFinite(num)) return '-'
+  return num.toLocaleString('zh-CN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+}
+
+const quoteDisplay = computed(() => {
+  const snapshot = props.quoteSnapshot || {}
+  return {
+    ask: displayPrice(snapshot.ask_price1),
+    bid: displayPrice(snapshot.bid_price1),
+    last: displayPrice(snapshot.latest_price),
+    totalVolume: displayNumber(snapshot.volume),
+    currentVolume: '-',
+    totalAmount: '-',
+    upperLimit: '-',
+    lowerLimit: '-',
+  }
+})
+
+const quoteTicks = computed(() => {
+  const rows = Array.isArray(props.quoteTicks) ? props.quoteTicks : []
+  return rows.map((row) => ({
+    time: row?.time || '-',
+    price: displayPrice(row?.price),
+  }))
+})
 </script>
 
 <template>
   <aside class="tv-watchlist" :class="{ collapsed: !props.open }">
-    <div class="tv-watchlist-head">
-      <div v-if="props.open" class="tv-watchlist-tabs">
-        <button class="tv-watch-tab" :class="{ active: props.activeTab === 'watchlist' }" @click="emit('set-active-tab', 'watchlist')">
-          观察列表
-        </button>
-        <button class="tv-watch-tab" :class="{ active: props.activeTab === 'object_tree' }" @click="emit('set-active-tab', 'object_tree')">
-          对象树
-        </button>
-        <button v-if="!props.lightweightOnly" class="tv-watch-tab" :class="{ active: props.activeTab === 'channel' }" @click="emit('set-active-tab', 'channel')">
-          通道
-        </button>
-        <button v-if="!props.lightweightOnly" class="tv-watch-tab" :class="{ active: props.activeTab === 'reversal' }" @click="emit('set-active-tab', 'reversal')">
-          反转
-        </button>
+    <div v-if="props.open && props.activeTab === 'quote'" class="tv-watchlist-body tv-quote-tab">
+      <div class="tv-quote-card">
+        <div class="tv-quote-strip">
+          <span class="tv-quote-strip-label">卖出</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.ask }}</span>
+        </div>
+        <div class="tv-quote-strip">
+          <span class="tv-quote-strip-label">买入</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.bid }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">现价</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.last }}</span>
+          <span class="tv-quote-strip-label">总量</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.totalVolume }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">现量</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.currentVolume }}</span>
+          <span class="tv-quote-strip-label">总额</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.totalAmount }}</span>
+        </div>
+        <div class="tv-quote-strip tv-quote-strip-split">
+          <span class="tv-quote-strip-label">涨停</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.upperLimit }}</span>
+          <span class="tv-quote-strip-label">跌停</span>
+          <span class="tv-quote-strip-value">{{ quoteDisplay.lowerLimit }}</span>
+        </div>
       </div>
-      <button class="tv-btn" @click="emit('toggle')">{{ props.open ? '收起' : '展开' }}</button>
+
+      <div class="tv-quote-card">
+        <div class="tv-quote-tick-head">
+          <span>时间</span>
+          <span>价格</span>
+          <span>现量</span>
+          <span>仓差</span>
+          <span>性质</span>
+        </div>
+        <div v-if="quoteTicks.length" class="tv-quote-tick-list">
+          <div v-for="(row, idx) in quoteTicks" :key="`${row.time}-${idx}`" class="tv-quote-tick-row">
+            <span>{{ row.time }}</span>
+            <span>{{ row.price }}</span>
+            <span>-</span>
+            <span>-</span>
+            <span>-</span>
+          </div>
+        </div>
+        <div v-else class="tv-object-empty">暂无 tick 明细</div>
+      </div>
     </div>
 
-    <div v-if="props.open && props.activeTab === 'watchlist'" class="tv-watchlist-body">
+    <div v-else-if="props.open && props.activeTab === 'watchlist'" class="tv-watchlist-body">
       <button
         v-for="item in props.items"
         :key="`${item.type}-${item.symbol}`"

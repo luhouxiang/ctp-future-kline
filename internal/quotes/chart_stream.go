@@ -40,6 +40,43 @@ type ChartBarUpdate struct {
 	Bar          ChartBar          `json:"bar"`
 }
 
+type ChartQuoteSnapshot struct {
+	Symbol          string   `json:"symbol"`
+	Type            string   `json:"type"`
+	Variety         string   `json:"variety"`
+	DataMode        string   `json:"data_mode"`
+	LatestPrice     *float64 `json:"latest_price,omitempty"`
+	BidPrice1       *float64 `json:"bid_price1,omitempty"`
+	AskPrice1       *float64 `json:"ask_price1,omitempty"`
+	SettlementPrice *float64 `json:"settlement_price,omitempty"`
+	Volume          *int64   `json:"volume,omitempty"`
+	OpenInterest    *float64 `json:"open_interest,omitempty"`
+	ReferencePrice  *float64 `json:"reference_price,omitempty"`
+	Change          *float64 `json:"change,omitempty"`
+	ChangePct       *float64 `json:"change_pct,omitempty"`
+	Open            *float64 `json:"open,omitempty"`
+	High            *float64 `json:"high,omitempty"`
+	Low             *float64 `json:"low,omitempty"`
+	Close           *float64 `json:"close,omitempty"`
+	Time            string   `json:"time,omitempty"`
+}
+
+type ChartQuoteTickRow struct {
+	Time     string   `json:"time"`
+	Price    *float64 `json:"price,omitempty"`
+	Volume   *int64   `json:"volume,omitempty"`
+	OIDelta  *float64 `json:"oi_delta,omitempty"`
+	Nature   string   `json:"nature,omitempty"`
+	DataMode string   `json:"data_mode,omitempty"`
+}
+
+type ChartQuoteUpdate struct {
+	Subscription ChartSubscription   `json:"subscription"`
+	Source       string              `json:"source"`
+	Snapshot     ChartQuoteSnapshot  `json:"snapshot"`
+	Ticks        []ChartQuoteTickRow `json:"ticks"`
+}
+
 type chartTickSnapshot struct {
 	instrumentID    string
 	exchange        string
@@ -49,8 +86,19 @@ type chartTickSnapshot struct {
 	adjustedTick    time.Time
 	receivedAt      time.Time
 	price           float64
+	volume          int64
 	openInterest    float64
 	settlementPrice float64
+	bidPrice1       float64
+	askPrice1       float64
+	updateTime      string
+	updateMillisec  int
+}
+
+type chartQuoteTickRow struct {
+	at       time.Time
+	price    float64
+	dataMode string
 }
 
 type chartRootState struct {
@@ -61,6 +109,7 @@ type chartRootState struct {
 	history1m      []minuteBar
 	currentPartial *minuteBar
 	latestTicks    map[string]chartTickSnapshot
+	recentTicks    []chartQuoteTickRow
 }
 
 type ChartStream struct {
@@ -70,7 +119,9 @@ type ChartStream struct {
 
 	mu          sync.RWMutex
 	interests   map[string]int
+	quoteKeys   map[string]int
 	subscribers map[chan ChartBarUpdate]struct{}
+	quoteSubs   map[chan ChartQuoteUpdate]struct{}
 	roots       map[string]*chartRootState
 	queueHandle *queuewatch.QueueHandle
 	queueCap    int
@@ -95,7 +146,9 @@ func NewChartStream(dsn string, registry *queuewatch.Registry) (*ChartStream, er
 		clock:           klineclock.NewCalendarResolver(db),
 		sessionResolver: newSessionResolver(db),
 		interests:       make(map[string]int),
+		quoteKeys:       make(map[string]int),
 		subscribers:     make(map[chan ChartBarUpdate]struct{}),
+		quoteSubs:       make(map[chan ChartQuoteUpdate]struct{}),
 		roots:           make(map[string]*chartRootState),
 		queueCap:        queueCfg.ChartSubscriberCapacity,
 	}
@@ -241,6 +294,32 @@ func (s *ChartStream) RemoveInterest(raw ChartSubscription) {
 	s.mu.Unlock()
 }
 
+func (s *ChartStream) AddQuoteInterest(raw ChartSubscription) (ChartSubscription, error) {
+	sub, err := NormalizeChartSubscription(raw)
+	if err != nil {
+		return ChartSubscription{}, err
+	}
+	s.mu.Lock()
+	s.quoteKeys[ChartSubscriptionKey(sub)] += 1
+	s.mu.Unlock()
+	return sub, nil
+}
+
+func (s *ChartStream) RemoveQuoteInterest(raw ChartSubscription) {
+	sub, err := NormalizeChartSubscription(raw)
+	if err != nil {
+		return
+	}
+	key := ChartSubscriptionKey(sub)
+	s.mu.Lock()
+	if n := s.quoteKeys[key]; n > 1 {
+		s.quoteKeys[key] = n - 1
+	} else {
+		delete(s.quoteKeys, key)
+	}
+	s.mu.Unlock()
+}
+
 func (s *ChartStream) Subscribe() (<-chan ChartBarUpdate, func()) {
 	cap := s.queueCap
 	if cap <= 0 {
@@ -263,6 +342,46 @@ func (s *ChartStream) Subscribe() (<-chan ChartBarUpdate, func()) {
 	}
 }
 
+func (s *ChartStream) SubscribeQuotes() (<-chan ChartQuoteUpdate, func()) {
+	cap := s.queueCap
+	if cap <= 0 {
+		cap = queuewatch.DefaultConfig("").ChartSubscriberCapacity
+	}
+	ch := make(chan ChartQuoteUpdate, cap)
+	s.mu.Lock()
+	s.quoteSubs[ch] = struct{}{}
+	s.mu.Unlock()
+	if s.queueHandle != nil {
+		s.queueHandle.ObserveDepth(s.maxSubscriberDepth())
+	}
+	return ch, func() {
+		s.mu.Lock()
+		if _, ok := s.quoteSubs[ch]; ok {
+			delete(s.quoteSubs, ch)
+			close(ch)
+		}
+		s.mu.Unlock()
+	}
+}
+
+func (s *ChartStream) SnapshotQuote(raw ChartSubscription) (ChartQuoteUpdate, bool) {
+	if s == nil {
+		return ChartQuoteUpdate{}, false
+	}
+	sub, err := NormalizeChartSubscription(raw)
+	if err != nil {
+		return ChartQuoteUpdate{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	root := s.roots[rootKeyForSubscription(sub)]
+	if root == nil {
+		return ChartQuoteUpdate{}, false
+	}
+	update, ok := s.buildQuoteUpdateLocked(root, sub, sub.DataMode)
+	return update, ok
+}
+
 func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 	if s == nil {
 		return
@@ -281,17 +400,33 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 		return
 	}
 	updates := make([]ChartBarUpdate, 0, 8)
+	quoteUpdates := make([]ChartQuoteUpdate, 0, 2)
 	dataMode := chartDataModeLabel(replay)
 	s.mu.Lock()
 	contractFrames := s.interestedTimeframesLocked(instrumentID, "contract", variety, dataMode)
-	if len(contractFrames) > 0 {
+	contractQuoteFrames := s.interestedQuoteTimeframesLocked(instrumentID, "contract", variety, dataMode)
+	if len(contractFrames) > 0 || len(contractQuoteFrames) > 0 {
 		root := s.ensureRootLocked(instrumentID, "contract", variety)
 		root.exchange = strings.TrimSpace(ev.ExchangeID)
-		s.updateContractPartialLocked(root, ev, minuteTime, adjustedTime)
-		updates = append(updates, s.buildPartialUpdatesLocked(root, contractFrames, sessions, replay)...)
+		s.updateContractPartialLocked(root, ev, minuteTime, adjustedTime, dataMode)
+		if len(contractFrames) > 0 {
+			updates = append(updates, s.buildPartialUpdatesLocked(root, contractFrames, sessions, replay)...)
+		}
+		for _, timeframe := range contractQuoteFrames {
+			if quoteUpdate, ok := s.buildQuoteUpdateLocked(root, ChartSubscription{
+				Symbol:    instrumentID,
+				Type:      "contract",
+				Variety:   variety,
+				Timeframe: timeframe,
+				DataMode:  dataMode,
+			}, dataMode); ok {
+				quoteUpdates = append(quoteUpdates, quoteUpdate)
+			}
+		}
 	}
 	l9Frames := s.interestedTimeframesLocked(variety+"l9", "l9", variety, dataMode)
-	if len(l9Frames) > 0 {
+	l9QuoteFrames := s.interestedQuoteTimeframesLocked(variety+"l9", "l9", variety, dataMode)
+	if len(l9Frames) > 0 || len(l9QuoteFrames) > 0 {
 		root := s.ensureRootLocked(variety+"l9", "l9", variety)
 		if root.latestTicks == nil {
 			root.latestTicks = make(map[string]chartTickSnapshot)
@@ -305,17 +440,36 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 			adjustedTick:    adjustedTickTime,
 			receivedAt:      ev.ReceivedAt,
 			price:           ev.LastPrice,
+			volume:          int64(ev.Volume),
 			openInterest:    ev.OpenInterest,
 			settlementPrice: ev.SettlementPrice,
+			bidPrice1:       ev.BidPrice1,
+			askPrice1:       ev.AskPrice1,
+			updateTime:      strings.TrimSpace(ev.UpdateTime),
+			updateMillisec:  ev.UpdateMillisec,
 		}
 		s.updateL9PartialLocked(root, minuteTime, adjustedTime)
-		updates = append(updates, s.buildPartialUpdatesLocked(root, l9Frames, sessions, replay)...)
+		if len(l9Frames) > 0 {
+			updates = append(updates, s.buildPartialUpdatesLocked(root, l9Frames, sessions, replay)...)
+		}
+		for _, timeframe := range l9QuoteFrames {
+			if quoteUpdate, ok := s.buildQuoteUpdateLocked(root, ChartSubscription{
+				Symbol:    variety + "l9",
+				Type:      "l9",
+				Variety:   variety,
+				Timeframe: timeframe,
+				DataMode:  dataMode,
+			}, dataMode); ok {
+				quoteUpdates = append(quoteUpdates, quoteUpdate)
+			}
+		}
 	}
 	s.mu.Unlock()
 	for _, update := range updates {
 		chartPartialKeyRateProbe.Inc(ChartSubscriptionKey(update.Subscription))
 	}
 	s.broadcast(updates)
+	s.broadcastQuotes(quoteUpdates)
 }
 
 func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
@@ -457,7 +611,50 @@ func (s *ChartStream) broadcast(updates []ChartBarUpdate) {
 	}
 }
 
+func (s *ChartStream) broadcastQuotes(updates []ChartQuoteUpdate) {
+	if len(updates) == 0 {
+		return
+	}
+	s.mu.RLock()
+	subs := make([]chan ChartQuoteUpdate, 0, len(s.quoteSubs))
+	for ch := range s.quoteSubs {
+		subs = append(subs, ch)
+	}
+	s.mu.RUnlock()
+	for _, update := range updates {
+		for _, ch := range subs {
+			if dropped := enqueueChartQuoteLatest(ch, update); dropped > 0 && s.queueHandle != nil {
+				s.queueHandle.MarkDropped(s.maxSubscriberDepth())
+			} else if s.queueHandle != nil {
+				s.queueHandle.MarkEnqueued(s.maxSubscriberDepth())
+			}
+		}
+	}
+	if s.queueHandle != nil {
+		s.queueHandle.ObserveDepth(s.maxSubscriberDepth())
+	}
+}
+
 func enqueueChartUpdateLatest(ch chan ChartBarUpdate, update ChartBarUpdate) int {
+	select {
+	case ch <- update:
+		return 0
+	default:
+	}
+	dropped := 0
+	select {
+	case <-ch:
+		dropped = 1
+	default:
+	}
+	select {
+	case ch <- update:
+	default:
+	}
+	return dropped
+}
+
+func enqueueChartQuoteLatest(ch chan ChartQuoteUpdate, update ChartQuoteUpdate) int {
 	select {
 	case ch <- update:
 		return 0
@@ -487,6 +684,17 @@ func (s *ChartStream) interestedTimeframesLocked(symbol string, kind string, var
 	return out
 }
 
+func (s *ChartStream) interestedQuoteTimeframesLocked(symbol string, kind string, variety string, dataMode string) []string {
+	out := make([]string, 0, 6)
+	for _, tf := range []string{"1m", "5m", "15m", "30m", "1h", "1d"} {
+		key := ChartSubscriptionKey(ChartSubscription{Symbol: symbol, Type: kind, Variety: variety, Timeframe: tf, DataMode: dataMode})
+		if s.quoteKeys[key] > 0 {
+			out = append(out, tf)
+		}
+	}
+	return out
+}
+
 func (s *ChartStream) ensureRootLocked(symbol string, kind string, variety string) *chartRootState {
 	key := kind + "|" + symbol + "|" + variety
 	root := s.roots[key]
@@ -502,8 +710,33 @@ func (s *ChartStream) ensureRootLocked(symbol string, kind string, variety strin
 	return root
 }
 
-func (s *ChartStream) updateContractPartialLocked(root *chartRootState, ev tickEvent, minuteTime time.Time, adjustedTime time.Time) {
+func (s *ChartStream) updateContractPartialLocked(root *chartRootState, ev tickEvent, minuteTime time.Time, adjustedTime time.Time, dataMode string) {
 	price := ev.LastPrice
+	root.pushRecentTickLocked(chartQuoteTickRow{
+		at:       combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
+		price:    price,
+		dataMode: dataMode,
+	})
+	if root.latestTicks == nil {
+		root.latestTicks = make(map[string]chartTickSnapshot)
+	}
+	root.latestTicks[root.symbol] = chartTickSnapshot{
+		instrumentID:    root.symbol,
+		exchange:        strings.TrimSpace(ev.ExchangeID),
+		variety:         root.variety,
+		minuteTime:      minuteTime,
+		adjustedTime:    adjustedTime,
+		adjustedTick:    combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
+		receivedAt:      ev.ReceivedAt,
+		price:           price,
+		volume:          int64(ev.Volume),
+		openInterest:    ev.OpenInterest,
+		settlementPrice: ev.SettlementPrice,
+		bidPrice1:       ev.BidPrice1,
+		askPrice1:       ev.AskPrice1,
+		updateTime:      strings.TrimSpace(ev.UpdateTime),
+		updateMillisec:  ev.UpdateMillisec,
+	}
 	if root.currentPartial == nil || !root.currentPartial.MinuteTime.Equal(minuteTime) {
 		root.currentPartial = &minuteBar{
 			Variety:          root.variety,
@@ -533,6 +766,17 @@ func (s *ChartStream) updateContractPartialLocked(root *chartRootState, ev tickE
 	root.currentPartial.OpenInterest = ev.OpenInterest
 	root.currentPartial.SettlementPrice = ev.SettlementPrice
 	root.currentPartial.SourceReceivedAt = ev.ReceivedAt
+}
+
+func (root *chartRootState) pushRecentTickLocked(row chartQuoteTickRow) {
+	const recentQuoteTickLimit = 32
+	if root == nil || row.at.IsZero() {
+		return
+	}
+	root.recentTicks = append([]chartQuoteTickRow{row}, root.recentTicks...)
+	if len(root.recentTicks) > recentQuoteTickLimit {
+		root.recentTicks = root.recentTicks[:recentQuoteTickLimit]
+	}
 }
 
 func (s *ChartStream) updateL9PartialLocked(root *chartRootState, minuteTime time.Time, adjustedTime time.Time) {
@@ -657,6 +901,167 @@ func buildPartialBarForTimeframe(root *chartRootState, timeframe string, session
 		Volume:           last.Volume,
 		OpenInterest:     last.OpenInterest,
 	}, true
+}
+
+func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubscription, dataMode string) (ChartQuoteUpdate, bool) {
+	if root == nil {
+		return ChartQuoteUpdate{}, false
+	}
+	snapshot := ChartQuoteSnapshot{
+		Symbol:   root.symbol,
+		Type:     root.kind,
+		Variety:  root.variety,
+		DataMode: dataMode,
+	}
+	var ticks []ChartQuoteTickRow
+	if root.kind == "contract" {
+		tick, ok := root.latestTicks[root.symbol]
+		if !ok {
+			return ChartQuoteUpdate{}, false
+		}
+		snapshot.LatestPrice = floatPtr(tick.price)
+		if tick.bidPrice1 > 0 {
+			snapshot.BidPrice1 = floatPtr(tick.bidPrice1)
+		}
+		if tick.askPrice1 > 0 {
+			snapshot.AskPrice1 = floatPtr(tick.askPrice1)
+		}
+		if tick.settlementPrice > 0 {
+			snapshot.SettlementPrice = floatPtr(tick.settlementPrice)
+		}
+		snapshot.OpenInterest = floatPtr(tick.openInterest)
+		snapshot.Time = formatQuoteTickTime(tick.adjustedTick, tick.updateTime, tick.updateMillisec)
+	} else if tick, ok := latestL9Tick(root); ok {
+		snapshot.LatestPrice = floatPtr(tick.price)
+		if tick.settlementPrice > 0 {
+			snapshot.SettlementPrice = floatPtr(tick.settlementPrice)
+		}
+		snapshot.OpenInterest = floatPtr(tick.openInterest)
+		snapshot.Time = formatQuoteTickTime(tick.adjustedTick, tick.updateTime, tick.updateMillisec)
+	} else if root.currentPartial == nil && len(root.history1m) == 0 {
+		return ChartQuoteUpdate{}, false
+	}
+	bar := latestQuoteBar(root)
+	if bar != nil {
+		snapshot.Open = floatPtr(bar.Open)
+		snapshot.High = floatPtr(bar.High)
+		snapshot.Low = floatPtr(bar.Low)
+		snapshot.Close = floatPtr(bar.Close)
+		snapshot.Volume = int64Ptr(bar.Volume)
+		if snapshot.OpenInterest == nil {
+			snapshot.OpenInterest = floatPtr(bar.OpenInterest)
+		}
+		if snapshot.SettlementPrice == nil && bar.SettlementPrice > 0 {
+			snapshot.SettlementPrice = floatPtr(bar.SettlementPrice)
+		}
+		if snapshot.LatestPrice == nil {
+			snapshot.LatestPrice = floatPtr(bar.Close)
+		}
+		if snapshot.Time == "" {
+			snapshot.Time = formatQuoteBarTime(*bar)
+		}
+	}
+	if root.kind == "contract" {
+		ticks = make([]ChartQuoteTickRow, 0, len(root.recentTicks))
+		for _, item := range root.recentTicks {
+			ticks = append(ticks, ChartQuoteTickRow{
+				Time:     item.at.Format("15:04:05"),
+				Price:    floatPtr(item.price),
+				DataMode: item.dataMode,
+			})
+		}
+	}
+	return ChartQuoteUpdate{
+		Subscription: sub,
+		Source:       dataMode,
+		Snapshot:     snapshot,
+		Ticks:        ticks,
+	}, true
+}
+
+func latestQuoteBar(root *chartRootState) *minuteBar {
+	if root == nil {
+		return nil
+	}
+	if root.currentPartial != nil {
+		return root.currentPartial
+	}
+	if len(root.history1m) == 0 {
+		return nil
+	}
+	return &root.history1m[len(root.history1m)-1]
+}
+
+func latestL9Tick(root *chartRootState) (chartTickSnapshot, bool) {
+	if root == nil {
+		return chartTickSnapshot{}, false
+	}
+	var out chartTickSnapshot
+	var ok bool
+	for _, item := range root.latestTicks {
+		if !ok || item.adjustedTick.After(out.adjustedTick) {
+			out = item
+			ok = true
+		}
+	}
+	return out, ok
+}
+
+func combineTickTimestamp(adjustedTime time.Time, updateTime string, updateMillisec int) time.Time {
+	if adjustedTime.IsZero() {
+		return time.Time{}
+	}
+	parts := strings.Split(strings.TrimSpace(updateTime), ":")
+	if len(parts) != 3 {
+		return adjustedTime
+	}
+	hour := parseIntOrZero(parts[0])
+	minute := parseIntOrZero(parts[1])
+	second := parseIntOrZero(parts[2])
+	millisec := updateMillisec
+	if millisec < 0 {
+		millisec = 0
+	}
+	return time.Date(adjustedTime.Year(), adjustedTime.Month(), adjustedTime.Day(), hour, minute, second, millisec*int(time.Millisecond), adjustedTime.Location())
+}
+
+func parseIntOrZero(raw string) int {
+	var out int
+	for _, ch := range strings.TrimSpace(raw) {
+		if ch < '0' || ch > '9' {
+			return 0
+		}
+		out = out*10 + int(ch-'0')
+	}
+	return out
+}
+
+func formatQuoteTickTime(adjustedTick time.Time, updateTime string, updateMillisec int) string {
+	if !adjustedTick.IsZero() {
+		return adjustedTick.Format("15:04:05")
+	}
+	if strings.TrimSpace(updateTime) != "" {
+		return strings.TrimSpace(updateTime)
+	}
+	return "-"
+}
+
+func formatQuoteBarTime(bar minuteBar) string {
+	return chooseAdjustedTime(bar).Format("15:04:05")
+}
+
+func floatPtr(v float64) *float64 {
+	out := v
+	return &out
+}
+
+func int64Ptr(v int64) *int64 {
+	out := v
+	return &out
+}
+
+func rootKeyForSubscription(sub ChartSubscription) string {
+	return strings.ToLower(strings.TrimSpace(sub.Type)) + "|" + strings.ToLower(strings.TrimSpace(sub.Symbol)) + "|" + strings.ToLower(strings.TrimSpace(sub.Variety))
 }
 
 func buildDailyPartial(root *chartRootState) (minuteBar, bool) {
@@ -791,6 +1196,11 @@ func (s *ChartStream) maxSubscriberDepth() int {
 	defer s.mu.RUnlock()
 	maxDepth := 0
 	for ch := range s.subscribers {
+		if depth := len(ch); depth > maxDepth {
+			maxDepth = depth
+		}
+	}
+	for ch := range s.quoteSubs {
 		if depth := len(ch); depth > maxDepth {
 			maxDepth = depth
 		}

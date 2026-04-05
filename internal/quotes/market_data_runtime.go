@@ -502,6 +502,8 @@ func (r *marketDataRuntime) onLiveTick(in tickInputData) error {
 			SettlementPrice: in.SettlementPrice,
 			BidPrice1:       in.BidPrice1,
 			AskPrice1:       in.AskPrice1,
+			BidVolume1:      in.BidVolume1,
+			AskVolume1:      in.AskVolume1,
 		},
 	})
 }

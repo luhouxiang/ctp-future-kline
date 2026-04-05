@@ -146,7 +146,7 @@ func (w *shardFileWriter) append(ev tickEvent) error {
 		actionDay = ev.RawActionDay
 	}
 
-	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%d\n",
+	line := fmt.Sprintf("%s,%s,%s,%s,%s,%s,%.8f,%d,%.8f,%.8f,%.8f,%.8f,%d,%d,%d\n",
 		ev.ReceivedAt.Format("2006-01-02 15:04:05.000"),
 		ev.InstrumentID,
 		ev.ExchangeID,
@@ -160,6 +160,8 @@ func (w *shardFileWriter) append(ev tickEvent) error {
 		ev.BidPrice1,
 		ev.AskPrice1,
 		ev.UpdateMillisec,
+		ev.BidVolume1,
+		ev.AskVolume1,
 	)
 	if _, err := f.writer.WriteString(line); err != nil {
 		return err

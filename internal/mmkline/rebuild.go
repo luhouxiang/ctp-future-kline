@@ -241,7 +241,11 @@ func loadCompletedTradingSessions(db *sql.DB, variety string) ([]klineagg.Sessio
 		logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "default", "reason", "not_completed", "session_text", sessiontime.DefaultSessionText)
 		return defaultKlineAggSessions(), nil
 	}
-	logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "db", "session_text", raw, "is_completed", completed)
+	sessionText, err := sessiontime.SessionJSONText(raw)
+	if err != nil {
+		return nil, err
+	}
+	logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "db", "session_text", sessionText, "is_completed", completed)
 	return parseSessionJSON(raw)
 }
 

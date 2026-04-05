@@ -92,7 +92,8 @@ type Server struct {
 }
 
 type wsClient struct {
-	subs map[string]quotes.ChartSubscription
+	subs      map[string]quotes.ChartSubscription
+	quoteSubs map[string]quotes.ChartSubscription
 }
 
 type runtimeStarter interface {
@@ -254,6 +255,7 @@ func (s *Server) Run() error {
 	}
 	if s.chartStream != nil {
 		go s.forwardChartEvents()
+		go s.forwardQuoteEvents()
 	}
 	logger.Info("web server listening", "addr", s.cfg.Web.ListenAddr)
 	return http.ListenAndServe(s.cfg.Web.ListenAddr, mux)
@@ -728,7 +730,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	}
 
 	s.mu.Lock()
-	s.wsConns[conn] = &wsClient{subs: make(map[string]quotes.ChartSubscription)}
+	s.wsConns[conn] = &wsClient{subs: make(map[string]quotes.ChartSubscription), quoteSubs: make(map[string]quotes.ChartSubscription)}
 	s.mu.Unlock()
 
 	s.writeConnJSON(conn, map[string]any{
@@ -763,11 +765,16 @@ func (s *Server) writeConnJSONLocked(conn *websocket.Conn, payload any) error {
 
 func (s *Server) removeWSConn(conn *websocket.Conn) {
 	var subs []quotes.ChartSubscription
+	var quoteSubs []quotes.ChartSubscription
 	s.mu.Lock()
 	if client, ok := s.wsConns[conn]; ok && client != nil {
 		subs = make([]quotes.ChartSubscription, 0, len(client.subs))
 		for _, sub := range client.subs {
 			subs = append(subs, sub)
+		}
+		quoteSubs = make([]quotes.ChartSubscription, 0, len(client.quoteSubs))
+		for _, sub := range client.quoteSubs {
+			quoteSubs = append(quoteSubs, sub)
 		}
 	}
 	delete(s.wsConns, conn)
@@ -775,6 +782,9 @@ func (s *Server) removeWSConn(conn *websocket.Conn) {
 	if s.chartStream != nil {
 		for _, sub := range subs {
 			s.chartStream.RemoveInterest(sub)
+		}
+		for _, sub := range quoteSubs {
+			s.chartStream.RemoveQuoteInterest(sub)
 		}
 	}
 }
@@ -792,6 +802,10 @@ func (s *Server) handleWSMessage(conn *websocket.Conn, raw []byte) {
 		s.handleChartSubscribe(conn, msg.Data)
 	case "chart_unsubscribe":
 		s.handleChartUnsubscribe(conn, msg.Data)
+	case "quote_subscribe":
+		s.handleQuoteSubscribe(conn, msg.Data)
+	case "quote_unsubscribe":
+		s.handleQuoteUnsubscribe(conn, msg.Data)
 	case "chart_ping":
 		_ = s.writeConnJSON(conn, map[string]any{"type": "chart_pong", "data": map[string]any{}})
 	}
@@ -817,7 +831,7 @@ func (s *Server) handleChartSubscribe(conn *websocket.Conn, raw json.RawMessage)
 	s.mu.Lock()
 	client := s.wsConns[conn]
 	if client == nil {
-		client = &wsClient{subs: make(map[string]quotes.ChartSubscription)}
+		client = &wsClient{subs: make(map[string]quotes.ChartSubscription), quoteSubs: make(map[string]quotes.ChartSubscription)}
 		s.wsConns[conn] = client
 	}
 	if _, exists := client.subs[key]; !exists {
@@ -835,6 +849,10 @@ func (s *Server) handleChartSubscribe(conn *websocket.Conn, raw json.RawMessage)
 	)
 	if !added {
 		s.chartStream.RemoveInterest(sub)
+		return
+	}
+	if update, ok := s.chartStream.SnapshotQuote(sub); ok {
+		s.broadcastQuoteUpdate(update)
 	}
 }
 
@@ -867,6 +885,83 @@ func (s *Server) handleChartUnsubscribe(conn *websocket.Conn, raw json.RawMessag
 	)
 	if removed && s.chartStream != nil {
 		s.chartStream.RemoveInterest(sub)
+	}
+}
+
+func (s *Server) handleQuoteSubscribe(conn *websocket.Conn, raw json.RawMessage) {
+	var req quotes.ChartSubscription
+	if err := json.Unmarshal(raw, &req); err != nil {
+		s.writeChartSubscriptionError(conn, req, "invalid subscribe payload")
+		return
+	}
+	if s.chartStream == nil {
+		s.writeChartSubscriptionError(conn, req, "chart stream is not available")
+		return
+	}
+	sub, err := s.chartStream.AddQuoteInterest(req)
+	if err != nil {
+		s.writeChartSubscriptionError(conn, req, err.Error())
+		return
+	}
+	key := quotes.ChartSubscriptionKey(sub)
+	var added bool
+	s.mu.Lock()
+	client := s.wsConns[conn]
+	if client == nil {
+		client = &wsClient{subs: make(map[string]quotes.ChartSubscription), quoteSubs: make(map[string]quotes.ChartSubscription)}
+		s.wsConns[conn] = client
+	}
+	if _, exists := client.quoteSubs[key]; !exists {
+		client.quoteSubs[key] = sub
+		added = true
+	}
+	s.mu.Unlock()
+	logger.Info("quote subscribe",
+		"subscription_key", key,
+		"added", added,
+		"symbol", sub.Symbol,
+		"type", sub.Type,
+		"variety", sub.Variety,
+		"timeframe", sub.Timeframe,
+	)
+	if !added {
+		s.chartStream.RemoveQuoteInterest(sub)
+		return
+	}
+	if update, ok := s.chartStream.SnapshotQuote(sub); ok {
+		s.broadcastQuoteUpdate(update)
+	}
+}
+
+func (s *Server) handleQuoteUnsubscribe(conn *websocket.Conn, raw json.RawMessage) {
+	var req quotes.ChartSubscription
+	if err := json.Unmarshal(raw, &req); err != nil {
+		return
+	}
+	sub, err := quotes.NormalizeChartSubscription(req)
+	if err != nil {
+		return
+	}
+	key := quotes.ChartSubscriptionKey(sub)
+	var removed bool
+	s.mu.Lock()
+	if client := s.wsConns[conn]; client != nil {
+		if _, exists := client.quoteSubs[key]; exists {
+			delete(client.quoteSubs, key)
+			removed = true
+		}
+	}
+	s.mu.Unlock()
+	logger.Info("quote unsubscribe",
+		"subscription_key", key,
+		"removed", removed,
+		"symbol", sub.Symbol,
+		"type", sub.Type,
+		"variety", sub.Variety,
+		"timeframe", sub.Timeframe,
+	)
+	if removed && s.chartStream != nil {
+		s.chartStream.RemoveQuoteInterest(sub)
 	}
 }
 
@@ -2058,6 +2153,17 @@ func (s *Server) forwardChartEvents() {
 	}
 }
 
+func (s *Server) forwardQuoteEvents() {
+	if s.chartStream == nil {
+		return
+	}
+	ch, cancel := s.chartStream.SubscribeQuotes()
+	defer cancel()
+	for update := range ch {
+		s.broadcastQuoteUpdate(update)
+	}
+}
+
 func (s *Server) broadcastStatusTicker() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
@@ -2134,6 +2240,31 @@ func (s *Server) broadcastChartUpdate(update quotes.ChartBarUpdate) {
 	}
 	s.mu.Unlock()
 	broadcastChartUpdateKeyRateProbe.Add(key, len(conns))
+	for _, conn := range conns {
+		if err := s.writeConnJSON(conn, payload); err != nil {
+			s.removeWSConn(conn)
+			_ = conn.Close()
+		}
+	}
+}
+
+func (s *Server) broadcastQuoteUpdate(update quotes.ChartQuoteUpdate) {
+	payload := map[string]any{
+		"type": "quote_snapshot_update",
+		"data": update,
+	}
+	key := quotes.ChartSubscriptionKey(update.Subscription)
+	s.mu.Lock()
+	conns := make([]*websocket.Conn, 0, len(s.wsConns))
+	for conn, client := range s.wsConns {
+		if client == nil {
+			continue
+		}
+		if _, ok := client.quoteSubs[key]; ok {
+			conns = append(conns, conn)
+		}
+	}
+	s.mu.Unlock()
 	for _, conn := range conns {
 		if err := s.writeConnJSON(conn, payload); err != nil {
 			s.removeWSConn(conn)

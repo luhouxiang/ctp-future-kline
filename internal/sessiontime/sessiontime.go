@@ -93,6 +93,23 @@ func DecodeSessionJSON(raw string) ([]Range, error) {
 	return SortRangesCopy(out), nil
 }
 
+// SessionJSONText 把 trading_sessions.session_json 转成便于日志阅读的文本形式，
+// 例如 [{"start":"21:00","end":"02:30"}] -> "21:00-02:30"。
+func SessionJSONText(raw string) (string, error) {
+	if strings.TrimSpace(raw) == "" {
+		return "", nil
+	}
+	var src []jsonRange
+	if err := json.Unmarshal([]byte(raw), &src); err != nil {
+		return "", fmt.Errorf("decode session_json failed: %w", err)
+	}
+	parts := make([]string, 0, len(src))
+	for _, r := range src {
+		parts = append(parts, strings.TrimSpace(r.Start)+"-"+strings.TrimSpace(r.End))
+	}
+	return strings.Join(parts, ","), nil
+}
+
 func ParseSessionText(raw string) ([]Range, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
