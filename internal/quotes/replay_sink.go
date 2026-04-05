@@ -4,6 +4,7 @@ package quotes
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -12,6 +13,7 @@ import (
 
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/config"
+	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/replay"
 	"ctp-future-kline/internal/strategy"
@@ -24,6 +26,7 @@ import (
 type ReplaySink struct {
 	mu               sync.Mutex
 	store            *klineStore
+	metaDB           *sql.DB
 	spi              *mdSpi
 	seenFirstConsume map[string]struct{}
 }
@@ -38,11 +41,16 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 	if err != nil {
 		return nil, err
 	}
+	metaDB, err := openSharedMetaDB(cfg)
+	if err != nil {
+		_ = store.Close()
+		return nil, err
+	}
 	var l9Calc *l9AsyncCalculator
 	if cfg.IsL9AsyncEnabled() {
-		l9Calc = newL9AsyncCalculator(store, status, true, 1, nil)
+		l9Calc = newL9AsyncCalculator(store, metaDB, status, true, 1, nil)
 	}
-	spi := newMdSpiWithStatusAndOptions(store, l9Calc, status, mdSpiOptions{
+	spi := newMdSpiWithStatusAndOptions(store, metaDB, l9Calc, status, mdSpiOptions{
 		tickDedupWindow:   time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:    time.Duration(cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks:  cfg.DriftResumeTicks,
@@ -91,9 +99,51 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 	})
 	return &ReplaySink{
 		store:            store,
+		metaDB:           metaDB,
 		spi:              spi,
 		seenFirstConsume: make(map[string]struct{}),
 	}, nil
+}
+
+func (s *ReplaySink) PrepareReplayWindow(req replay.StartRequest) error {
+	if s == nil || s.store == nil {
+		return nil
+	}
+	var start *time.Time
+	var end *time.Time
+	if strings.TrimSpace(req.TickDir) != "" {
+		window, err := replay.InspectTickCSVWindow(req)
+		if err != nil {
+			return fmt.Errorf("inspect replay tick window failed: %w", err)
+		}
+		start = window.StartTime
+		end = window.EndTime
+		logger.Info(
+			"replay tick window inspected",
+			"tick_dir", req.TickDir,
+			"event_count", window.EventCount,
+			"file_count", window.FileCount,
+			"instrument_count", window.InstrumentCount,
+			"start_time", formatReplayWindowTime(start),
+			"end_time", formatReplayWindowTime(end),
+		)
+	} else {
+		start = req.StartTime
+		end = req.EndTime
+	}
+	if start == nil || end == nil || start.IsZero() || end.IsZero() || end.Before(*start) {
+		logger.Info("replay window cleanup skipped", "reason", "time_range_unavailable")
+		return nil
+	}
+	if err := s.store.DeleteRange(*start, *end); err != nil {
+		return err
+	}
+	logger.Info(
+		"replay window cleanup completed",
+		"start_time", start.Format(time.RFC3339Nano),
+		"end_time", end.Format(time.RFC3339Nano),
+	)
+	return nil
 }
 
 // ConsumeBusEvent 接收 replay service 分发来的 tick 事件。
@@ -160,7 +210,13 @@ func (s *ReplaySink) OnTaskFinished(_ context.Context, snap replay.TaskSnapshot)
 
 // Close 关闭回放模式专用的底层 store。
 func (s *ReplaySink) Close() error {
-	if s == nil || s.store == nil {
+	if s == nil {
+		return nil
+	}
+	if s.metaDB != nil && s.store != nil && s.metaDB != s.store.DB() {
+		_ = s.metaDB.Close()
+	}
+	if s.store == nil {
 		return nil
 	}
 	return s.store.Close()
@@ -173,6 +229,29 @@ func resolveStoreDSN(cfg config.CTPConfig) (string, error) {
 		return "", fmt.Errorf("ctp.db dsn is required")
 	}
 	return dsn, nil
+}
+
+func resolveSharedMetaDSN(cfg config.CTPConfig) (string, error) {
+	dsn := strings.TrimSpace(cfg.SharedMetaDSN)
+	if dsn == "" {
+		dsn = strings.TrimSpace(cfg.DBDSN)
+	}
+	if dsn == "" {
+		return "", fmt.Errorf("ctp.shared meta dsn is required")
+	}
+	return dsn, nil
+}
+
+func openSharedMetaDB(cfg config.CTPConfig) (*sql.DB, error) {
+	dsn, err := resolveSharedMetaDSN(cfg)
+	if err != nil {
+		return nil, err
+	}
+	db, err := dbx.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open shared meta db failed: %w", err)
+	}
+	return db, nil
 }
 
 func (s *ReplaySink) logFirstConsume(taskID string, tick tickEvent) {
@@ -206,4 +285,11 @@ func (s *ReplaySink) resetReplayStageLogState() {
 	if spi != nil {
 		spi.ResetReplayStageLogState()
 	}
+}
+
+func formatReplayWindowTime(ts *time.Time) string {
+	if ts == nil || ts.IsZero() {
+		return ""
+	}
+	return ts.Format(time.RFC3339Nano)
 }

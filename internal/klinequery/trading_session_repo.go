@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
 )
 
@@ -47,7 +48,7 @@ type tradingSessionRecord struct {
 
 func loadTradingSession(db *sql.DB, variety string) (tradingSessionRecord, bool, error) {
 	v := strings.ToLower(strings.TrimSpace(variety))
-	logger.Info("kline pipeline", "stage", "session_lookup", "variety", v)
+	logger.Debug("kline pipeline", "stage", "session_lookup", "variety", v)
 	var rec tradingSessionRecord
 	err := db.QueryRow(`
 SELECT variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at
@@ -63,29 +64,22 @@ FROM trading_sessions WHERE variety=?`, v).Scan(
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			logger.Info("kline pipeline", "stage", "session_lookup", "variety", v, "found", false, "is_completed", false)
+			logger.Debug("kline pipeline", "stage", "session_lookup", "variety", v, "found", false, "is_completed", false)
 			return tradingSessionRecord{}, false, nil
 		}
 		return tradingSessionRecord{}, false, fmt.Errorf("query trading session failed: %w", err)
 	}
-	logger.Info("kline pipeline", "stage", "session_lookup", "variety", v, "found", true, "is_completed", rec.IsCompleted, "match_ratio", rec.MatchRatio, "updated_at", rec.UpdatedAt.Format("2006-01-02 15:04:05"))
+	logger.Debug("kline pipeline", "stage", "session_lookup", "variety", v, "found", true, "is_completed", rec.IsCompleted, "match_ratio", rec.MatchRatio, "updated_at", rec.UpdatedAt.Format("2006-01-02 15:04:05"))
 	return rec, true, nil
 }
 
 func upsertTradingSession(db *sql.DB, rec tradingSessionRecord) error {
 	v := strings.ToLower(strings.TrimSpace(rec.Variety))
-	_, err := db.Exec(`
-INSERT INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
+	sqlText := `
+REPLACE INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
 VALUES(?,?,?,?,?,?,?,?)
-ON DUPLICATE KEY UPDATE
-  session_text=VALUES(session_text),
-  session_json=VALUES(session_json),
-  is_completed=VALUES(is_completed),
-  sample_trade_date=VALUES(sample_trade_date),
-  validated_trade_date=VALUES(validated_trade_date),
-  match_ratio=VALUES(match_ratio),
-  updated_at=VALUES(updated_at)
-`,
+`
+	args := []any{
 		v,
 		rec.SessionText,
 		rec.SessionJSON,
@@ -94,10 +88,26 @@ ON DUPLICATE KEY UPDATE
 		nullTimeToDate(rec.ValidatedDate),
 		rec.MatchRatio,
 		rec.UpdatedAt,
+	}
+	dbName, dbErr := dbx.CurrentDatabase(db)
+	if dbErr != nil {
+		dbName = "<unknown>"
+	}
+	logger.Warn("trading_sessions exec",
+		"database", dbName,
+		"table", "trading_sessions",
+		"sql", strings.TrimSpace(sqlText),
+		"args", fmt.Sprintf("%#v", args),
 	)
+	_, err := db.Exec(sqlText, args...)
 	if err != nil {
 		return fmt.Errorf("upsert trading session failed: %w", err)
 	}
+	logger.Warn("trading_sessions exec success",
+		"database", dbName,
+		"table", "trading_sessions",
+		"variety", v,
+	)
 	logger.Info("kline pipeline", "stage", "session_upsert", "variety", v, "is_completed", rec.IsCompleted, "match_ratio", rec.MatchRatio, "session_text", rec.SessionText)
 	return nil
 }

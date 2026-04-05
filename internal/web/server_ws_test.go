@@ -12,6 +12,23 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+func findServerConnForClient(t *testing.T, s *Server, client *websocket.Conn) *websocket.Conn {
+	t.Helper()
+	clientLocal := client.LocalAddr().String()
+	clientRemote := client.RemoteAddr().String()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for serverConn := range s.wsConns {
+		if serverConn == nil {
+			continue
+		}
+		if serverConn.RemoteAddr().String() == clientLocal && serverConn.LocalAddr().String() == clientRemote {
+			return serverConn
+		}
+	}
+	return nil
+}
+
 func TestBroadcastChartUpdateOnlyToMatchingSubscribers(t *testing.T) {
 	s := &Server{
 		status:  quotes.NewRuntimeStatusCenter(time.Minute),
@@ -35,18 +52,13 @@ func TestBroadcastChartUpdateOnlyToMatchingSubscribers(t *testing.T) {
 	defer conn2.Close()
 	_, _, _ = conn2.ReadMessage()
 
-	sub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m"}
+	sub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m", DataMode: "realtime"}
 	key := quotes.ChartSubscriptionKey(sub)
-	var serverConn1 *websocket.Conn
-	s.mu.Lock()
-	for conn := range s.wsConns {
-		serverConn1 = conn
-		break
-	}
+	serverConn1 := findServerConnForClient(t, s, conn1)
 	if serverConn1 == nil {
-		s.mu.Unlock()
 		t.Fatal("server conn1 not registered")
 	}
+	s.mu.Lock()
 	s.wsConns[serverConn1].subs[key] = sub
 	s.mu.Unlock()
 
@@ -97,7 +109,7 @@ func TestHandleChartUnsubscribeRemovesLocalSubscription(t *testing.T) {
 	defer conn.Close()
 	_, _, _ = conn.ReadMessage()
 
-	sub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m"}
+	sub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m", DataMode: "realtime"}
 	key := quotes.ChartSubscriptionKey(sub)
 	var serverConn *websocket.Conn
 	s.mu.Lock()
@@ -112,13 +124,88 @@ func TestHandleChartUnsubscribeRemovesLocalSubscription(t *testing.T) {
 	s.wsConns[serverConn].subs[key] = sub
 	s.mu.Unlock()
 
-	s.handleChartUnsubscribe(serverConn, []byte(`{"symbol":"agl9","type":"l9","variety":"ag","timeframe":"1m"}`))
+	s.handleChartUnsubscribe(serverConn, []byte(`{"symbol":"agl9","type":"l9","variety":"ag","timeframe":"1m","data_mode":"realtime"}`))
 
 	s.mu.Lock()
 	_, exists := s.wsConns[serverConn].subs[key]
 	s.mu.Unlock()
 	if exists {
 		t.Fatal("subscription still exists after unsubscribe")
+	}
+}
+
+func TestBroadcastChartUpdateIsolatedByDataMode(t *testing.T) {
+	s := &Server{
+		status:  quotes.NewRuntimeStatusCenter(time.Minute),
+		wsConns: make(map[*websocket.Conn]*wsClient),
+	}
+	ts := httptest.NewServer(http.HandlerFunc(s.handleWS))
+	defer ts.Close()
+
+	wsURL := "ws" + strings.TrimPrefix(ts.URL, "http")
+	replayConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial replayConn failed: %v", err)
+	}
+	defer replayConn.Close()
+	_, _, _ = replayConn.ReadMessage()
+
+	realtimeConn, _, err := websocket.DefaultDialer.Dial(wsURL, nil)
+	if err != nil {
+		t.Fatalf("dial realtimeConn failed: %v", err)
+	}
+	defer realtimeConn.Close()
+	_, _, _ = realtimeConn.ReadMessage()
+
+	replaySub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m", DataMode: "replay"}
+	realtimeSub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m", DataMode: "realtime"}
+	serverReplayConn := findServerConnForClient(t, s, replayConn)
+	serverRealtimeConn := findServerConnForClient(t, s, realtimeConn)
+	if serverReplayConn == nil || serverRealtimeConn == nil {
+		t.Fatal("server conns not registered")
+	}
+	replayKey := quotes.ChartSubscriptionKey(replaySub)
+	realtimeKey := quotes.ChartSubscriptionKey(realtimeSub)
+	s.mu.Lock()
+	s.wsConns[serverReplayConn].subs[replayKey] = replaySub
+	s.wsConns[serverRealtimeConn].subs[realtimeKey] = realtimeSub
+	s.mu.Unlock()
+
+	s.broadcastChartUpdate(quotes.ChartBarUpdate{
+		Subscription: replaySub,
+		Phase:        "partial",
+		Source:       "replay",
+		Bar: quotes.ChartBar{
+			AdjustedTime: 100,
+			DataTime:     100,
+			Open:         1,
+			High:         2,
+			Low:          1,
+			Close:        2,
+		},
+	})
+
+	_ = replayConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_ = realtimeConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	var msg1, msg2 map[string]any
+	err1 := replayConn.ReadJSON(&msg1)
+	err2 := realtimeConn.ReadJSON(&msg2)
+	received := 0
+	replayMessages := 0
+	if err1 == nil && msg1["type"] == "chart_bar_update" {
+		received++
+		if sub, ok := msg1["data"].(map[string]any)["subscription"].(map[string]any); ok && sub["data_mode"] == "replay" {
+			replayMessages++
+		}
+	}
+	if err2 == nil && msg2["type"] == "chart_bar_update" {
+		received++
+		if sub, ok := msg2["data"].(map[string]any)["subscription"].(map[string]any); ok && sub["data_mode"] == "replay" {
+			replayMessages++
+		}
+	}
+	if received != 1 || replayMessages != 1 {
+		t.Fatalf("expected exactly one replay subscription delivery, got msg1 err=%v msg=%#v msg2 err=%v msg=%#v", err1, msg1, err2, msg2)
 	}
 }
 
@@ -138,7 +225,7 @@ func TestBroadcastEventDoesNotBlockChartBroadcast(t *testing.T) {
 	defer conn.Close()
 	_, _, _ = conn.ReadMessage()
 
-	sub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m"}
+	sub := quotes.ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m", DataMode: "realtime"}
 	key := quotes.ChartSubscriptionKey(sub)
 	var serverConn *websocket.Conn
 	s.mu.Lock()

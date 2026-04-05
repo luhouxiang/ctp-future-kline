@@ -48,6 +48,14 @@ type tickCSVLoadResult struct {
 	LastTime *time.Time
 }
 
+type TickCSVWindow struct {
+	StartTime       *time.Time
+	EndTime         *time.Time
+	FileCount       int
+	InstrumentCount int
+	EventCount      int
+}
+
 // tickPayload 是写入 CSV 后再回放时恢复出来的 payload 结构。
 type tickPayload struct {
 	// InstrumentID 是合约代码。
@@ -237,6 +245,20 @@ func loadTickCSVEvents(req StartRequest) (tickCSVLoadResult, error) {
 		InstrumentCount: len(instruments),
 		FirstTime:       firstTime,
 		LastTime:        lastTime,
+	}, nil
+}
+
+func InspectTickCSVWindow(req StartRequest) (TickCSVWindow, error) {
+	result, err := loadTickCSVEvents(req)
+	if err != nil {
+		return TickCSVWindow{}, err
+	}
+	return TickCSVWindow{
+		StartTime:       result.FirstTime,
+		EndTime:         result.LastTime,
+		FileCount:       result.FileCount,
+		InstrumentCount: result.InstrumentCount,
+		EventCount:      len(result.Events),
 	}, nil
 }
 

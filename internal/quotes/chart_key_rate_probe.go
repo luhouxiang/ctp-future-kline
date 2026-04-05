@@ -63,7 +63,7 @@ func (p *keyedRateProbe) flush() {
 	}
 	sort.Strings(keys)
 	for _, key := range keys {
-		logger.Info("chart key rate", "stage", p.stage, "subscription_key", key, "count_per_sec", snapshot[key])
+		logger.Debug("chart key rate", "stage", p.stage, "subscription_key", key, "count_per_sec", snapshot[key])
 	}
 }
 

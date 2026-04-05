@@ -2796,6 +2796,14 @@ watch(
 );
 
 watch(
+  () => props.dataMode,
+  () => {
+    state.resolvedSymbol = "";
+    loadInitialChunk();
+  }
+);
+
+watch(
   () => props.theme,
   () => {
     rebuildChartsForTheme();

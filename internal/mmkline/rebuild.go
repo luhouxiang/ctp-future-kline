@@ -8,8 +8,10 @@ import (
 	"strings"
 	"time"
 
+	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/klineagg"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 const (
@@ -54,8 +56,15 @@ var ErrTradingSessionNotReady = fmt.Errorf("trading session not completed")
 //
 // 当前实现是“以目标合约/目标 L9 为单位进行重建”，不是只增量更新单个桶。
 func RebuildAndUpsert(db *sql.DB, req RebuildRequest) (map[string]int, []klineagg.BucketStat, error) {
+	return RebuildAndUpsertWithSessionDB(db, db, req, true)
+}
+
+func RebuildAndUpsertWithSessionDB(db *sql.DB, sessionDB *sql.DB, req RebuildRequest, allowInfer bool) (map[string]int, []klineagg.BucketStat, error) {
 	if db == nil {
 		return nil, nil, fmt.Errorf("nil db")
+	}
+	if sessionDB == nil {
+		sessionDB = db
 	}
 	variety := normalizeVariety(req.Variety)
 	if variety == "" {
@@ -69,13 +78,13 @@ func RebuildAndUpsert(db *sql.DB, req RebuildRequest) (map[string]int, []klineag
 	if err != nil {
 		return nil, nil, err
 	}
-	sessions, err := loadCompletedTradingSessions(db, variety)
+	sessions, err := loadCompletedTradingSessions(sessionDB, variety)
 	if err != nil {
-		if err == ErrTradingSessionNotReady {
-			if inferErr := inferAndUpsertTradingSessions(db, srcTable, instrumentID, variety); inferErr != nil {
+		if err == ErrTradingSessionNotReady && allowInfer {
+			if inferErr := inferAndUpsertTradingSessions(sessionDB, db, srcTable, instrumentID, variety); inferErr != nil {
 				return nil, nil, inferErr
 			}
-			sessions, err = loadCompletedTradingSessions(db, variety)
+			sessions, err = loadCompletedTradingSessions(sessionDB, variety)
 		}
 		if err != nil {
 			return nil, nil, err
@@ -133,6 +142,28 @@ func RebuildAndUpsert(db *sql.DB, req RebuildRequest) (map[string]int, []klineag
 		allStats = append(allStats, stats...)
 	}
 	return written, allStats, nil
+}
+
+func InferAndUpsertTradingSessions(sessionDB *sql.DB, sourceDB *sql.DB, req RebuildRequest) error {
+	if sourceDB == nil {
+		return fmt.Errorf("nil source db")
+	}
+	if sessionDB == nil {
+		sessionDB = sourceDB
+	}
+	variety := normalizeVariety(req.Variety)
+	if variety == "" {
+		return fmt.Errorf("invalid variety: %q", req.Variety)
+	}
+	instrumentID := strings.ToLower(strings.TrimSpace(req.InstrumentID))
+	if instrumentID == "" {
+		return fmt.Errorf("invalid instrument id")
+	}
+	srcTable, err := sourceTableName(variety, req.IsL9)
+	if err != nil {
+		return err
+	}
+	return inferAndUpsertTradingSessions(sessionDB, sourceDB, srcTable, instrumentID, variety)
 }
 
 func aggregateToDaily(bars []klineagg.MinuteBar, period string, sessions []klineagg.SessionRange) ([]klineagg.AggBar, []klineagg.BucketStat) {
@@ -194,21 +225,37 @@ func loadCompletedTradingSessions(db *sql.DB, variety string) ([]klineagg.Sessio
 		raw       string
 		completed bool
 	)
+	dbName, dbErr := dbx.CurrentDatabase(db)
+	if dbErr != nil {
+		dbName = "<unknown>"
+	}
 	err := db.QueryRow(`SELECT session_json,is_completed FROM trading_sessions WHERE variety=?`, variety).Scan(&raw, &completed)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			return nil, ErrTradingSessionNotReady
+			logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "default", "reason", "no_rows", "session_text", sessiontime.DefaultSessionText)
+			return defaultKlineAggSessions(), nil
 		}
 		return nil, fmt.Errorf("query trading_sessions failed: %w", err)
 	}
 	if !completed {
-		return nil, ErrTradingSessionNotReady
+		logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "default", "reason", "not_completed", "session_text", sessiontime.DefaultSessionText)
+		return defaultKlineAggSessions(), nil
 	}
+	logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "db", "session_text", raw, "is_completed", completed)
 	return parseSessionJSON(raw)
 }
 
-func inferAndUpsertTradingSessions(db *sql.DB, srcTable, instrumentID, variety string) error {
-	recent5, err := queryRecent5DataDays(db, srcTable, instrumentID)
+func defaultKlineAggSessions() []klineagg.SessionRange {
+	src := sessiontime.DefaultRanges()
+	out := make([]klineagg.SessionRange, 0, len(src))
+	for _, r := range src {
+		out = append(out, klineagg.SessionRange{Start: r.Start, End: r.End})
+	}
+	return out
+}
+
+func inferAndUpsertTradingSessions(sessionDB *sql.DB, sourceDB *sql.DB, srcTable, instrumentID, variety string) error {
+	recent5, err := queryRecent5DataDays(sourceDB, srcTable, instrumentID)
 	if err != nil {
 		return err
 	}
@@ -224,7 +271,7 @@ func inferAndUpsertTradingSessions(db *sql.DB, srcTable, instrumentID, variety s
 	}
 	sets := make([]map[int]struct{}, 0, 3)
 	for _, day := range middle3 {
-		set, err := queryDayMinuteSetFloor5(db, srcTable, instrumentID, day)
+		set, err := queryDayMinuteSetFloor5(sourceDB, srcTable, instrumentID, day)
 		if err != nil {
 			return err
 		}
@@ -252,18 +299,11 @@ func inferAndUpsertTradingSessions(db *sql.DB, srcTable, instrumentID, variety s
 	if err != nil {
 		return err
 	}
-	_, err = db.Exec(`
-INSERT INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
+	sqlText := `
+REPLACE INTO trading_sessions(variety,session_text,session_json,is_completed,sample_trade_date,validated_trade_date,match_ratio,updated_at)
 VALUES(?,?,?,?,?,?,?,?)
-ON DUPLICATE KEY UPDATE
-  session_text=VALUES(session_text),
-  session_json=VALUES(session_json),
-  is_completed=VALUES(is_completed),
-  sample_trade_date=VALUES(sample_trade_date),
-  validated_trade_date=VALUES(validated_trade_date),
-  match_ratio=VALUES(match_ratio),
-  updated_at=VALUES(updated_at)
-`,
+`
+	args := []any{
 		variety,
 		sessionText,
 		sessionJSON,
@@ -272,10 +312,26 @@ ON DUPLICATE KEY UPDATE
 		middle3[2],
 		1.0,
 		time.Now().Format("2006-01-02 15:04:05"),
+	}
+	dbName, dbErr := dbx.CurrentDatabase(sessionDB)
+	if dbErr != nil {
+		dbName = "<unknown>"
+	}
+	logger.Warn("trading_sessions exec",
+		"database", dbName,
+		"table", "trading_sessions",
+		"sql", strings.TrimSpace(sqlText),
+		"args", fmt.Sprintf("%#v", args),
 	)
+	_, err = sessionDB.Exec(sqlText, args...)
 	if err != nil {
 		return fmt.Errorf("upsert trading_sessions failed: %w", err)
 	}
+	logger.Warn("trading_sessions exec success",
+		"database", dbName,
+		"table", "trading_sessions",
+		"variety", variety,
+	)
 	logger.Info("kline pipeline",
 		"stage", "session_infer_result",
 		"variety", variety,

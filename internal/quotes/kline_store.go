@@ -271,6 +271,72 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	return nil
 }
 
+func (s *klineStore) DeleteRange(start time.Time, end time.Time) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return nil
+	}
+	tables, err := s.listReplayKlineTables()
+	if err != nil {
+		return err
+	}
+	startText := start.Format("2006-01-02 15:04:05")
+	endText := end.Format("2006-01-02 15:04:05")
+	for _, tableName := range tables {
+		stmt := fmt.Sprintf(`DELETE FROM "%s" WHERE ("%s" >= ? AND "%s" <= ?) OR ("%s" >= ? AND "%s" <= ?)`,
+			tableName,
+			colTime, colTime,
+			colAdjustedTime, colAdjustedTime,
+		)
+		if _, err := s.db.Exec(stmt, startText, endText, startText, endText); err != nil {
+			return fmt.Errorf("delete replay kline rows failed for %s: %w", tableName, err)
+		}
+	}
+	return nil
+}
+
+func (s *klineStore) listReplayKlineTables() ([]string, error) {
+	rows, err := s.db.Query(`SHOW TABLES`)
+	if err != nil {
+		return nil, fmt.Errorf("list replay kline tables failed: %w", err)
+	}
+	defer rows.Close()
+	tables := make([]string, 0, 16)
+	for rows.Next() {
+		var tableName string
+		if err := rows.Scan(&tableName); err != nil {
+			return nil, fmt.Errorf("scan replay kline table failed: %w", err)
+		}
+		if isReplayKlineTableName(tableName) {
+			tables = append(tables, tableName)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate replay kline tables failed: %w", err)
+	}
+	return tables, nil
+}
+
+func isReplayKlineTableName(tableName string) bool {
+	name := strings.ToLower(strings.TrimSpace(tableName))
+	if name == "" {
+		return false
+	}
+	for _, prefix := range []string{
+		instrumentTablePrefix,
+		l9TablePrefix,
+		instrumentMMTablePrefix,
+		l9MMTablePrefix,
+	} {
+		if strings.HasPrefix(name, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
 func ensureAdjustedTimeIndex(db *sql.DB, tableName string) error {
 	byInstrument := fmt.Sprintf(`CREATE INDEX "idx_%s_inst_period_adj" ON "%s"("%s","%s","%s" DESC)`,
 		tableName, tableName, colInstrumentID, colPeriod, colAdjustedTime)

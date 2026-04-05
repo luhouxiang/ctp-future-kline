@@ -9,7 +9,72 @@ import (
 )
 
 func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
-	stmts := []string{
+	if err := ensureSchemaStatements(db, fullSchemaStatements()); err != nil {
+		return err
+	}
+	if err := ensureChartTablesEvolution(db); err != nil {
+		return err
+	}
+	return nil
+}
+
+func EnsureDatabaseAndSchemaForRole(cfg config.DBConfig, role string, db *sql.DB) error {
+	stmts := schemaStatementsForRole(role)
+	if err := ensureSchemaStatements(db, stmts); err != nil {
+		return err
+	}
+	if role == RoleChartUserRealtime || role == RoleChartUserReplay {
+		if err := ensureChartTablesEvolution(db); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ensureSchemaStatements(db *sql.DB, stmts []string) error {
+	if len(stmts) == 0 {
+		return nil
+	}
+	for _, stmt := range stmts {
+		if _, err := db.Exec(stmt); err != nil {
+			stmtText := strings.ToLower(strings.TrimSpace(stmt))
+			if (strings.Contains(stmtText, "create index") || strings.Contains(stmtText, "create unique index")) && isDuplicateObjectError(err) {
+				continue
+			}
+			return fmt.Errorf("ensure mysql schema failed: %w", err)
+		}
+	}
+	return nil
+}
+
+func schemaStatementsForRole(role string) []string {
+	switch role {
+	case RoleSharedMeta:
+		return append([]string{}, sharedMetaSchemaStatements()...)
+	case RoleMarketRealtime:
+		return append([]string{}, marketSchemaStatements(false)...)
+	case RoleMarketReplay:
+		return append([]string{}, marketSchemaStatements(true)...)
+	case RoleChartUserRealtime, RoleChartUserReplay:
+		return append([]string{}, chartSchemaStatements()...)
+	case RoleTradeLive, RoleTradePaperLive, RoleTradePaperReplay:
+		return append([]string{}, tradeSchemaStatements()...)
+	default:
+		return fullSchemaStatements()
+	}
+}
+
+func fullSchemaStatements() []string {
+	stmts := []string{}
+	stmts = append(stmts, sharedMetaSchemaStatements()...)
+	stmts = append(stmts, marketSchemaStatements(true)...)
+	stmts = append(stmts, chartSchemaStatements()...)
+	stmts = append(stmts, tradeSchemaStatements()...)
+	return stmts
+}
+
+func sharedMetaSchemaStatements() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS trading_calendar(
   trade_date DATE PRIMARY KEY,
   is_open TINYINT NOT NULL,
@@ -20,6 +85,33 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
   k VARCHAR(191) PRIMARY KEY,
   v TEXT NOT NULL
 )`,
+		`CREATE TABLE IF NOT EXISTS trading_sessions (
+  variety VARCHAR(32) NOT NULL,
+  session_text VARCHAR(255) NOT NULL,
+  session_json JSON NOT NULL,
+  is_completed TINYINT NOT NULL DEFAULT 0,
+  sample_trade_date DATE NULL,
+  validated_trade_date DATE NULL,
+  match_ratio DOUBLE NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (variety)
+)`,
+		`CREATE INDEX idx_trading_sessions_completed ON trading_sessions(is_completed)`,
+		`CREATE INDEX idx_trading_sessions_updated_at ON trading_sessions(updated_at)`,
+		`CREATE TABLE IF NOT EXISTS user_config (
+  owner VARCHAR(64) NOT NULL DEFAULT 'admin',
+  scope_name VARCHAR(64) NOT NULL,
+  item_key VARCHAR(128) NOT NULL,
+  value_json JSON NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (owner, scope_name, item_key)
+)`,
+		`CREATE INDEX idx_user_config_updated_at ON user_config(updated_at DESC)`,
+	}
+}
+
+func marketSchemaStatements(includeReplayDedup bool) []string {
+	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS kline_search_index (
   table_name VARCHAR(191) NOT NULL,
   symbol VARCHAR(64) NOT NULL,
@@ -37,26 +129,23 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 		`CREATE INDEX idx_kline_search_variety ON kline_search_index(variety)`,
 		`CREATE INDEX idx_kline_search_time_range ON kline_search_index(min_time, max_time)`,
 		`CREATE INDEX idx_kline_search_kind ON kline_search_index(kind)`,
-		`CREATE TABLE IF NOT EXISTS trading_sessions (
-  variety VARCHAR(32) NOT NULL,
-  session_text VARCHAR(255) NOT NULL,
-  session_json JSON NOT NULL,
-  is_completed TINYINT NOT NULL DEFAULT 0,
-  sample_trade_date DATE NULL,
-  validated_trade_date DATE NULL,
-  match_ratio DOUBLE NOT NULL DEFAULT 0,
-  updated_at DATETIME NOT NULL,
-  PRIMARY KEY (variety)
-)`,
-		`CREATE INDEX idx_trading_sessions_completed ON trading_sessions(is_completed)`,
-		`CREATE INDEX idx_trading_sessions_updated_at ON trading_sessions(updated_at)`,
-		`CREATE TABLE IF NOT EXISTS bus_consume_dedup (
+	}
+	if includeReplayDedup {
+		stmts = append(stmts,
+			`CREATE TABLE IF NOT EXISTS bus_consume_dedup (
   consumer_id VARCHAR(128) NOT NULL,
   event_id VARCHAR(128) NOT NULL,
   processed_at DATETIME NOT NULL,
   PRIMARY KEY (consumer_id, event_id)
 )`,
-		`CREATE INDEX idx_bus_consume_dedup_processed_at ON bus_consume_dedup(processed_at DESC)`,
+			`CREATE INDEX idx_bus_consume_dedup_processed_at ON bus_consume_dedup(processed_at DESC)`,
+		)
+	}
+	return stmts
+}
+
+func chartSchemaStatements() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS chart_layouts (
   owner VARCHAR(64) NOT NULL DEFAULT 'admin',
   symbol VARCHAR(64) NOT NULL,
@@ -103,15 +192,11 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 		`CREATE INDEX idx_chart_drawings_scope ON chart_drawings(symbol, kind, variety, timeframe, updated_at)`,
 		`CREATE INDEX idx_chart_drawings_owner_scope ON chart_drawings(owner, symbol, kind, variety, timeframe, updated_at)`,
 		`CREATE INDEX idx_chart_drawings_object_class ON chart_drawings(object_class)`,
-		`CREATE TABLE IF NOT EXISTS user_config (
-  owner VARCHAR(64) NOT NULL DEFAULT 'admin',
-  scope_name VARCHAR(64) NOT NULL,
-  item_key VARCHAR(128) NOT NULL,
-  value_json JSON NOT NULL,
-  updated_at DATETIME NOT NULL,
-  PRIMARY KEY (owner, scope_name, item_key)
-)`,
-		`CREATE INDEX idx_user_config_updated_at ON user_config(updated_at DESC)`,
+	}
+}
+
+func tradeSchemaStatements() []string {
+	return []string{
 		`CREATE TABLE IF NOT EXISTS strategy_definitions (
   strategy_id VARCHAR(128) NOT NULL,
   display_name VARCHAR(191) NOT NULL,
@@ -314,19 +399,6 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
   PRIMARY KEY (account_id)
 )`,
 	}
-	for _, stmt := range stmts {
-		if _, err := db.Exec(stmt); err != nil {
-			stmtText := strings.ToLower(strings.TrimSpace(stmt))
-			if (strings.Contains(stmtText, "create index") || strings.Contains(stmtText, "create unique index")) && isDuplicateObjectError(err) {
-				continue
-			}
-			return fmt.Errorf("ensure mysql schema failed: %w", err)
-		}
-	}
-	if err := ensureChartTablesEvolution(db); err != nil {
-		return err
-	}
-	return nil
 }
 
 func ensureChartTablesEvolution(db *sql.DB) error {

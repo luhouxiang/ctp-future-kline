@@ -73,7 +73,7 @@ func EnsureAllLogicalDatabases(cfg config.DBConfig) error {
 		if err != nil {
 			return err
 		}
-		if err := EnsureDatabaseAndSchema(roleCfg, db); err != nil {
+		if err := EnsureDatabaseAndSchemaForRole(roleCfg, role, db); err != nil {
 			_ = db.Close()
 			return err
 		}

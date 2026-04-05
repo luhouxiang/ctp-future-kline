@@ -167,6 +167,8 @@ type CTPConfig struct {
 	MDDisconnectCapacity int `json:"md_disconnect_capacity"`
 	// DBDSN 是运行时补入的数据库连接串，不从 JSON 直接读取。
 	DBDSN string `json:"-"`
+	// SharedMetaDSN 是运行时补入的公共元数据库连接串，不从 JSON 直接读取。
+	SharedMetaDSN string `json:"-"`
 }
 
 type WebConfig struct {

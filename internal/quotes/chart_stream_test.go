@@ -12,18 +12,18 @@ func TestNormalizeChartSubscription(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NormalizeChartSubscription error: %v", err)
 	}
-	if sub.Symbol != "agl9" || sub.Type != "l9" || sub.Variety != "ag" || sub.Timeframe != "1m" {
+	if sub.Symbol != "agl9" || sub.Type != "l9" || sub.Variety != "ag" || sub.Timeframe != "1m" || sub.DataMode != "realtime" {
 		t.Fatalf("unexpected normalized subscription: %+v", sub)
 	}
 }
 
 func TestChartSubscriptionKeyStable(t *testing.T) {
-	key1 := ChartSubscriptionKey(ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m"})
-	key2 := ChartSubscriptionKey(ChartSubscription{Symbol: "AGL9", Type: "L9", Variety: "AG", Timeframe: "1M"})
+	key1 := ChartSubscriptionKey(ChartSubscription{Symbol: "agl9", Type: "l9", Variety: "ag", Timeframe: "1m", DataMode: "replay"})
+	key2 := ChartSubscriptionKey(ChartSubscription{Symbol: "AGL9", Type: "L9", Variety: "AG", Timeframe: "1M", DataMode: "REPLAY"})
 	if key1 != key2 {
 		t.Fatalf("ChartSubscriptionKey should normalize input, want %s got %s", key1, key2)
 	}
-	sub, err := NormalizeChartSubscription(ChartSubscription{Symbol: "AGL9", Type: "L9", Variety: "AG", Timeframe: "1M"})
+	sub, err := NormalizeChartSubscription(ChartSubscription{Symbol: "AGL9", Type: "L9", Variety: "AG", Timeframe: "1M", DataMode: "REPLAY"})
 	if err != nil {
 		t.Fatalf("NormalizeChartSubscription error: %v", err)
 	}

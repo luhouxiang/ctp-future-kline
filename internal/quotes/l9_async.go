@@ -3,6 +3,7 @@
 package quotes
 
 import (
+	"database/sql"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -19,8 +20,9 @@ type l9Task struct {
 }
 
 type l9AsyncCalculator struct {
-	store *klineStore
-	clock *klineclock.CalendarResolver
+	store  *klineStore
+	clock  *klineclock.CalendarResolver
+	metaDB *sql.DB
 
 	enabled     atomic.Bool
 	tasks       chan l9Task
@@ -37,7 +39,7 @@ type l9AsyncCalculator struct {
 	persistSink       func([]persistTask)
 }
 
-func newL9AsyncCalculator(store *klineStore, status *RuntimeStatusCenter, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
+func newL9AsyncCalculator(store *klineStore, metaDB *sql.DB, status *RuntimeStatusCenter, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
 	if workers <= 0 {
 		workers = 1
 	}
@@ -49,7 +51,8 @@ func newL9AsyncCalculator(store *klineStore, status *RuntimeStatusCenter, enable
 	}
 	c := &l9AsyncCalculator{
 		store:             store,
-		clock:             klineclock.NewCalendarResolver(store.DB()),
+		clock:             klineclock.NewCalendarResolver(preferMetaDB(metaDB, store.DB())),
+		metaDB:            preferMetaDB(metaDB, store.DB()),
 		tasks:             make(chan l9Task, queueCfg.L9TaskCapacity),
 		expected:          make(map[string]map[string]struct{}),
 		latest:            make(map[string]minuteBar),
@@ -134,8 +137,8 @@ func (c *l9AsyncCalculator) ObserveMinuteBar(bar minuteBar) {
 	defer c.mu.Unlock()
 
 	// 同时维护：
-	// 1) latest：该合约最近一根 1m，用于某分钟缺数据时回退补齐；
-	// 2) minuteBars[variety][minute][instrument]：该品种该分钟各合约的快照。
+	// 1) latest：该合约最近一根 1m，供后续分钟继续更新参考；
+	// 2) minuteBars[variety][minute][instrument]：该品种该分钟真实生成的各合约 1m。
 	c.latest[bar.InstrumentID] = bar
 	c.instrumentVariety[bar.InstrumentID] = bar.Variety
 	byMinute := c.minuteBars[bar.Variety]
@@ -305,7 +308,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 			return err
 		}
 		trace := runtimeTrace{
-			ReceivedAt:        sourceReceivedAt,
+			ReceivedAt:        runtimeMetricTime(sourceReceivedAt, l9Bar.Replay, time.Now()),
 			MinuteClosedAt:    time.Now(),
 			PersistEnqueuedAt: time.Now(),
 		}
@@ -339,7 +342,7 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 				tasks = append(tasks, persistTask{
 					Bar:          bar,
 					TableName:    tableName,
-					Trace:        runtimeTrace{ReceivedAt: sourceReceivedAt, PersistEnqueuedAt: time.Now()},
+					Trace:        runtimeTrace{ReceivedAt: runtimeMetricTime(sourceReceivedAt, l9Bar.Replay, time.Now()), PersistEnqueuedAt: time.Now()},
 					InstrumentID: bar.InstrumentID,
 					IsL9:         true,
 					Replay:       l9Bar.Replay,
@@ -379,31 +382,7 @@ func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime tim
 	for _, instrumentID := range instrumentIDs {
 		if bar, ok := c.minuteBarLocked(variety, minuteKey, instrumentID); ok {
 			out = append(out, bar)
-			continue
 		}
-		latest, ok := c.latest[instrumentID]
-		if !ok || latest.Variety != variety {
-			continue
-		}
-		price := latest.Close
-		// 某合约该分钟没有新 bar 时，用最近一根 1m 的价格/OI/结算价补齐，Volume 记为 0；
-		// 这样 L9 不会因为个别合约短时无成交而断档。
-		out = append(out, minuteBar{
-			Variety:          variety,
-			InstrumentID:     instrumentID,
-			Exchange:         latest.Exchange,
-			MinuteTime:       minuteTime,
-			AdjustedTime:     c.adjustedMinuteTime(minuteTime),
-			SourceReceivedAt: latest.SourceReceivedAt,
-			Period:           "1m",
-			Open:             price,
-			High:             price,
-			Low:              price,
-			Close:            price,
-			Volume:           0,
-			OpenInterest:     latest.OpenInterest,
-			SettlementPrice:  latest.SettlementPrice,
-		})
 	}
 	return out
 }
@@ -456,7 +435,7 @@ func (c *l9AsyncCalculator) adjustedMinuteTime(minuteTime time.Time) time.Time {
 }
 
 func (c *l9AsyncCalculator) loadSessions(variety string) ([]sessiontime.Range, error) {
-	resolver := newSessionResolver(c.store.DB())
+	resolver := newSessionResolver(preferMetaDB(c.metaDB, c.store.DB()))
 	return resolver.Sessions(variety)
 }
 

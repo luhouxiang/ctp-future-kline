@@ -230,9 +230,15 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		return nil, nil, nil, err
 	}
 	logger.Info("kline store ready", "db_path", dbPath)
+	metaDB, err := openSharedMetaDB(s.cfg)
+	if err != nil {
+		_ = store.Close()
+		return nil, nil, nil, err
+	}
 
 	subscribeTargets := selectSubscribeTargets(queriedInstruments, s.cfg.SubscribeInstruments)
 	if len(subscribeTargets) == 0 {
+		_ = metaDB.Close()
 		_ = store.Close()
 		logger.Error("no instruments to subscribe")
 		return nil, nil, nil, fmt.Errorf("no instruments to subscribe")
@@ -240,7 +246,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	expectedByVariety := buildExpectedVarietyInstruments(queriedInstruments, subscribeTargets)
 	var l9Calc *l9AsyncCalculator
 	if s.cfg.IsL9AsyncEnabled() {
-		l9Calc = newL9AsyncCalculator(store, status, true, 1, expectedByVariety)
+		l9Calc = newL9AsyncCalculator(store, metaDB, status, true, 1, expectedByVariety)
 	}
 
 	var session *mdSession
@@ -313,9 +319,9 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 
 	var spi *mdSpi
 	if status != nil {
-		spi = newMdSpiWithStatusAndOptions(store, l9Calc, status, options)
+		spi = newMdSpiWithStatusAndOptions(store, metaDB, l9Calc, status, options)
 	} else {
-		spi = newMdSpiWithOptions(store, l9Calc, options)
+		spi = newMdSpiWithOptions(store, metaDB, l9Calc, options)
 	}
 	api := ctp.CThostFtdcMdApiCreateFtdcMdApi(s.cfg.FlowPath)
 
@@ -327,6 +333,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	time.Sleep(time.Duration(s.cfg.MdConnectWaitSeconds) * time.Second)
 
 	if err := s.loginMd(api, 10001); err != nil {
+		_ = metaDB.Close()
 		_ = store.Close()
 		logger.Error("md login request failed", "error", err)
 		return nil, nil, nil, err
@@ -346,6 +353,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		return nil
 	}
 	if err := subscribe(); err != nil {
+		_ = metaDB.Close()
 		_ = store.Close()
 		logger.Error("SubscribeMarketData failed", "error", err)
 		return nil, nil, nil, err

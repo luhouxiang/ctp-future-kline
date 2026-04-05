@@ -44,7 +44,7 @@ func NewMdSpi(store *klineStore, l9Async *l9AsyncCalculator) *mdSpi {
 }
 
 func NewL9AsyncCalculator(store *klineStore, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
-	return newL9AsyncCalculator(store, nil, enabled, workers, expectedByVariety)
+	return newL9AsyncCalculator(store, nil, nil, enabled, workers, expectedByVariety)
 }
 
 func SelectSubscribeTargets(queriedInstruments []instrumentInfo, configuredVarieties []string) []string {

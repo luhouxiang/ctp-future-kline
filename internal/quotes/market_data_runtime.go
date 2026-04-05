@@ -4,6 +4,7 @@
 package quotes
 
 import (
+	"database/sql"
 	"fmt"
 	"hash/fnv"
 	"math"
@@ -34,6 +35,7 @@ const (
 	defaultTickHistoryRetention   = 2048
 	defaultL9TaskQueueCapacity    = 4096
 	defaultRuntimeMetricsInterval = 5 * time.Second
+	invalidTickSessionGapMinutes  = 3
 )
 
 type runtimeOptions struct {
@@ -117,10 +119,14 @@ type instrumentRuntimeState struct {
 	lastTick minuteTickSnapshot
 	// hasBar 表示当前是否已经为该合约初始化过 bar。
 	hasBar bool
-	// prevBucketCloseVol 是上一分钟结束时的累计成交量。
-	prevBucketCloseVol int
-	// hasPrevBucketVolume 表示是否已有上一分钟的累计成交量基准。
-	hasPrevBucketVolume bool
+	// currentBarBaseVol 是当前正在构建中的分钟线成交量基线。
+	currentBarBaseVol int
+	// prevGeneratedBarCloseVol 是上一根已生成分钟线结束时的累计成交量。
+	prevGeneratedBarCloseVol int
+	// hasPrevGeneratedBarVolume 表示是否已有上一根已生成分钟线的累计成交量基准。
+	hasPrevGeneratedBarVolume bool
+	// currentTradingDay 记录当前状态对应的业务交易日。
+	currentTradingDay string
 	// lastFingerprint 保存最近一次去重指纹状态。
 	lastFingerprint tickFingerprintState
 	// lastVolumes 是最近一次看到的累计成交量。
@@ -359,7 +365,7 @@ type marketDataShard struct {
 	fileWriter *shardFileWriter
 }
 
-func newMarketDataRuntime(store *klineStore, l9Async *l9AsyncCalculator, status *RuntimeStatusCenter, opts runtimeOptions) *marketDataRuntime {
+func newMarketDataRuntime(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCalculator, status *RuntimeStatusCenter, opts runtimeOptions) *marketDataRuntime {
 	if opts.tickDedupWindow <= 0 {
 		opts.tickDedupWindow = 2 * time.Second
 	}
@@ -373,8 +379,8 @@ func newMarketDataRuntime(store *klineStore, l9Async *l9AsyncCalculator, status 
 	rt := &marketDataRuntime{
 		store:              store,
 		status:             status,
-		clock:              klineclock.NewCalendarResolver(store.DB()),
-		sessionResolver:    newSessionResolver(store.DB()),
+		clock:              klineclock.NewCalendarResolver(preferMetaDB(metaDB, store.DB())),
+		sessionResolver:    newSessionResolver(preferMetaDB(metaDB, store.DB())),
 		l9Async:            l9Async,
 		opts:               opts,
 		lastLogAt:          make(map[string]time.Time),
@@ -550,7 +556,7 @@ func (r *marketDataRuntime) enqueue(t runtimeTick) error {
 			shard.queueHandle.MarkEnqueued(depth)
 		}
 		if r.status != nil {
-			routerQueueMS := routeAt.Sub(t.CallbackAt).Seconds() * 1000
+			routerQueueMS := routeAt.Sub(runtimeMetricTime(t.CallbackAt, t.replay, routeAt)).Seconds() * 1000
 			r.status.MarkRouterLatency(instrumentID, routerQueueMS)
 		}
 		return nil
@@ -563,7 +569,7 @@ func (r *marketDataRuntime) enqueue(t runtimeTick) error {
 					shard.queueHandle.MarkSpilled(size, depth)
 				}
 				if r.status != nil {
-					routerQueueMS := routeAt.Sub(t.CallbackAt).Seconds() * 1000
+					routerQueueMS := routeAt.Sub(runtimeMetricTime(t.CallbackAt, t.replay, routeAt)).Seconds() * 1000
 					r.status.MarkRouterLatency(instrumentID, routerQueueMS)
 				}
 				return nil
@@ -579,7 +585,7 @@ func (r *marketDataRuntime) enqueue(t runtimeTick) error {
 			shard.queueHandle.MarkEnqueued(depth)
 		}
 		if r.status != nil {
-			routerQueueMS := routeAt.Sub(t.CallbackAt).Seconds() * 1000
+			routerQueueMS := routeAt.Sub(runtimeMetricTime(t.CallbackAt, t.replay, routeAt)).Seconds() * 1000
 			r.status.MarkRouterLatency(instrumentID, routerQueueMS)
 		}
 		r.maybeWarn("shard_queue_spill_fail:"+instrumentID, "market data shard queue full and spill unavailable, blocking enqueue",
@@ -677,6 +683,13 @@ func (r *marketDataRuntime) maybeWarn(key string, msg string, args ...any) {
 	logger.Warn(msg, args...)
 }
 
+func runtimeMetricTime(ts time.Time, replay bool, now time.Time) time.Time {
+	if replay || ts.IsZero() {
+		return now
+	}
+	return ts
+}
+
 func (r *marketDataRuntime) enqueuePersistTasks(tasks []persistTask) {
 	if len(tasks) == 0 {
 		return
@@ -768,6 +781,24 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		logger.Error("load trading sessions failed", "instrument_id", instrumentID, "error", err)
 		return
 	}
+	sessionDistance, err := tickSessionDistanceMinutes(t.UpdateTime, sessions)
+	if err != nil {
+		logger.Error("parse tick update_time failed", "instrument_id", instrumentID, "update_time", strings.TrimSpace(t.UpdateTime), "error", err)
+		return
+	}
+	if sessionDistance > invalidTickSessionGapMinutes {
+		s.runtime.maybeWarn("tick_out_of_session:"+instrumentID+":"+strings.TrimSpace(t.UpdateTime), "tick too far from trading session, dropping",
+			"instrument_id", instrumentID,
+			"exchange_id", exchangeID,
+			"update_time", strings.TrimSpace(t.UpdateTime),
+			"trading_day", strings.TrimSpace(t.TradingDay),
+			"action_day", strings.TrimSpace(t.ActionDay),
+			"distance_minutes", sessionDistance,
+			"threshold_minutes", invalidTickSessionGapMinutes,
+			"replay", t.replay,
+		)
+		return
+	}
 	minuteTime, adjustedTime, adjustedTickTime, err := parseTickTimesWithMillis(t.ActionDay, t.TradingDay, t.UpdateTime, t.UpdateMillisec, sessions, s.runtime.clock)
 	if err != nil {
 		logger.Error("parse tick time failed", "instrument_id", instrumentID, "error", err)
@@ -787,6 +818,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	}
 	openInterest := t.OpenInterest
 	currentVol := t.Volume
+	currentTradingDay := strings.TrimSpace(t.TradingDay)
 
 	state := s.state[instrumentID]
 	if state == nil {
@@ -794,6 +826,15 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			aggregator: newClosedBarAggregator(instrumentID, exchangeID),
 		}
 		s.state[instrumentID] = state
+	}
+	if state.currentTradingDay != "" && currentTradingDay != "" && state.currentTradingDay != currentTradingDay {
+		state.hasBar = false
+		state.currentBarBaseVol = 0
+		state.prevGeneratedBarCloseVol = 0
+		state.hasPrevGeneratedBarVolume = false
+	}
+	if currentTradingDay != "" {
+		state.currentTradingDay = currentTradingDay
 	}
 
 	fingerprint := buildTickDedupFingerprint(tickInputData{
@@ -815,17 +856,23 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		if sameRawMarketData(prevTick, t.tickEvent) {
 			dupKind = "upstream_raw_duplicate"
 		}
-		logger.Warn(
-			"tick dedup dropped",
+		logArgs := []any{
 			"instrument_id", instrumentID,
 			"duplicate_kind", dupKind,
 			"dedup_window_ms", s.runtime.opts.tickDedupWindow.Milliseconds(),
 			"since_previous_ms", now.Sub(state.lastFingerprint.at).Milliseconds(),
-			"effective_prev", formatTickForLog(prevTick, false),
-			"effective_curr", formatTickForLog(t.tickEvent, false),
-			"raw_prev", formatTickForLog(prevTick, true),
-			"raw_curr", formatTickForLog(t.tickEvent, true),
-		)
+		}
+		if t.replay && dupKind == "upstream_raw_duplicate" {
+			s.runtime.maybeWarn("tick_dedup_replay:"+instrumentID, "tick dedup dropped in replay", logArgs...)
+		} else {
+			logArgs = append(logArgs,
+				"effective_prev", formatTickForLog(prevTick, false),
+				"effective_curr", formatTickForLog(t.tickEvent, false),
+				"raw_prev", formatTickForLog(prevTick, true),
+				"raw_curr", formatTickForLog(t.tickEvent, true),
+			)
+			s.runtime.maybeWarn("tick_dedup:"+instrumentID+":"+dupKind, "tick dedup dropped", logArgs...)
+		}
 		return
 	}
 	state.lastFingerprint = tickFingerprintState{fingerprint: fingerprint, at: now, tick: t.tickEvent}
@@ -838,7 +885,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	if s.runtime.status != nil {
 		s.runtime.status.MarkShardLatency(instrumentID, s.id, shardQueueMS)
 	}
-	if shouldCheckTickDrift(now, adjustedTickTime) {
+	if !t.replay && shouldCheckTickDrift(now, adjustedTickTime) {
 		driftSec := math.Abs(now.Sub(adjustedTickTime).Seconds())
 		if s.runtime.status != nil {
 			s.runtime.status.MarkDrift(instrumentID, driftSec, false)
@@ -880,6 +927,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 
 	var persisted []persistTask
 	if !state.hasBar {
+		baseVol := previousGeneratedBarBase(state, currentVol)
 		state.bar = minuteBar{
 			Variety:          variety,
 			InstrumentID:     instrumentID,
@@ -893,10 +941,11 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			High:             price,
 			Low:              price,
 			Close:            price,
-			Volume:           0,
+			Volume:           computeBucketVolume(currentVol, baseVol, state.hasPrevGeneratedBarVolume),
 			OpenInterest:     openInterest,
 			SettlementPrice:  settlement,
 		}
+		state.currentBarBaseVol = baseVol
 		state.lastTick = lastTick
 		state.hasBar = true
 		if s.runtime.opts.onPartialBar != nil {
@@ -910,7 +959,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		closed := state.bar
 		closed.SourceReceivedAt = state.lastTick.ReceivedAt
 		trace := runtimeTrace{
-			ReceivedAt:        t.ReceivedAt,
+			ReceivedAt:        runtimeMetricTime(t.ReceivedAt, t.replay, now),
 			RouteEnqueuedAt:   t.ProcessStartedAt,
 			ShardDequeuedAt:   dequeuedAt,
 			StateUpdatedAt:    time.Now(),
@@ -918,7 +967,10 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			PersistEnqueuedAt: time.Now(),
 		}
 		persisted = append(persisted, s.buildPersistTasks(closed, trace, false)...)
+		state.prevGeneratedBarCloseVol = state.lastTick.CurrentVolume
+		state.hasPrevGeneratedBarVolume = true
 
+		baseVol := previousGeneratedBarBase(state, currentVol)
 		started := minuteBar{
 			Variety:          variety,
 			InstrumentID:     instrumentID,
@@ -932,15 +984,11 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			High:             price,
 			Low:              price,
 			Close:            price,
-			Volume:           computeBucketVolume(currentVol, state.lastTick.CurrentVolume, true),
+			Volume:           computeBucketVolume(currentVol, baseVol, state.hasPrevGeneratedBarVolume),
 			OpenInterest:     openInterest,
 			SettlementPrice:  settlement,
 		}
-		if started.Volume < 0 {
-			started.Volume = 0
-		}
-		state.prevBucketCloseVol = state.lastTick.CurrentVolume
-		state.hasPrevBucketVolume = true
+		state.currentBarBaseVol = baseVol
 		state.bar = started
 		state.lastTick = lastTick
 	} else {
@@ -951,10 +999,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			state.bar.Low = price
 		}
 		state.bar.Close = price
-		state.bar.Volume = computeBucketVolume(currentVol, state.prevBucketCloseVol, state.hasPrevBucketVolume)
-		if state.bar.Volume < 0 {
-			state.bar.Volume = 0
-		}
+		state.bar.Volume = computeBucketVolume(currentVol, state.currentBarBaseVol, state.hasPrevGeneratedBarVolume)
 		state.bar.OpenInterest = openInterest
 		state.bar.SettlementPrice = settlement
 		state.bar.AdjustedTime = adjustedTime
@@ -994,6 +1039,15 @@ func sameRawMarketData(a tickEvent, b tickEvent) bool {
 		a.AskPrice1 == b.AskPrice1
 }
 
+func tickSessionDistanceMinutes(updateTime string, sessions []sessiontime.Range) (int, error) {
+	clockTime, err := time.ParseInLocation("15:04:05", strings.TrimSpace(updateTime), time.Local)
+	if err != nil {
+		return 0, err
+	}
+	rawMinute := clockTime.Hour()*60 + clockTime.Minute()
+	return sessiontime.DistanceToTradingWindow(rawMinute, sessions), nil
+}
+
 func formatTickForLog(ev tickEvent, raw bool) string {
 	actionDay := strings.TrimSpace(ev.ActionDay)
 	tradingDay := strings.TrimSpace(ev.TradingDay)
@@ -1021,6 +1075,16 @@ func formatTickForLog(ev tickEvent, raw bool) string {
 		ev.BidPrice1,
 		ev.AskPrice1,
 	)
+}
+
+func previousGeneratedBarBase(state *instrumentRuntimeState, currentVol int) int {
+	if state == nil || !state.hasPrevGeneratedBarVolume {
+		return 0
+	}
+	if currentVol < state.prevGeneratedBarCloseVol {
+		return 0
+	}
+	return state.prevGeneratedBarCloseVol
 }
 
 func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTrace, flush bool) []persistTask {
@@ -1076,7 +1140,7 @@ func (s *marketDataShard) flush() error {
 			continue
 		}
 		trace := runtimeTrace{
-			ReceivedAt:        state.lastTick.ReceivedAt,
+			ReceivedAt:        runtimeMetricTime(state.lastTick.ReceivedAt, state.bar.Replay, time.Now()),
 			StateUpdatedAt:    time.Now(),
 			MinuteClosedAt:    time.Now(),
 			PersistEnqueuedAt: time.Now(),

@@ -63,13 +63,16 @@ func main() {
 	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
 	}
+	if err := dbx.MigrateSharedMetaTables(cfg.DB); err != nil {
+		logger.Error("migrate shared meta tables failed", "error", err)
+	}
 	dsn := dbx.DSNForRole(cfg.DB, dbx.RoleSharedMeta)
 	db, err := dbx.Open(dsn)
 	if err != nil {
 		logger.Error("open mysql failed", "error", err)
 		os.Exit(1)
 	}
-	if err := dbx.EnsureDatabaseAndSchema(cfg.DB, db); err != nil {
+	if err := dbx.EnsureDatabaseAndSchemaForRole(dbx.ConfigForRole(cfg.DB, dbx.RoleSharedMeta), dbx.RoleSharedMeta, db); err != nil {
 		logger.Error("ensure mysql schema failed", "error", err)
 	}
 	overrideStore := &userconfig.Store{}
@@ -87,6 +90,7 @@ func main() {
 	}
 	_ = db.Close()
 	cfg.CTP.DBDSN = dbx.DSNForRole(cfg.DB, dbx.RoleMarketRealtime)
+	cfg.CTP.SharedMetaDSN = dsn
 	cm := calendar.NewManager(dbx.DSNForRole(cfg.DB, dbx.RoleSharedMeta))
 	if err := cm.EnsureOnStart(calendar.Config{
 		AutoUpdateOnStart:  cfg.Calendar.IsAutoUpdateOnStart(),

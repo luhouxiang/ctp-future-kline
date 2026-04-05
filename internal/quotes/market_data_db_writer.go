@@ -417,9 +417,7 @@ func (w *dbWriterWorker) run() {
 			case persistTask:
 				buffer = append(buffer, v)
 				if len(buffer) >= w.flushBatch {
-					if err := w.flush(buffer); err != nil {
-						logger.Error("flush db batch failed", "worker_id", w.id, "error", err)
-					}
+					buffer = w.flush(buffer)
 					buffer = buffer[:0]
 				}
 			case dbFlushRequest:
@@ -439,9 +437,7 @@ func (w *dbWriterWorker) run() {
 					}
 					buffer = append(buffer, task)
 					if len(buffer) >= w.flushBatch {
-						if err := w.flush(buffer); err != nil {
-							logger.Error("flush db batch failed", "worker_id", w.id, "error", err)
-						}
+						buffer = w.flush(buffer)
 						buffer = buffer[:0]
 					}
 					continue
@@ -453,9 +449,7 @@ func (w *dbWriterWorker) run() {
 		select {
 		case <-ticker.C:
 			if len(buffer) > 0 {
-				if err := w.flush(buffer); err != nil {
-					logger.Error("flush db batch failed", "worker_id", w.id, "error", err)
-				}
+				buffer = w.flush(buffer)
 				buffer = buffer[:0]
 			}
 		default:

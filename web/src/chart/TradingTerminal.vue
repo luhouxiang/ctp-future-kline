@@ -506,11 +506,18 @@ function currentChartSubscription() {
     type: String(scope.type || '').trim().toLowerCase(),
     variety: String(scope.variety || '').trim().toLowerCase(),
     timeframe: String(scope.timeframe || '1m').trim().toLowerCase(),
+    data_mode: String(dataMode.value || 'realtime').trim().toLowerCase(),
   }
 }
 
 function chartSubscriptionKey(sub) {
-  return [sub?.symbol || '', sub?.type || '', sub?.variety || '', sub?.timeframe || ''].join('|')
+  return [sub?.symbol || '', sub?.type || '', sub?.variety || '', sub?.timeframe || '', sub?.data_mode || 'realtime'].join('|')
+}
+
+function applyAppModeSnapshot(snapshot) {
+  const nextMode = String(snapshot?.kline_data_mode || snapshot?.chart_data_mode || 'realtime').trim().toLowerCase()
+  if (!nextMode || dataMode.value === nextMode) return
+  dataMode.value = nextMode
 }
 
 function sendChartWS(type, data) {
@@ -523,8 +530,8 @@ function syncChartSubscription() {
   const next = currentChartSubscription()
   const nextKey = next ? chartSubscriptionKey(next) : ''
   if (activeChartSubscriptionKey.value && activeChartSubscriptionKey.value !== nextKey) {
-    const [symbol, type, variety, timeframe] = activeChartSubscriptionKey.value.split('|')
-    sendChartWS('chart_unsubscribe', { symbol, type, variety, timeframe })
+    const [symbol, type, variety, timeframe, data_mode] = activeChartSubscriptionKey.value.split('|')
+    sendChartWS('chart_unsubscribe', { symbol, type, variety, timeframe, data_mode })
     activeChartSubscriptionKey.value = ''
   }
   if (!next || !sendChartWS('chart_subscribe', next)) return
@@ -563,6 +570,10 @@ function connectChartWS() {
     }
     if (msg?.type === 'chart_bar_update' && msg.data) {
       paneRef.value?.applyRealtimeBarUpdate?.(msg.data)
+      return
+    }
+    if (msg?.type === 'app_mode_update' && msg.data) {
+      applyAppModeSnapshot(msg.data)
       return
     }
     if (msg?.type === 'chart_subscription_error') {
@@ -708,6 +719,15 @@ function startResizeWatchlist(evt) {
 
 watch(
   () => [scope.symbol, scope.type, scope.variety, scope.timeframe],
+  async () => {
+    resetKeyboardSprite()
+    await loadLayout()
+    syncChartSubscription()
+  },
+)
+
+watch(
+  () => dataMode.value,
   async () => {
     resetKeyboardSprite()
     await loadLayout()

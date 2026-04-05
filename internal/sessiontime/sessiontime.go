@@ -8,6 +8,10 @@ import (
 	"strings"
 )
 
+const DefaultSessionText = "21:00-02:30,09:00-10:15,10:30-11:30,13:30-15:00"
+
+var defaultRanges = mustParseDefaultRanges()
+
 type Range struct {
 	// Start 是交易时段起始分钟。
 	Start int
@@ -118,6 +122,10 @@ func ParseSessionText(raw string) ([]Range, error) {
 	return SortRangesCopy(out), nil
 }
 
+func DefaultRanges() []Range {
+	return append([]Range(nil), defaultRanges...)
+}
+
 func LabelMinute(rawMinute int, sessions []Range) (int, bool) {
 	for _, s := range SortRangesCopy(sessions) {
 		startEdge := s.Start
@@ -145,6 +153,27 @@ func LabelMinute(rawMinute int, sessions []Range) (int, bool) {
 		return label, true
 	}
 	return 0, false
+}
+
+func DistanceToTradingWindow(rawMinute int, sessions []Range) int {
+	if rawMinute < 0 || rawMinute >= 24*60 || len(sessions) == 0 {
+		return 24 * 60
+	}
+	best := 24 * 60
+	for _, s := range SortRangesCopy(sessions) {
+		startEdge := s.Start
+		if s.Start > 0 {
+			startEdge = s.Start - 1
+		}
+		distance := distanceToMinuteInterval(rawMinute, startEdge, s.End)
+		if distance < best {
+			best = distance
+			if best == 0 {
+				return 0
+			}
+		}
+	}
+	return best
 }
 
 func BuildLabelMinuteIndex(sessions []Range) map[int]int {
@@ -197,6 +226,14 @@ func appendRange(out *[]Range, start int, end int) {
 	*out = append(*out, Range{Start: start, End: end})
 }
 
+func mustParseDefaultRanges() []Range {
+	ranges, err := ParseSessionText(DefaultSessionText)
+	if err != nil {
+		panic(err)
+	}
+	return ranges
+}
+
 func firstLabelMinute(s Range) int {
 	if s.Start < s.End {
 		// 日盘场景下，session 从 09:00 开始交易，但第一根 1m 标签是 09:01。
@@ -205,4 +242,27 @@ func firstLabelMinute(s Range) int {
 	// 跨午夜场景会被 appendRange 拆成两段；落到 00:00-xx 这一段时，
 	// 第一根标签直接从该段结束点起算，不再额外 +1。
 	return s.End
+}
+
+func distanceToMinuteInterval(minute int, start int, end int) int {
+	if minute >= start && minute <= end {
+		return 0
+	}
+	distToStart := circularMinuteDistance(minute, start)
+	distToEnd := circularMinuteDistance(minute, end)
+	if distToStart < distToEnd {
+		return distToStart
+	}
+	return distToEnd
+}
+
+func circularMinuteDistance(a int, b int) int {
+	diff := a - b
+	if diff < 0 {
+		diff = -diff
+	}
+	if wrap := 24*60 - diff; wrap < diff {
+		return wrap
+	}
+	return diff
 }

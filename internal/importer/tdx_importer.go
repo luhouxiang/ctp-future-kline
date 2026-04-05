@@ -127,10 +127,14 @@ type TDXImportSession struct {
 	id string
 	// dbPath 是导入目标数据库连接串或数据库路径。
 	dbPath string
+	// sharedDBPath 是公共元数据库连接串，用于交易日历和交易时段读取。
+	sharedDBPath string
 	// files 是当前任务待处理的上传文件列表。
 	files []UploadFile
 	// handler 用于向外部回调进度、冲突、完成和错误事件。
 	handler EventHandler
+	// opts 控制导入后的多周期重建、交易时段推断和文件类型限制。
+	opts ImportOptions
 
 	// mu 保护会话内部可变状态，避免导入协程和外部决策并发读写冲突。
 	mu sync.Mutex
@@ -144,6 +148,16 @@ type TDXImportSession struct {
 	pending *ConflictRecord
 	// decisionCh 用于把前端提交的冲突处理决策传回导入协程。
 	decisionCh chan DecisionRequest
+}
+
+type ImportOptions struct {
+	SharedDBPath        string
+	EnableMMRebuild     bool
+	AllowSessionInfer   bool
+	RequireL9           bool
+	OverwriteDuplicates bool
+	MaxDataDays         int
+	SessionOnly         bool
 }
 
 type rawTdxRow struct {
@@ -170,14 +184,32 @@ type rawTdxRow struct {
 }
 
 func NewTDXImportSession(id string, dbPath string, files []UploadFile, handler EventHandler) *TDXImportSession {
+	return NewTDXImportSessionWithOptions(id, dbPath, files, ImportOptions{
+		SharedDBPath:        dbPath,
+		EnableMMRebuild:     true,
+		AllowSessionInfer:   true,
+		RequireL9:           false,
+		OverwriteDuplicates: false,
+		MaxDataDays:         0,
+		SessionOnly:         false,
+	}, handler)
+}
+
+func NewTDXImportSessionWithOptions(id string, dbPath string, files []UploadFile, opts ImportOptions, handler EventHandler) *TDXImportSession {
 	if handler == nil {
 		handler = noopHandler{}
+	}
+	sharedDBPath := strings.TrimSpace(opts.SharedDBPath)
+	if sharedDBPath == "" {
+		sharedDBPath = dbPath
 	}
 	return &TDXImportSession{
 		id:            id,
 		dbPath:        dbPath,
+		sharedDBPath:  sharedDBPath,
 		files:         files,
 		handler:       handler,
+		opts:          opts,
 		progress:      Progress{TotalFiles: len(files)},
 		replaceByInst: make(map[string]bool),
 		decisionCh:    make(chan DecisionRequest, 1),
@@ -228,6 +260,7 @@ func (s *TDXImportSession) run() {
 	logger.Info("import run begin", "session_id", s.id, "file_count", len(s.files))
 
 	var db *sql.DB
+	var sharedDB *sql.DB
 	var err error
 	openStart := time.Now()
 	openDone := make(chan struct{})
@@ -254,6 +287,17 @@ func (s *TDXImportSession) run() {
 		s.fail(err)
 		return
 	}
+	if strings.TrimSpace(s.sharedDBPath) == strings.TrimSpace(s.dbPath) {
+		sharedDB = db
+	} else {
+		sharedDB, err = openImportDB(s.sharedDBPath)
+		if err != nil {
+			_ = db.Close()
+			logger.Error("import open shared meta store failed", "session_id", s.id, "error", err)
+			s.fail(err)
+			return
+		}
+	}
 	// logger.Info("import open store success", "session_id", s.id)
 
 	for _, f := range s.files {
@@ -263,7 +307,7 @@ func (s *TDXImportSession) run() {
 		}
 		currentFile := filepath.Base(strings.TrimSpace(f.Name))
 		// logger.Info("import processing file", "session_id", s.id, "file", currentFile)
-		if err := s.processFile(db, f); err != nil {
+		if err := s.processFile(db, sharedDB, f); err != nil {
 			s.recordError(err)
 		} else {
 			logger.Info("import file processed", "session_id", s.id, "file", currentFile)
@@ -275,6 +319,9 @@ func (s *TDXImportSession) run() {
 		s.handler.OnProgress(p)
 	}
 	_ = db.Close()
+	if sharedDB != nil && sharedDB != db {
+		_ = sharedDB.Close()
+	}
 
 	s.mu.Lock()
 	s.progress.Done = true
@@ -295,7 +342,7 @@ func openImportDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
-func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
+func (s *TDXImportSession) processFile(db *sql.DB, sharedDB *sql.DB, f UploadFile) error {
 	base := filepath.Base(strings.TrimSpace(f.Name))
 	if !tdxFileNamePattern.MatchString(base) {
 		s.incSkippedFile()
@@ -320,6 +367,9 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		instrumentID = parsed
 	}
 	isL9 := strings.HasSuffix(instrumentID, "L9")
+	if s.opts.RequireL9 && !isL9 {
+		return fmt.Errorf("only l9 1m data files are allowed: %s", base)
+	}
 
 	text, err := decodeGBK(f.Data)
 	if err != nil {
@@ -328,12 +378,16 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 	lines := splitLines(text)
 	if len(lines) < 3 {
 		s.incSkippedFile()
+		warn := fmt.Sprintf("parse failed for %s: file has too few lines for 1m data", base)
+		s.recordWarning(warn)
+		logger.Warn("import file parse warning", "session_id", s.id, "file", base, "reason", warn)
 		return nil
 	}
 
-	timeResolver := klineclock.NewCalendarResolver(db)
+	timeResolver := klineclock.NewCalendarResolver(sharedDB)
 	rawRows := make([]rawTdxRow, 0, len(lines))
 	daySet := make(map[string]time.Time)
+	dataCandidateLines := 0
 	for i, line := range lines {
 		if s.isDone() {
 			return nil
@@ -346,6 +400,7 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		if strings.HasPrefix(line, "#") {
 			break
 		}
+		dataCandidateLines++
 		row, ok, err := parseRawDataLine(line, i+1)
 		if err != nil {
 			return fmt.Errorf("parse line failed in %s:%d: %w", base, i+1, err)
@@ -353,9 +408,21 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		if !ok {
 			continue
 		}
-		rawRows = append(rawRows, row)
 		day := normalizeDay(row.tradingDay)
-		daySet[day.Format("2006-01-02")] = day
+		dayKey := day.Format("2006-01-02")
+		if s.opts.MaxDataDays > 0 {
+			if _, exists := daySet[dayKey]; !exists && len(daySet) >= s.opts.MaxDataDays {
+				logger.Info("import file sampling stop",
+					"session_id", s.id,
+					"file", base,
+					"max_data_days", s.opts.MaxDataDays,
+					"sampled_days", len(daySet),
+				)
+				break
+			}
+		}
+		rawRows = append(rawRows, row)
+		daySet[dayKey] = day
 	}
 
 	fileTradingDays := make([]time.Time, 0, len(daySet))
@@ -383,7 +450,17 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 
 	if len(bars) == 0 {
 		s.incSkippedFile()
-		logger.Info("import file parsed", "session_id", s.id, "file", base, "parsed_rows", 0)
+		reason := buildZeroBarsReason(lines, dataCandidateLines)
+		warn := fmt.Sprintf("parse failed for %s: %s", base, reason)
+		s.recordWarning(warn)
+		logger.Warn("import file parse warning",
+			"session_id", s.id,
+			"file", base,
+			"reason", reason,
+			"header", firstNonEmptyLine(lines),
+			"candidate_lines", dataCandidateLines,
+			"parsed_rows", 0,
+		)
 		return nil
 	}
 	logger.Info("import file parsed", "session_id", s.id, "file", base, "parsed_rows", len(bars))
@@ -410,6 +487,26 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 		"overwritten_rows", after.OverwrittenRows-before.OverwrittenRows,
 		"skipped_rows", after.SkippedRows-before.SkippedRows,
 	)
+	if s.opts.SessionOnly && strings.EqualFold(strings.TrimSpace(bars[0].Period), "1m") {
+		if err := s.inferTradingSessionsAfterImport(db, sharedDB, bars[0], isL9); err != nil {
+			logger.Error("import trading session infer failed",
+				"session_id", s.id,
+				"file", base,
+				"variety", bars[0].Variety,
+				"instrument_id", bars[0].InstrumentID,
+				"error", err,
+			)
+			return err
+		}
+		logger.Info("import trading session infer done",
+			"session_id", s.id,
+			"file", base,
+			"variety", bars[0].Variety,
+			"instrument_id", bars[0].InstrumentID,
+			"sample_days", len(fileTradingDays),
+		)
+		return nil
+	}
 	if strings.EqualFold(strings.TrimSpace(bars[0].Period), "1m") {
 		logger.Info("import post process begin",
 			"session_id", s.id,
@@ -418,7 +515,7 @@ func (s *TDXImportSession) processFile(db *sql.DB, f UploadFile) error {
 			"instrument_id", bars[0].InstrumentID,
 			"is_l9", isL9,
 		)
-		if err := s.aggregateMultiPeriodsAfterImport(db, bars[0], isL9); err != nil {
+		if err := s.aggregateMultiPeriodsAfterImport(db, sharedDB, bars[0], isL9); err != nil {
 			logger.Error("import post process failed",
 				"session_id", s.id,
 				"file", base,
@@ -477,7 +574,7 @@ func (s *TDXImportSession) batchCompareAndWrite(db *sql.DB, fileName string, bar
 
 	shouldOverwriteDup := false
 	s.mu.Lock()
-	shouldOverwriteDup = s.globalReplace || s.replaceByInst[storedInstrumentID]
+	shouldOverwriteDup = s.opts.OverwriteDuplicates || s.globalReplace || s.replaceByInst[storedInstrumentID]
 	s.mu.Unlock()
 	logger.Info("import file dedup split",
 		"session_id", s.id,
@@ -616,6 +713,14 @@ func (s *TDXImportSession) recordError(err error) {
 	s.handler.OnProgress(p)
 }
 
+func (s *TDXImportSession) recordWarning(message string) {
+	s.mu.Lock()
+	s.progress.LastError = message
+	p := s.progress
+	s.mu.Unlock()
+	s.handler.OnProgress(p)
+}
+
 func decodeGBK(data []byte) (string, error) {
 	reader := transform.NewReader(bytes.NewReader(data), simplifiedchinese.GBK.NewDecoder())
 	out, err := io.ReadAll(reader)
@@ -633,6 +738,38 @@ func splitLines(text string) []string {
 		lines = append(lines, scanner.Text())
 	}
 	return lines
+}
+
+func firstNonEmptyLine(lines []string) string {
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			return line
+		}
+	}
+	return ""
+}
+
+func buildZeroBarsReason(lines []string, dataCandidateLines int) string {
+	header := firstNonEmptyLine(lines)
+	switch {
+	case strings.Contains(header, "日线"):
+		return "expected 1m data but detected 日线 header"
+	case strings.Contains(header, "5分钟"):
+		return "expected 1m data but detected 5分钟线 header"
+	case strings.Contains(header, "15分钟"):
+		return "expected 1m data but detected 15分钟线 header"
+	case strings.Contains(header, "30分钟"):
+		return "expected 1m data but detected 30分钟线 header"
+	case strings.Contains(header, "60分钟"):
+		return "expected 1m data but detected 60分钟线 header"
+	case strings.Contains(header, "小时线"):
+		return "expected 1m data but detected 小时线 header"
+	case dataCandidateLines == 0:
+		return "no candidate data rows found"
+	default:
+		return "no valid 1m rows parsed from candidate data lines"
+	}
 }
 
 func parseRawDataLine(line string, lineNumber int) (rawTdxRow, bool, error) {

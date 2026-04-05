@@ -211,10 +211,18 @@ const searchState = reactive({
 const files = ref([])
 const tradingDayFile = ref(null)
 const tradingDayImportResult = ref(null)
+const tradingSessionFiles = ref([])
+const tradingSessionSelection = reactive({
+  totalFiles: 0,
+  skippedFiles: 0,
+  skippedExamples: [],
+})
+const tradingSessionImportResult = ref(null)
 const logs = ref([])
 const wsConnected = ref(false)
 const loadingImport = ref(false)
 const loadingTradingDayImport = ref(false)
+const loadingTradingSessionImport = ref(false)
 const tradeConfigSaving = ref(false)
 const conflict = ref(null)
 const replaySupported = ref(false)
@@ -227,6 +235,7 @@ const marketBadgeClass = computed(() => (status.is_market_open ? 'badge open' : 
 const marketBadgeText = computed(() => (status.is_market_open ? '开市中' : '非开市'))
 const isReplayAppMode = computed(() => appMode.mode === 'replay_paper')
 const isPaperAppMode = computed(() => appMode.mode === 'live_paper' || appMode.mode === 'replay_paper')
+const canStartServer = computed(() => !isReplayAppMode.value)
 const tradePanelTitle = computed(() => (isPaperAppMode.value ? '模拟交易' : '实盘交易'))
 const tradeEnableLabel = computed(() => (isPaperAppMode.value ? '启用模拟交易' : '启用实盘交易'))
 const formattedTradingDay = computed(() => {
@@ -275,7 +284,11 @@ const replayEtaText = computed(() => {
     return '--'
   }
   const eta = new Date(Date.now() + (last - current) / speed)
-  return Number.isNaN(eta.getTime()) ? '--' : eta.toLocaleString()
+  return Number.isNaN(eta.getTime()) ? '--' : formatDisplayDateTime(eta)
+})
+const tradingSessionSkippedText = computed(() => {
+  if (tradingSessionSelection.skippedFiles <= 0) return '--'
+  return tradingSessionSelection.skippedExamples.join(', ') || '--'
 })
 
 function addLog(message) {
@@ -318,6 +331,31 @@ function formatDurationMs(ms) {
   if (hours > 0) return `${hours}h ${minutes}m ${seconds}s`
   if (minutes > 0) return `${minutes}m ${seconds}s`
   return `${seconds}s`
+}
+
+function formatDisplayDateTime(value) {
+  if (!value) return '--'
+  const date = value instanceof Date ? value : new Date(value)
+  if (Number.isNaN(date.getTime())) {
+    const raw = String(value || '').trim()
+    if (!raw) return '--'
+    const match = raw.match(/^(\d{4}-\d{2}-\d{2})[T\s](\d{2}:\d{2}:\d{2})/)
+    return match ? `${match[1]} ${match[2]}` : raw
+  }
+  const pad = (n) => String(n).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
+}
+
+function formatReplayTaskID(value) {
+  const raw = String(value || '').trim()
+  if (!raw) return '--'
+  const dot = raw.indexOf('.')
+  return dot >= 0 ? raw.slice(0, dot) : raw
+}
+
+function isTradingSessionCandidateFileName(name) {
+  const base = String(name || '').split(/[\\/]/).pop() || ''
+  return /^\d+#?[A-Za-z]+L9(?:[-_A-Za-z0-9]*)?\.txt$/i.test(base)
 }
 
 function toDateTimeLocal(date) {
@@ -768,6 +806,10 @@ async function stopReplay() {
 }
 
 async function startServer() {
+  if (!canStartServer.value) {
+    addLog('回放模拟模式不允许启动实时服务器')
+    return
+  }
   const resp = await fetch('/api/server/start', { method: 'POST' })
   if (!resp.ok) {
     addLog('启动服务器失败')
@@ -787,6 +829,28 @@ function onSelectTradingDayFile(event) {
   tradingDayFile.value = selected[0] || null
   tradingDayImportResult.value = null
   addLog(`已选择交易日历文件 ${tradingDayFile.value ? tradingDayFile.value.name : '无'}`)
+}
+
+function onSelectTradingSessionFiles(event) {
+  const selected = Array.from(event.target.files || [])
+  const accepted = []
+  const skippedExamples = []
+  for (const file of selected) {
+    const name = file.webkitRelativePath || file.name
+    if (isTradingSessionCandidateFileName(name)) {
+      accepted.push(file)
+      continue
+    }
+    if (skippedExamples.length < 5) {
+      skippedExamples.push(name)
+    }
+  }
+  tradingSessionFiles.value = accepted
+  tradingSessionSelection.totalFiles = selected.length
+  tradingSessionSelection.skippedFiles = selected.length - accepted.length
+  tradingSessionSelection.skippedExamples = skippedExamples
+  tradingSessionImportResult.value = null
+  addLog(`已选择交易时段目录文件 ${selected.length} 个，符合L9规则 ${accepted.length} 个，跳过 ${tradingSessionSelection.skippedFiles} 个`)
 }
 
 async function startImport() {
@@ -860,6 +924,49 @@ async function importTradingDays() {
     addLog(`加载历史交易日历失败: ${message}`)
   } finally {
     loadingTradingDayImport.value = false
+  }
+}
+
+async function importTradingSessions() {
+  if (tradingSessionFiles.value.length === 0) {
+    addLog('未选择符合规则的L9交易时段文件')
+    return
+  }
+
+  loadingTradingSessionImport.value = true
+  try {
+    const formData = new FormData()
+    for (const file of tradingSessionFiles.value) {
+      formData.append('files', file, file.webkitRelativePath || file.name)
+    }
+    const resp = await fetch('/api/trading-sessions/import', {
+      method: 'POST',
+      body: formData,
+    })
+    if (!resp.ok) {
+      const message = (await resp.text()) || `http ${resp.status}`
+      alert(message)
+      addLog(`更新交易时段失败: ${message}`)
+      return
+    }
+    const data = await resp.json()
+    tradingSessionImportResult.value = {
+      totalFiles: Number(data.total_files || 0),
+      processedFiles: Number(data.processed_files || 0),
+      totalLines: Number(data.total_lines || 0),
+      insertedRows: Number(data.inserted_rows || 0),
+      overwrittenRows: Number(data.overwritten_rows || 0),
+      skippedFiles: Number(data.skipped_files || 0),
+      updatedVarieties: Array.isArray(data.updated_varieties) ? data.updated_varieties : [],
+    }
+    addLog(`更新交易时段成功: 文件=${data.processed_files || 0}/${data.total_files || 0} 行数=${data.total_lines || 0} 新增=${data.inserted_rows || 0} 覆盖=${data.overwritten_rows || 0}`)
+    addLog(`更新交易时段详情: 品种=${(data.updated_varieties || []).join(',') || '--'} 共享库=${data.shared_meta_db || '--'}`)
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error)
+    alert(message)
+    addLog(`更新交易时段失败: ${message}`)
+  } finally {
+    loadingTradingSessionImport.value = false
   }
 }
 
@@ -1090,6 +1197,14 @@ function connectWS() {
       applyTradeStatus(msg.data)
       return
     }
+    if (msg.type === 'app_mode_update' && msg.data) {
+      applyAppModeSnapshot(msg.data)
+      fetchTradeBundle()
+      if (isReplayAppMode.value) {
+        fetchReplayStatus()
+      }
+      return
+    }
     if (msg.type === 'trade_account_update' && msg.data) {
       tradeState.account = msg.data
       return
@@ -1190,7 +1305,7 @@ onUnmounted(() => {
       <h2>CTP Kline 控制台</h2>
       <p>版本号: {{ APP_VERSION }}</p>
       <div class="row">
-        <button @click="startServer">启动服务器</button>
+        <button :disabled="!canStartServer" @click="startServer">启动服务器</button>
         <span>WebSocket: {{ wsConnected ? '已连接' : '未连接' }}</span>
         <span :class="marketBadgeClass">{{ marketBadgeText }}</span>
         <span>运行模式:</span>
@@ -1200,6 +1315,7 @@ onUnmounted(() => {
           <option value="replay_paper">回放模拟</option>
         </select>
       </div>
+      <p v-if="isReplayAppMode" class="error-text">回放模拟模式不需要连接实时行情服务器或真实交易前置，启动服务器按钮已禁用</p>
     </div>
 
     <div class="panel">
@@ -1293,10 +1409,11 @@ onUnmounted(() => {
         <label>起始偏移</label>
         <input v-model.number="replayForm.fromOffset" :disabled="!replayEnabled" type="number" min="0" step="1" />
       </div>
+      <p class="hint-text">默认不会自动继承上次回放游标。只有填写“起始文件/起始偏移”时，才会按断点续播。</p>
 
       <div class="status-grid">
         <div class="status-item">状态: {{ replayState.status || '--' }}</div>
-        <div class="status-item">任务ID: {{ replayState.task_id || '--' }}</div>
+        <div class="status-item">任务ID: {{ formatReplayTaskID(replayState.task_id) }}</div>
         <div class="status-item">模式: {{ replayState.mode || '--' }}</div>
         <div class="status-item">速度: {{ replayState.speed || 1 }}</div>
         <div class="status-item">合约数: {{ replayState.instruments || 0 }}</div>
@@ -1305,9 +1422,9 @@ onUnmounted(() => {
         <div class="status-item">已处理Tick: {{ replayState.processed_ticks || 0 }}</div>
         <div class="status-item">回放进度: {{ replayProgressText }}</div>
         <div class="status-item">当前回放合约: {{ replayState.current_instrument_id || '--' }}</div>
-        <div class="status-item">模拟当前时间: {{ replayState.current_sim_time || '--' }}</div>
-        <div class="status-item">模拟开始时间: {{ replayState.first_sim_time || '--' }}</div>
-        <div class="status-item">模拟结束时间: {{ replayState.last_sim_time || '--' }}</div>
+        <div class="status-item">模拟当前时间: {{ formatDisplayDateTime(replayState.current_sim_time) }}</div>
+        <div class="status-item">模拟开始时间: {{ formatDisplayDateTime(replayState.first_sim_time) }}</div>
+        <div class="status-item">模拟结束时间: {{ formatDisplayDateTime(replayState.last_sim_time) }}</div>
         <div class="status-item">剩余模拟时长: {{ replayRemainingText }}</div>
         <div class="status-item">ETA: {{ replayEtaText }}</div>
         <div class="status-item">主题: {{ (replayState.topics || []).join(', ') || '--' }}</div>
@@ -1316,14 +1433,15 @@ onUnmounted(() => {
         <div class="status-item">结束过滤: {{ replayState.end_time || '--' }}</div>
         <div class="status-item">Tick目录: {{ replayState.tick_dir || '--' }}</div>
         <div class="status-item">起始游标: {{ replayState.from_cursor ? `${replayState.from_cursor.file}@${replayState.from_cursor.offset}` : '--' }}</div>
+        <div class="status-item">保存续播点: {{ appMode.replay_resume_cursor ? `${appMode.replay_resume_cursor.file}@${appMode.replay_resume_cursor.offset}` : '--' }}</div>
         <div class="status-item">当前游标: {{ replayState.last_cursor ? `${replayState.last_cursor.file}@${replayState.last_cursor.offset}` : '--' }}</div>
         <div class="status-item">分发数: {{ replayState.dispatched || 0 }}</div>
         <div class="status-item">跳过数: {{ replayState.skipped || 0 }}</div>
         <div class="status-item">错误数: {{ replayState.errors || 0 }}</div>
         <div class="status-item">最后错误: {{ replayState.last_error || '--' }}</div>
-        <div class="status-item">创建时间: {{ replayState.created_at || '--' }}</div>
-        <div class="status-item">开始执行: {{ replayState.started_at || '--' }}</div>
-        <div class="status-item">完成时间: {{ replayState.finished_at || '--' }}</div>
+        <div class="status-item">创建时间: {{ formatDisplayDateTime(replayState.created_at) }}</div>
+        <div class="status-item">开始执行: {{ formatDisplayDateTime(replayState.started_at) }}</div>
+        <div class="status-item">完成时间: {{ formatDisplayDateTime(replayState.finished_at) }}</div>
       </div>
     </div>
 
@@ -1672,6 +1790,27 @@ onUnmounted(() => {
       <p>已选择文件: {{ tradingDayFile ? tradingDayFile.name : '--' }}</p>
       <p v-if="tradingDayImportResult">
         开始交易日: {{ tradingDayImportResult.minDate }}，结束交易日: {{ tradingDayImportResult.maxDate }}，写入交易日数量: {{ tradingDayImportResult.importedDays }}
+      </p>
+    </div>
+
+    <div class="panel">
+      <h3>更新交易时段</h3>
+      <div class="row">
+        <input type="file" accept=".txt" webkitdirectory directory multiple @change="onSelectTradingSessionFiles" />
+        <button :disabled="loadingTradingSessionImport" @click="importTradingSessions">
+          {{ loadingTradingSessionImport ? '更新中...' : '开始更新交易时段' }}
+        </button>
+      </div>
+      <p>请选择目录。系统只会处理文件名符合“数字#品种L9.txt”的加权指数(L9) 1 分钟数据文件。</p>
+      <p>目录文件总数: {{ tradingSessionSelection.totalFiles }}，符合规则: {{ tradingSessionFiles.length }}，跳过: {{ tradingSessionSelection.skippedFiles }}</p>
+      <p>已跳过示例: {{ tradingSessionSkippedText }}</p>
+      <p v-if="tradingSessionImportResult">
+        文件进度: {{ tradingSessionImportResult.processedFiles }}/{{ tradingSessionImportResult.totalFiles }}，
+        解析行数: {{ tradingSessionImportResult.totalLines }}，
+        新增: {{ tradingSessionImportResult.insertedRows }}，
+        覆盖: {{ tradingSessionImportResult.overwrittenRows }}，
+        跳过文件: {{ tradingSessionImportResult.skippedFiles }}，
+        更新品种: {{ tradingSessionImportResult.updatedVarieties.join(',') || '--' }}
       </p>
     </div>
 

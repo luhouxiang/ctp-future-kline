@@ -74,8 +74,9 @@ type BarsResponse struct {
 }
 
 type Service struct {
-	dbPath string
-	index  *searchindex.Manager
+	dbPath        string
+	sessionDBPath string
+	index         *searchindex.Manager
 }
 
 type searchTable struct {
@@ -90,7 +91,14 @@ type symbolRow struct {
 }
 
 func NewService(dbPath string, index *searchindex.Manager) *Service {
-	return &Service{dbPath: dbPath, index: index}
+	return &Service{dbPath: dbPath, sessionDBPath: dbPath, index: index}
+}
+
+func NewServiceWithSessionDB(dbPath string, sessionDBPath string, index *searchindex.Manager) *Service {
+	if strings.TrimSpace(sessionDBPath) == "" {
+		sessionDBPath = dbPath
+	}
+	return &Service{dbPath: dbPath, sessionDBPath: sessionDBPath, index: index}
 }
 
 func (s *Service) Search(keyword string, page int, pageSize int) (SearchResponse, error) {
@@ -261,7 +269,12 @@ func (s *Service) BarsByEnd(symbol string, kind string, variety string, timefram
 	queryTable := item.TableName
 	queryPeriod := "1m"
 	if tf != "1m" {
-		if _, sessErr := ensureCompletedTradingSession(db, item.Variety); sessErr != nil {
+		sessionDB, sessOpenErr := openQueryDB(s.sessionDBPath)
+		if sessOpenErr != nil {
+			return BarsResponse{}, fmt.Errorf("open session mysql failed: %w", sessOpenErr)
+		}
+		defer sessionDB.Close()
+		if _, sessErr := ensureCompletedTradingSession(sessionDB, item.Variety); sessErr != nil {
 			return BarsResponse{}, sessErr
 		}
 		if kind == "l9" {

@@ -35,3 +35,29 @@ func TestSanitizeSettlementPriceResetsExtremeValueToZero(t *testing.T) {
 		t.Fatalf("sanitizeSettlementPrice(normal) = %v, want 5427.25", got)
 	}
 }
+
+func TestComputeBucketVolume(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name       string
+		currentVol int
+		prevVol    int
+		hasPrev    bool
+		want       int64
+	}{
+		{name: "first generated minute uses current volume", currentVol: 12, prevVol: 0, hasPrev: false, want: 12},
+		{name: "normal delta", currentVol: 28, prevVol: 20, hasPrev: true, want: 8},
+		{name: "counter reset falls back to current", currentVol: 6, prevVol: 20, hasPrev: true, want: 6},
+		{name: "negative current clamps to zero", currentVol: -1, prevVol: 20, hasPrev: true, want: 0},
+	}
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := computeBucketVolume(tc.currentVol, tc.prevVol, tc.hasPrev); got != tc.want {
+				t.Fatalf("computeBucketVolume(%d,%d,%v)=%d want %d", tc.currentVol, tc.prevVol, tc.hasPrev, got, tc.want)
+			}
+		})
+	}
+}

@@ -33,7 +33,7 @@ func (p *rateProbe) loop() {
 	defer ticker.Stop()
 	for range ticker.C {
 		n := p.count.Swap(0)
-		logger.Info("realtime rate", "stage", p.stage, "count_per_sec", n)
+		logger.Debug("realtime rate", "stage", p.stage, "count_per_sec", n)
 	}
 }
 

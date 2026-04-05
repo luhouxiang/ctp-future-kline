@@ -19,6 +19,7 @@ type ChartSubscription struct {
 	Type      string `json:"type"`
 	Variety   string `json:"variety"`
 	Timeframe string `json:"timeframe"`
+	DataMode  string `json:"data_mode"`
 }
 
 type ChartBar struct {
@@ -166,6 +167,7 @@ func NormalizeChartSubscription(raw ChartSubscription) (ChartSubscription, error
 		Type:      strings.ToLower(strings.TrimSpace(raw.Type)),
 		Variety:   strings.ToLower(strings.TrimSpace(raw.Variety)),
 		Timeframe: strings.ToLower(strings.TrimSpace(raw.Timeframe)),
+		DataMode:  strings.ToLower(strings.TrimSpace(raw.DataMode)),
 	}
 	if sub.Symbol == "" {
 		return ChartSubscription{}, fmt.Errorf("symbol is required")
@@ -191,6 +193,12 @@ func NormalizeChartSubscription(raw ChartSubscription) (ChartSubscription, error
 	default:
 		return ChartSubscription{}, fmt.Errorf("invalid timeframe: %s", sub.Timeframe)
 	}
+	if sub.DataMode == "" {
+		sub.DataMode = "realtime"
+	}
+	if sub.DataMode != "realtime" && sub.DataMode != "replay" {
+		return ChartSubscription{}, fmt.Errorf("invalid data_mode: %s", sub.DataMode)
+	}
 	if sub.Variety == "" {
 		return ChartSubscription{}, fmt.Errorf("variety is required")
 	}
@@ -203,6 +211,7 @@ func ChartSubscriptionKey(sub ChartSubscription) string {
 		strings.ToLower(strings.TrimSpace(sub.Type)),
 		strings.ToLower(strings.TrimSpace(sub.Variety)),
 		strings.ToLower(strings.TrimSpace(sub.Timeframe)),
+		strings.ToLower(strings.TrimSpace(sub.DataMode)),
 	}, "|")
 }
 
@@ -272,15 +281,16 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 		return
 	}
 	updates := make([]ChartBarUpdate, 0, 8)
+	dataMode := chartDataModeLabel(replay)
 	s.mu.Lock()
-	contractFrames := s.interestedTimeframesLocked(instrumentID, "contract", variety)
+	contractFrames := s.interestedTimeframesLocked(instrumentID, "contract", variety, dataMode)
 	if len(contractFrames) > 0 {
 		root := s.ensureRootLocked(instrumentID, "contract", variety)
 		root.exchange = strings.TrimSpace(ev.ExchangeID)
 		s.updateContractPartialLocked(root, ev, minuteTime, adjustedTime)
 		updates = append(updates, s.buildPartialUpdatesLocked(root, contractFrames, sessions, replay)...)
 	}
-	l9Frames := s.interestedTimeframesLocked(variety+"l9", "l9", variety)
+	l9Frames := s.interestedTimeframesLocked(variety+"l9", "l9", variety, dataMode)
 	if len(l9Frames) > 0 {
 		root := s.ensureRootLocked(variety+"l9", "l9", variety)
 		if root.latestTicks == nil {
@@ -328,6 +338,7 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 		return
 	}
 	updates := make([]ChartBarUpdate, 0, 4)
+	dataMode := chartDataModeLabel(replay)
 	s.mu.Lock()
 	root := s.ensureRootLocked(symbol, kind, variety)
 	root.exchange = bar.Exchange
@@ -340,7 +351,7 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 			root.currentPartial = nil
 		}
 	}
-	frames := s.interestedTimeframesLocked(symbol, kind, variety)
+	frames := s.interestedTimeframesLocked(symbol, kind, variety, dataMode)
 	for _, timeframe := range frames {
 		if timeframe != strings.ToLower(strings.TrimSpace(bar.Period)) {
 			continue
@@ -351,6 +362,7 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 				Type:      kind,
 				Variety:   variety,
 				Timeframe: timeframe,
+				DataMode:  dataMode,
 			},
 			Phase:  "final",
 			Source: chartSourceLabel(replay),
@@ -389,11 +401,12 @@ func (s *ChartStream) HandlePartialBar(bar minuteBar, replay bool) {
 		return
 	}
 	updates := make([]ChartBarUpdate, 0, 8)
+	dataMode := chartDataModeLabel(replay)
 	s.mu.Lock()
 	root := s.ensureRootLocked(symbol, kind, variety)
 	root.exchange = bar.Exchange
 	root.currentPartial = cloneMinuteBarPtr(bar)
-	frames := s.interestedTimeframesLocked(symbol, kind, variety)
+	frames := s.interestedTimeframesLocked(symbol, kind, variety, dataMode)
 	for _, timeframe := range frames {
 		if timeframe == "1m" {
 			updates = append(updates, ChartBarUpdate{
@@ -402,6 +415,7 @@ func (s *ChartStream) HandlePartialBar(bar minuteBar, replay bool) {
 					Type:      kind,
 					Variety:   variety,
 					Timeframe: timeframe,
+					DataMode:  dataMode,
 				},
 				Phase:  "partial",
 				Source: chartSourceLabel(replay),
@@ -462,10 +476,10 @@ func enqueueChartUpdateLatest(ch chan ChartBarUpdate, update ChartBarUpdate) int
 	return dropped
 }
 
-func (s *ChartStream) interestedTimeframesLocked(symbol string, kind string, variety string) []string {
+func (s *ChartStream) interestedTimeframesLocked(symbol string, kind string, variety string, dataMode string) []string {
 	out := make([]string, 0, 6)
 	for _, tf := range []string{"1m", "5m", "15m", "30m", "1h", "1d"} {
-		key := ChartSubscriptionKey(ChartSubscription{Symbol: symbol, Type: kind, Variety: variety, Timeframe: tf})
+		key := ChartSubscriptionKey(ChartSubscription{Symbol: symbol, Type: kind, Variety: variety, Timeframe: tf, DataMode: dataMode})
 		if s.interests[key] > 0 {
 			out = append(out, tf)
 		}
@@ -586,6 +600,7 @@ func (s *ChartStream) buildPartialUpdatesLocked(root *chartRootState, timeframes
 				Type:      root.kind,
 				Variety:   root.variety,
 				Timeframe: timeframe,
+				DataMode:  chartDataModeLabel(replay),
 			},
 			Phase:  "partial",
 			Source: chartSourceLabel(replay),
@@ -755,6 +770,13 @@ func filterNon1m(items []string) []string {
 }
 
 func chartSourceLabel(replay bool) string {
+	if replay {
+		return "replay"
+	}
+	return "realtime"
+}
+
+func chartDataModeLabel(replay bool) string {
 	if replay {
 		return "replay"
 	}

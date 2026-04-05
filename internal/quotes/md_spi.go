@@ -3,6 +3,7 @@
 package quotes
 
 import (
+	"database/sql"
 	"fmt"
 	"math"
 	"strings"
@@ -157,23 +158,23 @@ type tickFingerprintState struct {
 }
 
 func newMdSpi(store *klineStore, l9Async *l9AsyncCalculator) *mdSpi {
-	return newMdSpiWithOptions(store, l9Async, mdSpiOptions{})
+	return newMdSpiWithOptions(store, store.DB(), l9Async, mdSpiOptions{})
 }
 
-func newMdSpiWithStatus(store *klineStore, l9Async *l9AsyncCalculator, status *RuntimeStatusCenter) *mdSpi {
-	return newMdSpiWithStatusAndOptions(store, l9Async, status, mdSpiOptions{})
+func newMdSpiWithStatus(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCalculator, status *RuntimeStatusCenter) *mdSpi {
+	return newMdSpiWithStatusAndOptions(store, metaDB, l9Async, status, mdSpiOptions{})
 }
 
-func newMdSpiWithOptions(store *klineStore, l9Async *l9AsyncCalculator, opts mdSpiOptions) *mdSpi {
-	return newMdSpiWithStatusAndOptions(store, l9Async, nil, opts)
+func newMdSpiWithOptions(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCalculator, opts mdSpiOptions) *mdSpi {
+	return newMdSpiWithStatusAndOptions(store, metaDB, l9Async, nil, opts)
 }
 
-func newMdSpiWithStatusAndOptions(store *klineStore, l9Async *l9AsyncCalculator, status *RuntimeStatusCenter, opts mdSpiOptions) *mdSpi {
+func newMdSpiWithStatusAndOptions(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCalculator, status *RuntimeStatusCenter, opts mdSpiOptions) *mdSpi {
 	spi := &mdSpi{
 		status:         status,
 		onDisconnected: opts.onDisconnected,
 	}
-	spi.runtime = newMarketDataRuntime(store, l9Async, status, runtimeOptions{
+	spi.runtime = newMarketDataRuntime(store, metaDB, l9Async, status, runtimeOptions{
 		tickDedupWindow:   opts.tickDedupWindow,
 		driftThreshold:    opts.driftThreshold,
 		driftResumeTicks:  opts.driftResumeTicks,
@@ -392,11 +393,17 @@ func labelMinuteOnDay(day time.Time, minuteOfDay int) time.Time {
 
 func computeBucketVolume(currentVol int, prevBucketCloseVol int, hasPrevBucket bool) int64 {
 	if !hasPrevBucket {
-		return 0
+		if currentVol < 0 {
+			return 0
+		}
+		return int64(currentVol)
 	}
 	delta := int64(currentVol - prevBucketCloseVol)
 	if delta < 0 {
-		return 0
+		if currentVol < 0 {
+			return 0
+		}
+		return int64(currentVol)
 	}
 	return delta
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/sessiontime"
 )
@@ -95,19 +96,38 @@ func buildSessionMinuteIndex(sessions []sessionMinuteRange) map[int]int {
 }
 
 func ensureCompletedTradingSession(db *sql.DB, variety string) ([]sessionMinuteRange, error) {
+	dbName, dbErr := dbx.CurrentDatabase(db)
+	if dbErr != nil {
+		dbName = "<unknown>"
+	}
 	rec, ok, err := loadTradingSession(db, variety)
 	if err != nil {
 		return nil, err
 	}
 	if !ok || !rec.IsCompleted {
-		return nil, newTradingSessionNotReadyError()
+		reason := "not_completed"
+		if !ok {
+			reason = "no_rows"
+		}
+		logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "default", "reason", reason, "session_text", sessiontime.DefaultSessionText)
+		return defaultSessionMinuteRanges(), nil
 	}
 	ranges, err := decodeSessionJSON(rec.SessionJSON)
 	if err != nil {
 		return nil, fmt.Errorf("parse trading session for variety=%s failed: %w", variety, err)
 	}
+	logger.Debug("trading sessions resolved", "variety", variety, "database", dbName, "source", "db", "session_text", rec.SessionText, "is_completed", rec.IsCompleted)
 	logger.Info("kline pipeline", "stage", "session_ready", "variety", variety, "session_text", rec.SessionText, "session_count", len(ranges))
 	return ranges, nil
+}
+
+func defaultSessionMinuteRanges() []sessionMinuteRange {
+	src := sessiontime.DefaultRanges()
+	out := make([]sessionMinuteRange, 0, len(src))
+	for _, r := range src {
+		out = append(out, sessionMinuteRange{Start: r.Start, End: r.End})
+	}
+	return out
 }
 
 func formatBarUnix(ts int64) string {
