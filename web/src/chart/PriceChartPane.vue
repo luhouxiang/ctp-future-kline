@@ -30,6 +30,7 @@ const MIN_CANDLE_H = 140;
 const MIN_MACD_H = 70;
 const MIN_VOLUME_H = 120;
 const DATA_ZONE_WIDTH_PX = 64;
+const DATA_ZONE_MASK_PAD_PX = 12;
 const COLOR_UP = "#ff2f2f";
 const COLOR_DOWN_KLINE_VOLUME = "#49e9f8";
 const COLOR_DOWN_MACD = "#2e7d32";
@@ -238,7 +239,7 @@ const overlaySize = computed(() => ({
   height: overlayMetrics.height,
 }));
 const dataZoneMaskStyle = computed(() => ({
-  width: `${DATA_ZONE_WIDTH_PX}px`,
+  width: `${DATA_ZONE_WIDTH_PX + DATA_ZONE_MASK_PAD_PX}px`,
   background: props.theme !== "light" ? "#142033" : "#f8fbff",
 }));
 
@@ -368,7 +369,7 @@ function applyPaneScaleVisibility() {
   if (!chartRefs.candle || !chartRefs.macd || !chartRefs.volume) return;
   // Keep time label only on the bottom pane (volume), same as TradingView multi-pane behavior.
   chartRefs.candle.applyOptions({
-    timeScale: { visible: false, rightOffset: 0 },
+    timeScale: { visible: false, rightOffset: 2 },
     rightPriceScale: {
       borderColor: props.theme !== "light" ? "#263449" : "#d2dfeb",
       minimumWidth: DATA_ZONE_WIDTH_PX,
@@ -376,14 +377,14 @@ function applyPaneScaleVisibility() {
     },
   });
   chartRefs.macd.applyOptions({
-    timeScale: { visible: false, rightOffset: 0 },
+    timeScale: { visible: false, rightOffset: 2 },
     rightPriceScale: {
       borderColor: props.theme !== "light" ? "#263449" : "#d2dfeb",
       minimumWidth: DATA_ZONE_WIDTH_PX,
     },
   });
   chartRefs.volume.applyOptions({
-    timeScale: { visible: true, rightOffset: 0 },
+    timeScale: { visible: true, rightOffset: 2 },
     rightPriceScale: {
       borderColor: props.theme !== "light" ? "#263449" : "#d2dfeb",
       minimumWidth: DATA_ZONE_WIDTH_PX,
