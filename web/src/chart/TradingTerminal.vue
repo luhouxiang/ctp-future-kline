@@ -67,6 +67,7 @@ let spriteKeyHandler = null
 let chartWS = null
 let chartWSReconnectTimer = null
 let chartWSReconnectAttempt = 0
+let chartScopeSyncSeq = 0
 const realtimeStatus = ref('connecting')
 const activeChartSubscriptionKey = ref('')
 const dataMode = ref('realtime')
@@ -554,6 +555,16 @@ function syncChartSubscription() {
   activeChartSubscriptionKey.value = nextKey
 }
 
+async function syncChartScopeAndReload() {
+  const seq = ++chartScopeSyncSeq
+  resetKeyboardSprite()
+  await loadLayout()
+  if (seq !== chartScopeSyncSeq) return
+  syncChartSubscription()
+  if (seq !== chartScopeSyncSeq) return
+  await paneRef.value?.reload?.()
+}
+
 function scheduleChartWSReconnect() {
   if (chartWSReconnectTimer) return
   const delay = Math.min(5000, 1000 * Math.max(1, chartWSReconnectAttempt + 1))
@@ -574,9 +585,10 @@ function connectChartWS() {
     if (activeChartSubscriptionKey.value) {
       activeChartSubscriptionKey.value = ''
       resetQuotePanel()
-      await paneRef.value?.reload?.()
     }
     syncChartSubscription()
+    if (!paneRef.value?.reload) return
+    await paneRef.value.reload()
   })
   chartWS.addEventListener('message', (evt) => {
     let msg = null
@@ -754,18 +766,14 @@ function startResizeWatchlist(evt) {
 watch(
   () => [scope.symbol, scope.type, scope.variety, scope.timeframe],
   async () => {
-    resetKeyboardSprite()
-    await loadLayout()
-    syncChartSubscription()
+    await syncChartScopeAndReload()
   },
 )
 
 watch(
   () => dataMode.value,
   async () => {
-    resetKeyboardSprite()
-    await loadLayout()
-    syncChartSubscription()
+    await syncChartScopeAndReload()
   },
 )
 

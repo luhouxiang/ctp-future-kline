@@ -306,7 +306,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		tickDedupWindow:   time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:    time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks:  s.cfg.DriftResumeTicks,
-		enableMultiMinute: s.cfg.IsMultiMinuteEnabled(),
+		enableMultiMinute: true,
 		flowPath:          s.cfg.FlowPath,
 		onTick:            sideEffects.PublishTick,
 		onBar:             sideEffects.PublishBar,

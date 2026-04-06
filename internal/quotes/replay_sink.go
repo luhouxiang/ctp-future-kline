@@ -54,7 +54,7 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		tickDedupWindow:   time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:    time.Duration(cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks:  cfg.DriftResumeTicks,
-		enableMultiMinute: cfg.IsMultiMinuteEnabled(),
+		enableMultiMinute: true,
 		flowPath:          cfg.FlowPath,
 		onTick: func(t tickEvent) {
 			PublishReplayChartTick(t)

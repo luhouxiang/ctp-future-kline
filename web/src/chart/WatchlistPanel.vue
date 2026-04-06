@@ -205,8 +205,20 @@ function displayPercent(v) {
   return pct > 0 ? `+${text}%` : `${text}%`
 }
 
+function quoteNatureTone(nature, oiDelta) {
+  const text = String(nature || '').trim()
+  if (['多开', '空开', '双开'].includes(text)) return 'up'
+  if (['多平', '空平', '双平', '多换', '空换'].includes(text)) return 'down'
+  const delta = Number(oiDelta)
+  if (Number.isFinite(delta)) {
+    return delta > 0 ? 'up' : 'down'
+  }
+  return 'neutral'
+}
+
 const quoteDisplay = computed(() => {
   const snapshot = props.quoteSnapshot || {}
+  const oiDeltaValue = Number(snapshot.oi_delta)
   return {
     askVolume: displayNumber(snapshot.ask_volume1),
     ask: displayPrice(snapshot.ask_price1),
@@ -218,6 +230,7 @@ const quoteDisplay = computed(() => {
     totalAmount: displayPrice(snapshot.turnover),
     openInterest: displayNumber(snapshot.open_interest),
     oiDelta: displaySignedPrice(snapshot.oi_delta),
+    oiDeltaTone: quoteNatureTone('', oiDeltaValue),
     open: displayPrice(snapshot.open),
     high: displayPrice(snapshot.high),
     low: displayPrice(snapshot.low),
@@ -240,6 +253,7 @@ const quoteTicks = computed(() => {
     volume: displayNumber(row?.volume),
     oiDelta: displaySignedPrice(row?.oi_delta),
     nature: row?.nature || '-',
+    tone: quoteNatureTone(row?.nature, row?.oi_delta),
   }))
 })
 </script>
@@ -276,7 +290,7 @@ const quoteTicks = computed(() => {
           <span class="tv-quote-strip-label">持仓</span>
           <span class="tv-quote-strip-value">{{ quoteDisplay.openInterest }}</span>
           <span class="tv-quote-strip-label">仓差</span>
-          <span class="tv-quote-strip-value">{{ quoteDisplay.oiDelta }}</span>
+          <span class="tv-quote-strip-value" :class="`is-${quoteDisplay.oiDeltaTone}`">{{ quoteDisplay.oiDelta }}</span>
         </div>
         <div class="tv-quote-strip tv-quote-strip-split">
           <span class="tv-quote-strip-label">今开</span>
@@ -325,8 +339,8 @@ const quoteTicks = computed(() => {
             <span>{{ row.time }}</span>
             <span>{{ row.price }}</span>
             <span>{{ row.volume }}</span>
-            <span>{{ row.oiDelta }}</span>
-            <span>{{ row.nature }}</span>
+            <span :class="`is-${row.tone}`">{{ row.oiDelta }}</span>
+            <span :class="`is-${row.tone}`">{{ row.nature }}</span>
           </div>
         </div>
         <div v-else class="tv-object-empty">暂无 tick 明细</div>
@@ -551,3 +565,17 @@ const quoteTicks = computed(() => {
     </div>
   </aside>
 </template>
+
+<style scoped>
+.is-up {
+  color: #d84b45;
+}
+
+.is-down {
+  color: #2f9e5b;
+}
+
+.is-neutral {
+  color: inherit;
+}
+</style>

@@ -144,6 +144,7 @@ let channelDrag = null;
 let realtimeIndicatorTimer = null;
 let realtimeApplyRateTimer = null;
 let realtimeApplyCount = 0;
+let loadRequestSeq = 0;
 
 const drawState = reactive({
   activeTool: "cursor",
@@ -1312,11 +1313,18 @@ async function fetchChunk(endParam) {
 
 async function loadInitialChunk() {
   if (!props.scope.symbol || !props.scope.type) return;
+  const reqSeq = ++loadRequestSeq;
   state.loading = true;
   state.error = "";
+  state.bars = [];
+  state.macdHist = [];
+  state.hasMore = true;
+  renderSeries();
+  viewVersion.value += 1;
   try {
     const endParam = props.scope.end || fmtTime(Math.floor(Date.now() / 1000));
     const chunk = await fetchChunk(endParam);
+    if (reqSeq !== loadRequestSeq) return;
     state.bars = normalizeBarsAscendingUnique(chunk.bars, "initial_chunk");
     state.hasMore = chunk.bars.length >= CHUNK_SIZE;
     const metaSymbol = String(chunk.meta?.symbol || "")
@@ -1330,10 +1338,12 @@ async function loadInitialChunk() {
     renderSeries();
     resetViewportToLoadedBars();
   } catch (err) {
+    if (reqSeq !== loadRequestSeq) return;
     state.error = `闂傚倸鍊风粈渚€骞夐垾鎰佹綎缂備焦蓱閸欏繘鏌熼锝囦汗鐟滅増甯掗悙濠冦亜閹哄棗浜鹃梺缁樺姇閿曨亪寮婚悢鐑樺枂闁告洦鍋勯～鍥⒑闁偛鑻晶顕€鏌涢悤浣哥仩妞ゆ洏鍎靛畷鐔碱敆娴ｈ櫣肖婵＄偑鍊栭崝鎴﹀磿? ${
       err.message || err
     }`;
   } finally {
+    if (reqSeq !== loadRequestSeq) return;
     state.loading = false;
   }
 }
@@ -2782,27 +2792,6 @@ async function syncLayoutAndChartSizes() {
     applyChartSizes();
   });
 }
-
-watch(
-  () => [
-    props.scope.symbol,
-    props.scope.type,
-    props.scope.variety,
-    props.scope.timeframe,
-  ],
-  () => {
-    state.resolvedSymbol = "";
-    loadInitialChunk();
-  }
-);
-
-watch(
-  () => props.dataMode,
-  () => {
-    state.resolvedSymbol = "";
-    loadInitialChunk();
-  }
-);
 
 watch(
   () => props.theme,

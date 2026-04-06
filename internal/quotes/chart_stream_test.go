@@ -114,8 +114,38 @@ func TestSnapshotQuoteContractIncludesRecentTicks(t *testing.T) {
 	if update.Ticks[0].OIDelta == nil || *update.Ticks[0].OIDelta != 5 {
 		t.Fatalf("unexpected tick oi delta: %+v", update.Ticks)
 	}
-	if update.Ticks[0].Nature != "中性" {
+	if update.Ticks[0].Nature != "双开" {
 		t.Fatalf("unexpected tick nature: %+v", update.Ticks[0])
+	}
+}
+
+func TestQuoteTickNatureByAggressorAndOIDelta(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		row  chartQuoteTickRow
+		want string
+	}{
+		{name: "buy open", row: chartQuoteTickRow{price: 101, askPrice1: 101, bidPrice1: 100, oiDelta: 2}, want: "多开"},
+		{name: "sell open", row: chartQuoteTickRow{price: 100, askPrice1: 101, bidPrice1: 100, oiDelta: 2}, want: "空开"},
+		{name: "neutral open", row: chartQuoteTickRow{price: 100.5, askPrice1: 101, bidPrice1: 100, oiDelta: 2}, want: "双开"},
+		{name: "buy close", row: chartQuoteTickRow{price: 101, askPrice1: 101, bidPrice1: 100, oiDelta: -2}, want: "空平"},
+		{name: "sell close", row: chartQuoteTickRow{price: 100, askPrice1: 101, bidPrice1: 100, oiDelta: -2}, want: "多平"},
+		{name: "neutral close", row: chartQuoteTickRow{price: 100.5, askPrice1: 101, bidPrice1: 100, oiDelta: -2}, want: "双平"},
+		{name: "buy exchange", row: chartQuoteTickRow{price: 101, askPrice1: 101, bidPrice1: 100, oiDelta: 0}, want: "空换"},
+		{name: "sell exchange", row: chartQuoteTickRow{price: 100, askPrice1: 101, bidPrice1: 100, oiDelta: 0}, want: "多换"},
+		{name: "neutral exchange fallback", row: chartQuoteTickRow{price: 100.5, askPrice1: 101, bidPrice1: 100, oiDelta: 0}, want: "多换"},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			if got := quoteTickNature(tc.row); got != tc.want {
+				t.Fatalf("quoteTickNature()=%s want %s", got, tc.want)
+			}
+		})
 	}
 }
 

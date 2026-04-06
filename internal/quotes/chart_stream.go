@@ -125,6 +125,7 @@ type chartQuoteTickRow struct {
 	price        float64
 	volume       int64
 	openInterest float64
+	oiDelta      float64
 	bidPrice1    float64
 	askPrice1    float64
 	dataMode     string
@@ -913,6 +914,9 @@ func (root *chartRootState) pushRecentTickLocked(row chartQuoteTickRow) {
 	if root == nil || row.at.IsZero() {
 		return
 	}
+	if len(root.recentTicks) > 0 {
+		row.oiDelta = row.openInterest - root.recentTicks[0].openInterest
+	}
 	root.recentTicks = append([]chartQuoteTickRow{row}, root.recentTicks...)
 	if len(root.recentTicks) > recentQuoteTickLimit {
 		root.recentTicks = root.recentTicks[:recentQuoteTickLimit]
@@ -951,13 +955,47 @@ func quoteOIDelta(rows []chartQuoteTickRow) float64 {
 }
 
 func quoteTickNature(row chartQuoteTickRow) string {
+	side := quoteTickAggressorSide(row)
+	oiDelta := row.oiDelta
+	switch {
+	case oiDelta > 0:
+		switch side {
+		case "buy":
+			return "多开"
+		case "sell":
+			return "空开"
+		default:
+			return "双开"
+		}
+	case oiDelta < 0:
+		switch side {
+		case "buy":
+			return "空平"
+		case "sell":
+			return "多平"
+		default:
+			return "双平"
+		}
+	default:
+		switch side {
+		case "buy":
+			return "空换"
+		case "sell":
+			return "多换"
+		default:
+			return "多换"
+		}
+	}
+}
+
+func quoteTickAggressorSide(row chartQuoteTickRow) string {
 	switch {
 	case row.askPrice1 > 0 && row.price >= row.askPrice1:
-		return "主动买"
+		return "buy"
 	case row.bidPrice1 > 0 && row.price <= row.bidPrice1:
-		return "主动卖"
+		return "sell"
 	default:
-		return "中性"
+		return ""
 	}
 }
 
@@ -1141,6 +1179,7 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 	if root.kind == "contract" {
 		ticks = make([]ChartQuoteTickRow, 0, len(root.recentTicks))
 		for idx, item := range root.recentTicks {
+			displayRow := item
 			var volume *int64
 			if idx+1 < len(root.recentTicks) {
 				delta := item.volume - root.recentTicks[idx+1].volume
@@ -1153,7 +1192,11 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 			}
 			var oiDelta *float64
 			if idx+1 < len(root.recentTicks) {
-				delta := item.openInterest - root.recentTicks[idx+1].openInterest
+				delta := item.oiDelta
+				if delta == 0 {
+					delta = item.openInterest - root.recentTicks[idx+1].openInterest
+				}
+				displayRow.oiDelta = delta
 				oiDelta = floatPtr(delta)
 			}
 			ticks = append(ticks, ChartQuoteTickRow{
@@ -1161,7 +1204,7 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 				Price:    floatPtr(item.price),
 				Volume:   volume,
 				OIDelta:  oiDelta,
-				Nature:   quoteTickNature(item),
+				Nature:   quoteTickNature(displayRow),
 				DataMode: item.dataMode,
 			})
 		}
