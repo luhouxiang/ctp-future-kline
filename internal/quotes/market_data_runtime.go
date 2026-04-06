@@ -129,8 +129,10 @@ type instrumentRuntimeState struct {
 	currentTradingDay string
 	// lastVolumes 是最近一次看到的累计成交量。
 	lastVolumes int
-	// aggregator 负责把连续 1m bar 进一步聚合成 mm 和日线等结果。
-	aggregator *closedBarAggregator
+	// tracker 负责把 1m final + 当前 1m partial 增量推进到更高周期。
+	tracker *timeframeTracker
+	// restoredTradingDay 记录高周期状态最近一次回灌完成的交易日。
+	restoredTradingDay string
 }
 
 type closedBarAggregator struct {
@@ -837,7 +839,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	state := s.state[instrumentID]
 	if state == nil {
 		state = &instrumentRuntimeState{
-			aggregator: newClosedBarAggregator(instrumentID, exchangeID),
+			tracker: newTimeframeTracker(),
 		}
 		s.state[instrumentID] = state
 	}
@@ -846,9 +848,21 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		state.currentBarBaseVol = 0
 		state.prevGeneratedBarCloseVol = 0
 		state.hasPrevGeneratedBarVolume = false
+		state.restoredTradingDay = ""
+		if state.tracker != nil {
+			state.tracker.Reset()
+		}
 	}
 	if currentTradingDay != "" {
 		state.currentTradingDay = currentTradingDay
+	}
+	if state.tracker == nil {
+		state.tracker = newTimeframeTracker()
+	}
+	if s.runtime.opts.enableMultiMinute {
+		if err := s.restoreTimeframeState(state, instrumentID, variety, currentTradingDay); err != nil {
+			logger.Error("restore higher timeframe state failed", "instrument_id", instrumentID, "trading_day", currentTradingDay, "error", err)
+		}
 	}
 
 	upstreamLagMS := now.Sub(adjustedTickTime).Seconds() * 1000
@@ -926,6 +940,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 			onPartialBarRateProbe.Inc()
 			s.runtime.opts.onPartialBar(state.bar)
 		}
+		s.emitHigherTimeframePartials(state, sessions)
 		return
 	}
 
@@ -984,6 +999,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		onPartialBarRateProbe.Inc()
 		s.runtime.opts.onPartialBar(state.bar)
 	}
+	s.emitHigherTimeframePartials(state, sessions)
 
 	if len(persisted) > 0 {
 		s.runtime.enqueuePersistTasks(persisted)
@@ -1080,9 +1096,12 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 	sessions, err := s.runtime.sessionResolver.Sessions(closedBar.Variety)
 	if err == nil && s.runtime.opts.enableMultiMinute {
 		state := s.state[closedBar.InstrumentID]
-		if state != nil {
-			// 第二步：把已封口的 1m bar 喂给聚合器，只产出已经完整闭合的 mm bar。
-			aggBars := state.aggregator.Consume(closedBar, sessions, flush)
+		if state != nil && state.tracker != nil {
+			aggBars, _ := state.tracker.ConsumeFinal(closedBar, sessions)
+			if flush {
+				aggBars = append(aggBars, state.tracker.Flush()...)
+			}
+			sortTimeframeBars(aggBars)
 			if mmTable, mmErr := instrumentMMTableName(closedBar.Variety); mmErr == nil {
 				for _, aggBar := range aggBars {
 					tasks = append(tasks, persistTask{
@@ -1105,6 +1124,35 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 		s.runtime.l9Async.Submit(closedBar.Variety, closedBar.MinuteTime)
 	}
 	return tasks
+}
+
+func (s *marketDataShard) restoreTimeframeState(state *instrumentRuntimeState, instrumentID string, variety string, tradingDay string) error {
+	if s == nil || state == nil || state.tracker == nil {
+		return nil
+	}
+	if strings.TrimSpace(tradingDay) == "" || state.restoredTradingDay == tradingDay {
+		return nil
+	}
+	bars, err := s.runtime.store.QueryMinuteBarsForTradingDay(variety, instrumentID, false, tradingDay)
+	if err != nil {
+		return err
+	}
+	state.tracker.Reset()
+	state.tracker.RestoreFinals(bars, mustSessionsCopy(s.runtime.sessionResolver, variety))
+	state.restoredTradingDay = tradingDay
+	return nil
+}
+
+func (s *marketDataShard) emitHigherTimeframePartials(state *instrumentRuntimeState, sessions []sessiontime.Range) {
+	if s == nil || state == nil || state.tracker == nil || s.runtime.opts.onPartialBar == nil || !state.hasBar {
+		return
+	}
+	partials := state.tracker.BuildPartials(state.bar, sessions)
+	sortTimeframeBars(partials)
+	for _, bar := range partials {
+		onPartialBarRateProbe.Inc()
+		s.runtime.opts.onPartialBar(bar)
+	}
 }
 
 func (s *marketDataShard) flush() error {
@@ -1143,6 +1191,19 @@ func toKlineAggSessions(in []sessiontime.Range) []klineagg.SessionRange {
 			End:   item.End,
 		})
 	}
+	return out
+}
+
+func mustSessionsCopy(resolver *sessionResolver, variety string) []sessiontime.Range {
+	if resolver == nil {
+		return nil
+	}
+	sessions, err := resolver.Sessions(variety)
+	if err != nil {
+		return nil
+	}
+	out := make([]sessiontime.Range, len(sessions))
+	copy(out, sessions)
 	return out
 }
 

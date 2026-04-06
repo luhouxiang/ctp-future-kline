@@ -164,6 +164,82 @@ WHERE "%s" = ? AND "%s" = ?;`,
 	return out, nil
 }
 
+func (s *klineStore) QueryMinuteBarsForTradingDay(variety string, instrumentID string, isL9 bool, tradingDay string) ([]minuteBar, error) {
+	var (
+		tableName string
+		err       error
+	)
+	if isL9 {
+		tableName, err = tableNameForL9Variety(variety)
+	} else {
+		tableName, err = tableNameForVariety(variety)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureTable(tableName); err != nil {
+		if isMissingKlineTableErr(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	query := fmt.Sprintf(`
+SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"
+FROM "%s"
+WHERE lower("%s") = ?
+  AND "%s" = '1m'
+  AND DATE("%s") = ?
+ORDER BY "%s" ASC`,
+		colInstrumentID, colExchange, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
+		tableName,
+		colInstrumentID,
+		colPeriod,
+		colTime,
+		colAdjustedTime,
+	)
+	rows, err := s.db.Query(query, strings.ToLower(strings.TrimSpace(instrumentID)), strings.TrimSpace(tradingDay))
+	if err != nil {
+		if isMissingKlineTableErr(err) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("query trading day minute bars failed: %w", err)
+	}
+	defer rows.Close()
+
+	out := make([]minuteBar, 0, 512)
+	for rows.Next() {
+		var bar minuteBar
+		var ts, adjusted time.Time
+		if err := rows.Scan(
+			&bar.InstrumentID,
+			&bar.Exchange,
+			&ts,
+			&adjusted,
+			&bar.Period,
+			&bar.Open,
+			&bar.High,
+			&bar.Low,
+			&bar.Close,
+			&bar.Volume,
+			&bar.OpenInterest,
+			&bar.SettlementPrice,
+		); err != nil {
+			return nil, fmt.Errorf("scan trading day minute bar failed: %w", err)
+		}
+		bar.Variety = normalizeVariety(variety)
+		bar.MinuteTime = ts
+		bar.AdjustedTime = ts
+		if !adjusted.IsZero() {
+			bar.AdjustedTime = adjusted
+		}
+		out = append(out, bar)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trading day minute bars failed: %w", err)
+	}
+	return out, nil
+}
+
 // upsertMinuteBarToTable 是统一的分钟线写表实现。
 // 普通合约 1m 表和 L9 1m 表都会走这里，只是目标表名不同。
 func (s *klineStore) upsertMinuteBarToTable(tableName string, bar minuteBar) error {
@@ -349,6 +425,14 @@ func ensureAdjustedTimeIndex(db *sql.DB, tableName string) error {
 		return fmt.Errorf("create adjusted index failed: %w", err)
 	}
 	return nil
+}
+
+func isMissingKlineTableErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such table") || strings.Contains(msg, "doesn't exist")
 }
 
 // chooseAdjustedTime 选择写入数据库时使用的 AdjustedTime。

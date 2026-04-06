@@ -18,7 +18,8 @@ func TestSnapshotBarsForMinuteDoesNotBackfillMissingContracts(t *testing.T) {
 		latest:            make(map[string]minuteBar),
 		minuteBars:        make(map[string]map[int64]map[string]minuteBar),
 		instrumentVariety: make(map[string]string),
-		aggregators:       make(map[string]*closedBarAggregator),
+		trackers:          make(map[string]*timeframeTracker),
+		restoredDays:      make(map[string]string),
 	}
 	minuteTime := time.Date(2026, 4, 5, 21, 1, 0, 0, time.Local)
 	c.ObserveMinuteBar(minuteBar{

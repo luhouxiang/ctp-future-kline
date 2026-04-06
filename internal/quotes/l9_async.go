@@ -35,7 +35,8 @@ type l9AsyncCalculator struct {
 	latest            map[string]minuteBar
 	minuteBars        map[string]map[int64]map[string]minuteBar
 	instrumentVariety map[string]string
-	aggregators       map[string]*closedBarAggregator
+	trackers          map[string]*timeframeTracker
+	restoredDays      map[string]string
 	persistSink       func([]persistTask)
 }
 
@@ -58,7 +59,8 @@ func newL9AsyncCalculator(store *klineStore, metaDB *sql.DB, status *RuntimeStat
 		latest:            make(map[string]minuteBar),
 		minuteBars:        make(map[string]map[int64]map[string]minuteBar),
 		instrumentVariety: make(map[string]string),
-		aggregators:       make(map[string]*closedBarAggregator),
+		trackers:          make(map[string]*timeframeTracker),
+		restoredDays:      make(map[string]string),
 	}
 	c.enabled.Store(enabled)
 	if registry != nil {
@@ -192,6 +194,7 @@ func (c *l9AsyncCalculator) Close() {
 	}
 	close(c.tasks)
 	c.wg.Wait()
+	c.flushTrackers()
 }
 
 func (c *l9AsyncCalculator) worker() {
@@ -288,11 +291,12 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 	}
 
 	c.mu.Lock()
-	agg := c.aggregators[variety]
-	if agg == nil {
-		agg = newClosedBarAggregator(l9Bar.InstrumentID, l9Bar.Exchange)
-		c.aggregators[variety] = agg
+	tracker := c.trackers[variety]
+	if tracker == nil {
+		tracker = newTimeframeTracker()
+		c.trackers[variety] = tracker
 	}
+	restoredDay := c.restoredDays[variety]
 	sink := c.persistSink
 	c.mu.Unlock()
 
@@ -324,8 +328,10 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 
 	sessions, err := c.loadSessions(variety)
 	if err == nil {
-		// L9 1m 生成后，继续沿用同一个聚合器产出 L9 的 5m/15m/30m/1h/120m/1d。
-		for _, bar := range agg.Consume(l9Bar, sessions, false) {
+		if err := c.restoreTrackerForTradingDay(variety, tracker, restoredDay, l9Bar, sessions); err != nil {
+			return err
+		}
+		for _, bar := range trackerConsumeFinals(tracker, l9Bar, sessions) {
 			if sink == nil {
 				tableName, tableErr := l9MMTableName(variety)
 				if tableErr != nil {
@@ -354,6 +360,92 @@ func (c *l9AsyncCalculator) computeAndStore(variety string, minuteTime time.Time
 		sink(tasks)
 	}
 	return nil
+}
+
+func trackerConsumeFinals(tracker *timeframeTracker, bar minuteBar, sessions []sessiontime.Range) []minuteBar {
+	if tracker == nil {
+		return nil
+	}
+	out, _ := tracker.ConsumeFinal(bar, sessions)
+	sortTimeframeBars(out)
+	return out
+}
+
+func (c *l9AsyncCalculator) restoreTrackerForTradingDay(variety string, tracker *timeframeTracker, restoredDay string, current minuteBar, sessions []sessiontime.Range) error {
+	if c == nil || tracker == nil {
+		return nil
+	}
+	tradingDay := tradingDayKey(current)
+	if tradingDay == "" || tradingDay == restoredDay {
+		return nil
+	}
+	bars, err := c.store.QueryMinuteBarsForTradingDay(variety, current.InstrumentID, true, tradingDay)
+	if err != nil {
+		return err
+	}
+	restoreBars := bars[:0]
+	for _, bar := range bars {
+		if !current.MinuteTime.IsZero() && !bar.MinuteTime.Before(current.MinuteTime) {
+			continue
+		}
+		restoreBars = append(restoreBars, bar)
+	}
+	tracker.Reset()
+	tracker.RestoreFinals(restoreBars, sessions)
+	c.mu.Lock()
+	c.restoredDays[variety] = tradingDay
+	c.mu.Unlock()
+	return nil
+}
+
+func (c *l9AsyncCalculator) flushTrackers() {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	trackers := make(map[string]*timeframeTracker, len(c.trackers))
+	sink := c.persistSink
+	for variety, tracker := range c.trackers {
+		trackers[variety] = tracker
+	}
+	c.mu.Unlock()
+
+	for variety, tracker := range trackers {
+		if tracker == nil {
+			continue
+		}
+		bars := tracker.Flush()
+		if len(bars) == 0 {
+			continue
+		}
+		sortTimeframeBars(bars)
+		if sink == nil {
+			tableName, err := l9MMTableName(variety)
+			if err != nil {
+				continue
+			}
+			for _, bar := range bars {
+				_ = c.store.upsertMinuteBarToTable(tableName, bar)
+			}
+			continue
+		}
+		tableName, err := l9MMTableName(variety)
+		if err != nil {
+			continue
+		}
+		tasks := make([]persistTask, 0, len(bars))
+		for _, bar := range bars {
+			tasks = append(tasks, persistTask{
+				Bar:          bar,
+				TableName:    tableName,
+				Trace:        runtimeTrace{ReceivedAt: runtimeMetricTime(bar.SourceReceivedAt, bar.Replay, time.Now()), PersistEnqueuedAt: time.Now()},
+				InstrumentID: bar.InstrumentID,
+				IsL9:         true,
+				Replay:       bar.Replay,
+			})
+		}
+		sink(tasks)
+	}
 }
 
 func (c *l9AsyncCalculator) snapshotBarsForMinute(variety string, minuteTime time.Time) []minuteBar {

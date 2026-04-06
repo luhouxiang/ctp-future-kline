@@ -253,6 +253,7 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	busLog, _ := s.getBusLog()
 	sideEffects := newMarketDataSideEffects(status,
 		func(t tickEvent) {
+			PublishRealtimeChartTick(t)
 			strategy.PublishRealtimeTick(strategy.TickEvent{
 				InstrumentID:    t.InstrumentID,
 				ExchangeID:      t.ExchangeID,

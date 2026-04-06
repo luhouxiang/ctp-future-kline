@@ -852,6 +852,12 @@ func (s *Server) handleChartSubscribe(conn *websocket.Conn, raw json.RawMessage)
 		s.chartStream.RemoveInterest(sub)
 		return
 	}
+	if update, ok := s.chartStream.SnapshotBar(sub); ok {
+		_ = s.writeConnJSON(conn, map[string]any{
+			"type": "chart_bar_update",
+			"data": update,
+		})
+	}
 	if update, ok := s.chartStream.SnapshotQuote(sub); ok {
 		s.broadcastQuoteUpdate(update)
 	}

@@ -118,3 +118,44 @@ func TestSnapshotQuoteContractIncludesRecentTicks(t *testing.T) {
 		t.Fatalf("unexpected tick nature: %+v", update.Ticks[0])
 	}
 }
+
+func TestSnapshotBarUsesLatestCachedPhase(t *testing.T) {
+	t.Parallel()
+
+	stream := &ChartStream{
+		roots: make(map[string]*chartRootState),
+	}
+	root := &chartRootState{
+		symbol:       "ag2605",
+		kind:         "contract",
+		variety:      "ag",
+		latestBars:   make(map[string]minuteBar),
+		latestPhases: make(map[string]string),
+	}
+	root.latestBars["5m"] = minuteBar{
+		Variety:      "ag",
+		InstrumentID: "ag2605",
+		Exchange:     "SHFE",
+		MinuteTime:   time.Date(2026, 4, 5, 21, 5, 0, 0, time.Local),
+		AdjustedTime: time.Date(2026, 4, 5, 21, 5, 0, 0, time.Local),
+		Period:       "5m",
+		Open:         100,
+		High:         105,
+		Low:          99,
+		Close:        104,
+		Volume:       20,
+	}
+	root.latestPhases["5m"] = "partial"
+	stream.roots[rootKeyForSubscription(ChartSubscription{Symbol: "ag2605", Type: "contract", Variety: "ag"})] = root
+
+	update, ok := stream.SnapshotBar(ChartSubscription{Symbol: "ag2605", Type: "contract", Variety: "ag", Timeframe: "5m", DataMode: "realtime"})
+	if !ok {
+		t.Fatal("SnapshotBar returned no update")
+	}
+	if update.Phase != "partial" {
+		t.Fatalf("phase=%s want partial", update.Phase)
+	}
+	if update.Bar.AdjustedTime != time.Date(2026, 4, 5, 21, 5, 0, 0, time.Local).Unix() {
+		t.Fatalf("adjusted_time=%d want %d", update.Bar.AdjustedTime, time.Date(2026, 4, 5, 21, 5, 0, 0, time.Local).Unix())
+	}
+}

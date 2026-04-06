@@ -8,10 +8,8 @@ import (
 	"time"
 
 	dbx "ctp-future-kline/internal/db"
-	"ctp-future-kline/internal/klineagg"
 	"ctp-future-kline/internal/klineclock"
 	"ctp-future-kline/internal/queuewatch"
-	"ctp-future-kline/internal/sessiontime"
 )
 
 type ChartSubscription struct {
@@ -139,12 +137,17 @@ type chartRootState struct {
 	exchange       string
 	history1m      []minuteBar
 	currentPartial *minuteBar
+	latestBars     map[string]minuteBar
+	latestPhases   map[string]string
 	latestTicks    map[string]chartTickSnapshot
 	recentTicks    []chartQuoteTickRow
+	tracker        *timeframeTracker
+	restoredDay    string
 }
 
 type ChartStream struct {
 	db              *sql.DB
+	store           *klineStore
 	clock           *klineclock.CalendarResolver
 	sessionResolver *sessionResolver
 
@@ -174,6 +177,7 @@ func NewChartStream(dsn string, registry *queuewatch.Registry) (*ChartStream, er
 	}
 	stream := &ChartStream{
 		db:              db,
+		store:           &klineStore{db: db, tables: make(map[string]struct{})},
 		clock:           klineclock.NewCalendarResolver(db),
 		sessionResolver: newSessionResolver(db),
 		interests:       make(map[string]int),
@@ -413,6 +417,36 @@ func (s *ChartStream) SnapshotQuote(raw ChartSubscription) (ChartQuoteUpdate, bo
 	return update, ok
 }
 
+func (s *ChartStream) SnapshotBar(raw ChartSubscription) (ChartBarUpdate, bool) {
+	if s == nil {
+		return ChartBarUpdate{}, false
+	}
+	sub, err := NormalizeChartSubscription(raw)
+	if err != nil {
+		return ChartBarUpdate{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	root := s.roots[rootKeyForSubscription(sub)]
+	if root == nil {
+		return ChartBarUpdate{}, false
+	}
+	bar, ok := root.latestBars[sub.Timeframe]
+	if !ok {
+		return ChartBarUpdate{}, false
+	}
+	phase := strings.ToLower(strings.TrimSpace(root.latestPhases[sub.Timeframe]))
+	if phase == "" {
+		phase = "final"
+	}
+	return ChartBarUpdate{
+		Subscription: sub,
+		Phase:        phase,
+		Source:       sub.DataMode,
+		Bar:          chartBarFromMinuteBar(bar),
+	}, true
+}
+
 func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 	if s == nil {
 		return
@@ -434,15 +468,11 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 	quoteUpdates := make([]ChartQuoteUpdate, 0, 2)
 	dataMode := chartDataModeLabel(replay)
 	s.mu.Lock()
-	contractFrames := s.interestedTimeframesLocked(instrumentID, "contract", variety, dataMode)
 	contractQuoteFrames := s.interestedQuoteTimeframesLocked(instrumentID, "contract", variety, dataMode)
-	if len(contractFrames) > 0 || len(contractQuoteFrames) > 0 {
+	if len(contractQuoteFrames) > 0 {
 		root := s.ensureRootLocked(instrumentID, "contract", variety)
 		root.exchange = strings.TrimSpace(ev.ExchangeID)
-		s.updateContractPartialLocked(root, ev, minuteTime, adjustedTime, dataMode)
-		if len(contractFrames) > 0 {
-			updates = append(updates, s.buildPartialUpdatesLocked(root, contractFrames, sessions, replay)...)
-		}
+		s.updateContractQuoteLocked(root, ev, minuteTime, adjustedTime, dataMode)
 		for _, timeframe := range contractQuoteFrames {
 			if quoteUpdate, ok := s.buildQuoteUpdateLocked(root, ChartSubscription{
 				Symbol:    instrumentID,
@@ -459,6 +489,14 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 	l9QuoteFrames := s.interestedQuoteTimeframesLocked(variety+"l9", "l9", variety, dataMode)
 	if len(l9Frames) > 0 || len(l9QuoteFrames) > 0 {
 		root := s.ensureRootLocked(variety+"l9", "l9", variety)
+		tradingDay := strings.TrimSpace(ev.TradingDay)
+		if tradingDay == "" && !minuteTime.IsZero() {
+			tradingDay = minuteTime.Format("2006-01-02")
+		}
+		if err := s.restoreL9TrackerLocked(root, tradingDay, minuteTime); err != nil {
+			s.mu.Unlock()
+			return
+		}
 		if root.latestTicks == nil {
 			root.latestTicks = make(map[string]chartTickSnapshot)
 		}
@@ -497,7 +535,45 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 		}
 		s.updateL9PartialLocked(root, minuteTime, adjustedTime)
 		if len(l9Frames) > 0 {
-			updates = append(updates, s.buildPartialUpdatesLocked(root, l9Frames, sessions, replay)...)
+			for _, timeframe := range l9Frames {
+				switch timeframe {
+				case "1m":
+					if root.currentPartial != nil {
+						updates = append(updates, ChartBarUpdate{
+							Subscription: ChartSubscription{
+								Symbol:    variety + "l9",
+								Type:      "l9",
+								Variety:   variety,
+								Timeframe: timeframe,
+								DataMode:  dataMode,
+							},
+							Phase:  "partial",
+							Source: chartSourceLabel(replay),
+							Bar:    chartBarFromMinuteBar(*root.currentPartial),
+						})
+					}
+				default:
+					for _, bar := range root.tracker.BuildPartials(*root.currentPartial, sessions) {
+						if bar.Period != timeframe {
+							continue
+						}
+						root.latestBars[timeframe] = bar
+						root.latestPhases[timeframe] = "partial"
+						updates = append(updates, ChartBarUpdate{
+							Subscription: ChartSubscription{
+								Symbol:    variety + "l9",
+								Type:      "l9",
+								Variety:   variety,
+								Timeframe: timeframe,
+								DataMode:  dataMode,
+							},
+							Phase:  "partial",
+							Source: chartSourceLabel(replay),
+							Bar:    chartBarFromMinuteBar(bar),
+						})
+					}
+				}
+			}
 		}
 		for _, timeframe := range l9QuoteFrames {
 			if quoteUpdate, ok := s.buildQuoteUpdateLocked(root, ChartSubscription{
@@ -543,6 +619,8 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 	s.mu.Lock()
 	root := s.ensureRootLocked(symbol, kind, variety)
 	root.exchange = bar.Exchange
+	root.latestBars[strings.ToLower(strings.TrimSpace(bar.Period))] = bar
+	root.latestPhases[strings.ToLower(strings.TrimSpace(bar.Period))] = "final"
 	if bar.Period == "1m" {
 		root.history1m = append(root.history1m, bar)
 		if len(root.history1m) > defaultTickHistoryRetention {
@@ -550,6 +628,12 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 		}
 		if root.currentPartial != nil && sameBarMinute(*root.currentPartial, bar) {
 			root.currentPartial = nil
+		}
+		if kind == "l9" && root.tracker != nil {
+			sessions, err := s.sessionResolver.Sessions(variety)
+			if err == nil && len(sessions) > 0 {
+				_, _ = root.tracker.ConsumeFinal(bar, sessions)
+			}
 		}
 	}
 	frames := s.interestedTimeframesLocked(symbol, kind, variety, dataMode)
@@ -569,14 +653,6 @@ func (s *ChartStream) HandleFinalBar(bar minuteBar, replay bool) {
 			Source: chartSourceLabel(replay),
 			Bar:    chartBarFromMinuteBar(bar),
 		})
-	}
-	if bar.Period == "1m" {
-		sessions, err := s.sessionResolver.Sessions(variety)
-		if err == nil && len(sessions) > 0 {
-			for _, update := range s.buildPartialUpdatesLocked(root, filterNon1m(frames), sessions, replay) {
-				updates = append(updates, update)
-			}
-		}
 	}
 	s.mu.Unlock()
 	s.broadcast(updates)
@@ -606,10 +682,14 @@ func (s *ChartStream) HandlePartialBar(bar minuteBar, replay bool) {
 	s.mu.Lock()
 	root := s.ensureRootLocked(symbol, kind, variety)
 	root.exchange = bar.Exchange
-	root.currentPartial = cloneMinuteBarPtr(bar)
+	root.latestBars[strings.ToLower(strings.TrimSpace(bar.Period))] = bar
+	root.latestPhases[strings.ToLower(strings.TrimSpace(bar.Period))] = "partial"
+	if strings.EqualFold(bar.Period, "1m") {
+		root.currentPartial = cloneMinuteBarPtr(bar)
+	}
 	frames := s.interestedTimeframesLocked(symbol, kind, variety, dataMode)
 	for _, timeframe := range frames {
-		if timeframe == "1m" {
+		if timeframe == strings.ToLower(strings.TrimSpace(bar.Period)) {
 			updates = append(updates, ChartBarUpdate{
 				Subscription: ChartSubscription{
 					Symbol:    symbol,
@@ -622,12 +702,6 @@ func (s *ChartStream) HandlePartialBar(bar minuteBar, replay bool) {
 				Source: chartSourceLabel(replay),
 				Bar:    chartBarFromMinuteBar(bar),
 			})
-		}
-	}
-	if len(frames) > 0 {
-		sessions, err := s.sessionResolver.Sessions(variety)
-		if err == nil && len(sessions) > 0 {
-			updates = append(updates, s.buildPartialUpdatesLocked(root, filterNon1m(frames), sessions, replay)...)
 		}
 	}
 	s.mu.Unlock()
@@ -747,17 +821,45 @@ func (s *ChartStream) ensureRootLocked(symbol string, kind string, variety strin
 	root := s.roots[key]
 	if root == nil {
 		root = &chartRootState{
-			symbol:      symbol,
-			kind:        kind,
-			variety:     variety,
-			latestTicks: make(map[string]chartTickSnapshot),
+			symbol:       symbol,
+			kind:         kind,
+			variety:      variety,
+			latestBars:   make(map[string]minuteBar),
+			latestPhases: make(map[string]string),
+			latestTicks:  make(map[string]chartTickSnapshot),
+			tracker:      newTimeframeTracker(),
 		}
 		s.roots[key] = root
 	}
 	return root
 }
 
-func (s *ChartStream) updateContractPartialLocked(root *chartRootState, ev tickEvent, minuteTime time.Time, adjustedTime time.Time, dataMode string) {
+func (s *ChartStream) restoreL9TrackerLocked(root *chartRootState, tradingDay string, currentMinute time.Time) error {
+	if s == nil || s.store == nil || root == nil || root.kind != "l9" || root.tracker == nil {
+		return nil
+	}
+	tradingDay = strings.TrimSpace(tradingDay)
+	if tradingDay == "" || root.restoredDay == tradingDay {
+		return nil
+	}
+	bars, err := s.store.QueryMinuteBarsForTradingDay(root.variety, root.symbol, true, tradingDay)
+	if err != nil {
+		return err
+	}
+	restoreBars := bars[:0]
+	for _, bar := range bars {
+		if !currentMinute.IsZero() && !bar.MinuteTime.Before(currentMinute) {
+			continue
+		}
+		restoreBars = append(restoreBars, bar)
+	}
+	root.tracker.Reset()
+	root.tracker.RestoreFinals(restoreBars, mustSessionsCopy(s.sessionResolver, root.variety))
+	root.restoredDay = tradingDay
+	return nil
+}
+
+func (s *ChartStream) updateContractQuoteLocked(root *chartRootState, ev tickEvent, minuteTime time.Time, adjustedTime time.Time, dataMode string) {
 	price := ev.LastPrice
 	root.pushRecentTickLocked(chartQuoteTickRow{
 		at:           combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
@@ -804,35 +906,6 @@ func (s *ChartStream) updateContractPartialLocked(root *chartRootState, ev tickE
 		updateTime:         strings.TrimSpace(ev.UpdateTime),
 		updateMillisec:     ev.UpdateMillisec,
 	}
-	if root.currentPartial == nil || !root.currentPartial.MinuteTime.Equal(minuteTime) {
-		root.currentPartial = &minuteBar{
-			Variety:          root.variety,
-			InstrumentID:     root.symbol,
-			Exchange:         strings.TrimSpace(ev.ExchangeID),
-			MinuteTime:       minuteTime,
-			AdjustedTime:     adjustedTime,
-			SourceReceivedAt: ev.ReceivedAt,
-			Period:           "1m",
-			Open:             price,
-			High:             price,
-			Low:              price,
-			Close:            price,
-			Volume:           0,
-			OpenInterest:     ev.OpenInterest,
-			SettlementPrice:  ev.SettlementPrice,
-		}
-		return
-	}
-	if price > root.currentPartial.High {
-		root.currentPartial.High = price
-	}
-	if price < root.currentPartial.Low {
-		root.currentPartial.Low = price
-	}
-	root.currentPartial.Close = price
-	root.currentPartial.OpenInterest = ev.OpenInterest
-	root.currentPartial.SettlementPrice = ev.SettlementPrice
-	root.currentPartial.SourceReceivedAt = ev.ReceivedAt
 }
 
 func (root *chartRootState) pushRecentTickLocked(row chartQuoteTickRow) {
@@ -926,6 +999,8 @@ func (s *ChartStream) updateL9PartialLocked(root *chartRootState, minuteTime tim
 			OpenInterest:     totalOI,
 			SettlementPrice:  settlement,
 		}
+		root.latestBars["1m"] = *root.currentPartial
+		root.latestPhases["1m"] = "partial"
 		return
 	}
 	if price > root.currentPartial.High {
@@ -938,78 +1013,8 @@ func (s *ChartStream) updateL9PartialLocked(root *chartRootState, minuteTime tim
 	root.currentPartial.OpenInterest = totalOI
 	root.currentPartial.SettlementPrice = settlement
 	root.currentPartial.SourceReceivedAt = latestAt
-}
-
-func (s *ChartStream) buildPartialUpdatesLocked(root *chartRootState, timeframes []string, sessions []sessiontime.Range, replay bool) []ChartBarUpdate {
-	out := make([]ChartBarUpdate, 0, len(timeframes))
-	for _, timeframe := range timeframes {
-		bar, ok := buildPartialBarForTimeframe(root, timeframe, sessions)
-		if !ok {
-			continue
-		}
-		out = append(out, ChartBarUpdate{
-			Subscription: ChartSubscription{
-				Symbol:    root.symbol,
-				Type:      root.kind,
-				Variety:   root.variety,
-				Timeframe: timeframe,
-				DataMode:  chartDataModeLabel(replay),
-			},
-			Phase:  "partial",
-			Source: chartSourceLabel(replay),
-			Bar:    chartBarFromMinuteBar(bar),
-		})
-	}
-	return out
-}
-
-func buildPartialBarForTimeframe(root *chartRootState, timeframe string, sessions []sessiontime.Range) (minuteBar, bool) {
-	if root == nil {
-		return minuteBar{}, false
-	}
-	if timeframe == "1m" {
-		if root.currentPartial == nil {
-			return minuteBar{}, false
-		}
-		return *root.currentPartial, true
-	}
-	if timeframe == "1d" {
-		return buildDailyPartial(root, sessions)
-	}
-	src := make([]klineagg.MinuteBar, 0, len(root.history1m)+1)
-	for _, bar := range root.history1m {
-		src = append(src, toAggMinuteBar(bar))
-	}
-	if root.currentPartial != nil {
-		src = append(src, toAggMinuteBar(*root.currentPartial))
-	}
-	period, minutes := timeframeConfig(timeframe)
-	if period == "" || minutes <= 1 || len(src) == 0 {
-		return minuteBar{}, false
-	}
-	aggBars, _ := klineagg.Aggregate(src, toKlineAggSessions(sessions), period, minutes, klineagg.Options{
-		CrossSessionFor30m1h: true,
-		ClampToSessionEnd:    true,
-	})
-	if len(aggBars) == 0 {
-		return minuteBar{}, false
-	}
-	last := aggBars[len(aggBars)-1]
-	return minuteBar{
-		Variety:          root.variety,
-		InstrumentID:     root.symbol,
-		Exchange:         root.exchange,
-		MinuteTime:       last.DataTime,
-		AdjustedTime:     last.AdjustedTime,
-		SourceReceivedAt: time.Now(),
-		Period:           timeframe,
-		Open:             last.Open,
-		High:             last.High,
-		Low:              last.Low,
-		Close:            last.Close,
-		Volume:           last.Volume,
-		OpenInterest:     last.OpenInterest,
-	}, true
+	root.latestBars["1m"] = *root.currentPartial
+	root.latestPhases["1m"] = "partial"
 }
 
 func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubscription, dataMode string) (ChartQuoteUpdate, bool) {
@@ -1173,6 +1178,10 @@ func latestQuoteBar(root *chartRootState) *minuteBar {
 	if root == nil {
 		return nil
 	}
+	if bar, ok := root.latestBars["1m"]; ok {
+		copied := bar
+		return &copied
+	}
 	if root.currentPartial != nil {
 		return root.currentPartial
 	}
@@ -1254,91 +1263,6 @@ func rootKeyForSubscription(sub ChartSubscription) string {
 	return strings.ToLower(strings.TrimSpace(sub.Type)) + "|" + strings.ToLower(strings.TrimSpace(sub.Symbol)) + "|" + strings.ToLower(strings.TrimSpace(sub.Variety))
 }
 
-func buildDailyPartial(root *chartRootState, sessions []sessiontime.Range) (minuteBar, bool) {
-	var dayBars []minuteBar
-	for _, bar := range root.history1m {
-		dayBars = append(dayBars, bar)
-	}
-	if root.currentPartial != nil {
-		dayBars = append(dayBars, *root.currentPartial)
-	}
-	if len(dayBars) == 0 {
-		return minuteBar{}, false
-	}
-	targetDay := tradingDayKey(dayBars[len(dayBars)-1])
-	if targetDay == "" {
-		return minuteBar{}, false
-	}
-	filtered := make([]minuteBar, 0, len(dayBars))
-	for _, bar := range dayBars {
-		if tradingDayKey(bar) == targetDay {
-			filtered = append(filtered, bar)
-		}
-	}
-	if len(filtered) == 0 {
-		return minuteBar{}, false
-	}
-	dataLabelTime, adjustedLabelTime, ok := dailyLabelTimes(filtered[0], sessions)
-	if !ok {
-		return minuteBar{}, false
-	}
-	out := minuteBar{
-		Variety:          root.variety,
-		InstrumentID:     root.symbol,
-		Exchange:         root.exchange,
-		MinuteTime:       dataLabelTime,
-		AdjustedTime:     adjustedLabelTime,
-		SourceReceivedAt: filtered[len(filtered)-1].SourceReceivedAt,
-		Period:           "1d",
-		Open:             filtered[0].Open,
-		High:             filtered[0].High,
-		Low:              filtered[0].Low,
-		Close:            filtered[len(filtered)-1].Close,
-		OpenInterest:     filtered[len(filtered)-1].OpenInterest,
-		SettlementPrice:  filtered[len(filtered)-1].SettlementPrice,
-	}
-	for _, bar := range filtered {
-		if bar.High > out.High {
-			out.High = bar.High
-		}
-		if bar.Low < out.Low {
-			out.Low = bar.Low
-		}
-		out.Volume += bar.Volume
-	}
-	return out, true
-}
-
-func toAggMinuteBar(bar minuteBar) klineagg.MinuteBar {
-	return klineagg.MinuteBar{
-		InstrumentID: bar.InstrumentID,
-		Exchange:     bar.Exchange,
-		DataTime:     bar.MinuteTime,
-		AdjustedTime: chooseAdjustedTime(bar),
-		Open:         bar.Open,
-		High:         bar.High,
-		Low:          bar.Low,
-		Close:        bar.Close,
-		Volume:       bar.Volume,
-		OpenInterest: bar.OpenInterest,
-	}
-}
-
-func timeframeConfig(timeframe string) (string, int) {
-	switch timeframe {
-	case "5m":
-		return "5m", 5
-	case "15m":
-		return "15m", 15
-	case "30m":
-		return "30m", 30
-	case "1h":
-		return "1h", 60
-	default:
-		return "", 0
-	}
-}
-
 func chartBarFromMinuteBar(bar minuteBar) ChartBar {
 	return ChartBar{
 		AdjustedTime: chooseAdjustedTime(bar).Unix(),
@@ -1359,16 +1283,6 @@ func cloneMinuteBarPtr(bar minuteBar) *minuteBar {
 
 func sameBarMinute(a minuteBar, b minuteBar) bool {
 	return a.MinuteTime.Equal(b.MinuteTime) || chooseAdjustedTime(a).Equal(chooseAdjustedTime(b))
-}
-
-func filterNon1m(items []string) []string {
-	out := make([]string, 0, len(items))
-	for _, item := range items {
-		if item != "1m" {
-			out = append(out, item)
-		}
-	}
-	return out
 }
 
 func chartSourceLabel(replay bool) string {
