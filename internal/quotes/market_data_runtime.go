@@ -167,7 +167,7 @@ func (a *closedBarAggregator) Consume(closedBar minuteBar, sessions []sessiontim
 
 	out := make([]minuteBar, 0, 6)
 	out = append(out, a.consumeIntraday(closedBar, sessions)...)
-	if daily, ok := a.consumeDaily(closedBar, flush); ok {
+	if daily, ok := a.consumeDaily(closedBar, sessions, flush); ok {
 		out = append(out, daily)
 	}
 	return out
@@ -242,14 +242,17 @@ func (a *closedBarAggregator) consumeIntraday(closedBar minuteBar, sessions []se
 	return out
 }
 
-func (a *closedBarAggregator) consumeDaily(closedBar minuteBar, flush bool) (minuteBar, bool) {
+func (a *closedBarAggregator) consumeDaily(closedBar minuteBar, sessions []sessiontime.Range, flush bool) (minuteBar, bool) {
 	if len(a.history) == 0 {
 		return minuteBar{}, false
 	}
-	currentDay := chooseAdjustedTime(closedBar).Format("2006-01-02")
+	currentDay := tradingDayKey(closedBar)
+	if currentDay == "" {
+		return minuteBar{}, false
+	}
 	targetDay := currentDay
 	if !flush && len(a.history) >= 2 {
-		prev := chooseAdjustedTime(a.history[len(a.history)-2]).Format("2006-01-02")
+		prev := tradingDayKey(a.history[len(a.history)-2])
 		if prev == currentDay {
 			return minuteBar{}, false
 		}
@@ -259,7 +262,7 @@ func (a *closedBarAggregator) consumeDaily(closedBar minuteBar, flush bool) (min
 	lastEmittedAt := a.lastEmitted["1d"]
 	var dayBars []minuteBar
 	for _, bar := range a.history {
-		if chooseAdjustedTime(bar).Format("2006-01-02") != targetDay {
+		if tradingDayKey(bar) != targetDay {
 			continue
 		}
 		dayBars = append(dayBars, bar)
@@ -268,25 +271,22 @@ func (a *closedBarAggregator) consumeDaily(closedBar minuteBar, flush bool) (min
 		return minuteBar{}, false
 	}
 	lastBar := dayBars[len(dayBars)-1]
-	if !flush && chooseAdjustedTime(lastBar).Format("2006-01-02") == currentDay && targetDay == currentDay {
+	if !flush && tradingDayKey(lastBar) == currentDay && targetDay == currentDay {
 		return minuteBar{}, false
 	}
-	labelTime := time.Date(
-		chooseAdjustedTime(dayBars[0]).Year(),
-		chooseAdjustedTime(dayBars[0]).Month(),
-		chooseAdjustedTime(dayBars[0]).Day(),
-		0, 0, 0, 0,
-		time.Local,
-	)
-	if !labelTime.After(lastEmittedAt) {
+	dataLabelTime, adjustedLabelTime, ok := dailyLabelTimes(dayBars[0], sessions)
+	if !ok {
+		return minuteBar{}, false
+	}
+	if !adjustedLabelTime.After(lastEmittedAt) {
 		return minuteBar{}, false
 	}
 	daily := minuteBar{
 		Variety:          closedBar.Variety,
 		InstrumentID:     a.instrumentID,
 		Exchange:         a.exchange,
-		MinuteTime:       time.Date(dayBars[0].MinuteTime.Year(), dayBars[0].MinuteTime.Month(), dayBars[0].MinuteTime.Day(), 0, 0, 0, 0, time.Local),
-		AdjustedTime:     labelTime,
+		MinuteTime:       dataLabelTime,
+		AdjustedTime:     adjustedLabelTime,
 		SourceReceivedAt: closedBar.SourceReceivedAt,
 		Period:           "1d",
 		Open:             dayBars[0].Open,
@@ -306,7 +306,7 @@ func (a *closedBarAggregator) consumeDaily(closedBar minuteBar, flush bool) (min
 		}
 		daily.Volume += bar.Volume
 	}
-	a.lastEmitted["1d"] = labelTime
+	a.lastEmitted["1d"] = adjustedLabelTime
 	return daily, true
 }
 

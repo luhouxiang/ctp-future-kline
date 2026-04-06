@@ -170,10 +170,6 @@ func aggregateToDaily(bars []klineagg.MinuteBar, period string, sessions []kline
 	if len(bars) == 0 {
 		return nil, nil
 	}
-	dayStart := sessions[0].Start
-	if dayStart < 0 {
-		dayStart = 0
-	}
 	type dayKey struct {
 		day string
 	}
@@ -185,8 +181,7 @@ func aggregateToDaily(bars []klineagg.MinuteBar, period string, sessions []kline
 		}
 		k := dayKey{day: b.DataTime.Format("2006-01-02")}
 		idx, ok := pos[k]
-		label := time.Date(b.DataTime.Year(), b.DataTime.Month(), b.DataTime.Day(), dayStart/60, dayStart%60, 0, 0, time.Local)
-		adjustedLabel := time.Date(b.AdjustedTime.Year(), b.AdjustedTime.Month(), b.AdjustedTime.Day(), dayStart/60, dayStart%60, 0, 0, time.Local)
+		label, adjustedLabel := dailyLabelTimes(b, sessions)
 		if !ok {
 			pos[k] = len(out)
 			out = append(out, klineagg.AggBar{
@@ -218,6 +213,24 @@ func aggregateToDaily(bars []klineagg.MinuteBar, period string, sessions []kline
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].AdjustedTime.Before(out[j].AdjustedTime) })
 	return out, nil
+}
+
+func dailyLabelTimes(bar klineagg.MinuteBar, sessions []klineagg.SessionRange) (time.Time, time.Time) {
+	start := 0
+	if len(sessions) > 0 {
+		start = sessions[0].Start
+		for _, session := range sessions[1:] {
+			if sessiontime.TradingMinuteOrderKey(session.Start) < sessiontime.TradingMinuteOrderKey(start) {
+				start = session.Start
+			}
+		}
+		if start < 0 {
+			start = 0
+		}
+	}
+	label := time.Date(bar.DataTime.Year(), bar.DataTime.Month(), bar.DataTime.Day(), start/60, start%60, 0, 0, time.Local)
+	adjustedLabel := time.Date(bar.AdjustedTime.Year(), bar.AdjustedTime.Month(), bar.AdjustedTime.Day(), start/60, start%60, 0, 0, time.Local)
+	return label, adjustedLabel
 }
 
 func loadCompletedTradingSessions(db *sql.DB, variety string) ([]klineagg.SessionRange, error) {

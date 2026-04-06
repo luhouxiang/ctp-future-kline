@@ -974,7 +974,7 @@ func buildPartialBarForTimeframe(root *chartRootState, timeframe string, session
 		return *root.currentPartial, true
 	}
 	if timeframe == "1d" {
-		return buildDailyPartial(root)
+		return buildDailyPartial(root, sessions)
 	}
 	src := make([]klineagg.MinuteBar, 0, len(root.history1m)+1)
 	for _, bar := range root.history1m {
@@ -1254,7 +1254,7 @@ func rootKeyForSubscription(sub ChartSubscription) string {
 	return strings.ToLower(strings.TrimSpace(sub.Type)) + "|" + strings.ToLower(strings.TrimSpace(sub.Symbol)) + "|" + strings.ToLower(strings.TrimSpace(sub.Variety))
 }
 
-func buildDailyPartial(root *chartRootState) (minuteBar, bool) {
+func buildDailyPartial(root *chartRootState, sessions []sessiontime.Range) (minuteBar, bool) {
 	var dayBars []minuteBar
 	for _, bar := range root.history1m {
 		dayBars = append(dayBars, bar)
@@ -1265,22 +1265,29 @@ func buildDailyPartial(root *chartRootState) (minuteBar, bool) {
 	if len(dayBars) == 0 {
 		return minuteBar{}, false
 	}
-	targetDay := chooseAdjustedTime(dayBars[len(dayBars)-1]).Format("2006-01-02")
+	targetDay := tradingDayKey(dayBars[len(dayBars)-1])
+	if targetDay == "" {
+		return minuteBar{}, false
+	}
 	filtered := make([]minuteBar, 0, len(dayBars))
 	for _, bar := range dayBars {
-		if chooseAdjustedTime(bar).Format("2006-01-02") == targetDay {
+		if tradingDayKey(bar) == targetDay {
 			filtered = append(filtered, bar)
 		}
 	}
 	if len(filtered) == 0 {
 		return minuteBar{}, false
 	}
+	dataLabelTime, adjustedLabelTime, ok := dailyLabelTimes(filtered[0], sessions)
+	if !ok {
+		return minuteBar{}, false
+	}
 	out := minuteBar{
 		Variety:          root.variety,
 		InstrumentID:     root.symbol,
 		Exchange:         root.exchange,
-		MinuteTime:       time.Date(filtered[0].MinuteTime.Year(), filtered[0].MinuteTime.Month(), filtered[0].MinuteTime.Day(), 0, 0, 0, 0, time.Local),
-		AdjustedTime:     time.Date(chooseAdjustedTime(filtered[0]).Year(), chooseAdjustedTime(filtered[0]).Month(), chooseAdjustedTime(filtered[0]).Day(), 0, 0, 0, 0, time.Local),
+		MinuteTime:       dataLabelTime,
+		AdjustedTime:     adjustedLabelTime,
 		SourceReceivedAt: filtered[len(filtered)-1].SourceReceivedAt,
 		Period:           "1d",
 		Open:             filtered[0].Open,
