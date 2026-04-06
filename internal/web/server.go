@@ -220,6 +220,9 @@ func NewServer(cfg config.AppConfig) *Server {
 		logger.Error("init paper replay trade service failed", "error", err)
 	} else {
 		s.tradePaperReplay = svc
+		if s.replay != nil {
+			s.replay.RegisterConsumer("trade.paper_replay", svc.ConsumeBusEvent)
+		}
 	}
 	if cfg.Trade.IsEnabled() && s.currentAppMode() == appmode.LiveReal {
 		if err := s.startTradeService(); err != nil {
@@ -1364,6 +1367,12 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 	}
 	if strings.TrimSpace(req.TickDir) == "" {
 		req.TickDir = filepath.Join(s.cfg.CTP.FlowPath, "ticks")
+	}
+	if s.tradePaperReplay != nil {
+		if err := s.tradePaperReplay.ResetPaperReplay(); err != nil {
+			http.Error(w, "reset replay paper account failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
 	}
 	if s.replaySink != nil {
 		if err := s.replaySink.PrepareReplayWindow(req); err != nil {

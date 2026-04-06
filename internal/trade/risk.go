@@ -35,6 +35,12 @@ func ValidateSubmit(ctx context.Context, status TradeStatus, cfg config.TradeCon
 	if req.Volume > cfg.MaxOrderVolume {
 		return commandID, fmt.Errorf("volume exceeds max_order_volume %d", cfg.MaxOrderVolume)
 	}
+	if strings.TrimSpace(req.Symbol) == "" {
+		return commandID, errors.New("symbol is required")
+	}
+	if strings.TrimSpace(req.ExchangeID) == "" {
+		return commandID, errors.New("exchange_id is required")
+	}
 	if req.LimitPrice <= 0 {
 		return commandID, errors.New("limit_price must be > 0")
 	}

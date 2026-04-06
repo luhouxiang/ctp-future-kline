@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -31,6 +32,8 @@ type Service struct {
 	accountID string
 	// paper 表示当前服务是否为模拟交易后端。
 	paper bool
+	// replayPaper 表示当前服务是否为回放模拟交易后端。
+	replayPaper bool
 
 	// mu 保护 status、account、positions 这些内存快照。
 	mu sync.RWMutex
@@ -54,6 +57,18 @@ type Service struct {
 	closeOnce   sync.Once
 	queueHandle *queuewatch.QueueHandle
 	queueCap    int
+	paperMu     sync.Mutex
+	pending     map[string]OrderRecord
+}
+
+const replayPaperInitialBalance = 100_000
+
+type replayTick struct {
+	InstrumentID string
+	ExchangeID   string
+	ReceivedAt   time.Time
+	BidPrice1    float64
+	AskPrice1    float64
 }
 
 func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, registry *queuewatch.Registry) (*Service, error) {
@@ -135,8 +150,10 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 		store:     store,
 		accountID: accountID,
 		paper:     true,
+		replayPaper: strings.EqualFold(accountID, "paper_replay"),
 		subs:      make(map[chan EventEnvelope]struct{}),
 		queueCap:  queueCfg.TradeEventCapacity,
+		pending:   make(map[string]OrderRecord),
 		status: TradeStatus{
 			Enabled:             true,
 			AccountID:           accountID,
@@ -163,6 +180,11 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 	}
 	if err := s.ensurePaperAccount(); err != nil {
 		return nil, err
+	}
+	if s.replayPaper {
+		if err := s.loadPendingOrders(); err != nil {
+			return nil, err
+		}
 	}
 	return s, nil
 }
@@ -224,6 +246,25 @@ func (s *Service) Start() error {
 	ch, _ := s.gateway.Subscribe()
 	go s.forwardGatewayEvents(ch)
 	go s.pollQueries()
+	return nil
+}
+
+func (s *Service) ResetPaperReplay() error {
+	if !s.replayPaper {
+		return fmt.Errorf("paper replay reset is only available for replay paper service")
+	}
+	s.paperMu.Lock()
+	defer s.paperMu.Unlock()
+	if err := s.store.ResetPaperAccount(s.accountID); err != nil {
+		return err
+	}
+	s.pending = make(map[string]OrderRecord)
+	if err := s.ensurePaperAccount(); err != nil {
+		return err
+	}
+	if err := s.RefreshAll(); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -389,6 +430,12 @@ func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (Orde
 	status := s.Status()
 	account, _ := s.Account()
 	positions, _ := s.Positions()
+	if s.replayPaper {
+		if item, items, err := s.paperRiskState(); err == nil {
+			account = item
+			positions = items
+		}
+	}
 	commandID, err := ValidateSubmit(ctx, status, s.cfg, account, positions, req)
 	audit := OrderCommandAudit{
 		AccountID:   s.accountID,
@@ -469,21 +516,28 @@ func (s *Service) CancelOrder(ctx context.Context, req CancelOrderRequest) (Orde
 		return orderRec, err
 	}
 	if s.paper {
-		err := fmt.Errorf("paper orders are filled immediately and cannot be canceled")
+		rec, err := s.cancelPaperOrder(req, orderRec)
 		audit := OrderCommandAudit{
 			AccountID:   s.accountID,
 			CommandID:   req.CommandID,
 			CommandType: CommandTypeCancel,
 			Symbol:      orderRec.Symbol,
-			RiskStatus:  RiskStatusBlocked,
-			RiskReason:  err.Error(),
+			RiskStatus:  RiskStatusAllowed,
 			Request:     map[string]any{"cancel": req},
-			Response:    map[string]any{"order": orderRec},
+			Response:    map[string]any{"order": rec},
 			CreatedAt:   time.Now(),
+		}
+		if err != nil {
+			audit.RiskStatus = RiskStatusBlocked
+			audit.RiskReason = err.Error()
+			audit.Response["error"] = err.Error()
+			_, _ = s.store.AppendCommandAudit(audit)
+			s.broadcast("trade_command_audit", audit)
+			return rec, err
 		}
 		_, _ = s.store.AppendCommandAudit(audit)
 		s.broadcast("trade_command_audit", audit)
-		return orderRec, err
+		return rec, nil
 	}
 	rec, err := s.gateway.CancelOrder(req)
 	audit := OrderCommandAudit{
@@ -727,10 +781,14 @@ func (s *Service) ensurePaperAccount() error {
 		return nil
 	}
 	now := time.Now()
+	initialBalance := 1_000_000.0
+	if s.replayPaper {
+		initialBalance = replayPaperInitialBalance
+	}
 	item := TradingAccountSnapshot{
 		AccountID:      s.accountID,
-		Balance:        1_000_000,
-		Available:      1_000_000,
+		Balance:        initialBalance,
+		Available:      initialBalance,
 		Margin:         0,
 		FrozenCash:     0,
 		Commission:     0,
@@ -755,6 +813,45 @@ func (s *Service) ensurePaperAccount() error {
 }
 
 func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (OrderRecord, error) {
+	if !s.replayPaper {
+		return s.submitImmediatePaperOrder(commandID, req)
+	}
+	s.paperMu.Lock()
+	now := time.Now()
+	rec := OrderRecord{
+		AccountID:           s.accountID,
+		CommandID:           commandID,
+		OrderRef:            commandID,
+		ExchangeID:          req.ExchangeID,
+		OrderSysID:          commandID,
+		Symbol:              req.Symbol,
+		Direction:           req.Direction,
+		OffsetFlag:          req.OffsetFlag,
+		LimitPrice:          req.LimitPrice,
+		VolumeTotalOriginal: req.Volume,
+		VolumeTraded:        0,
+		VolumeCanceled:      0,
+		OrderStatus:         "queued",
+		SubmitStatus:        "accepted",
+		StatusMsg:           "paper replay order accepted and waiting for replay market",
+		InsertedAt:          now,
+		UpdatedAt:           now,
+	}
+	if err := s.store.UpsertOrder(rec); err != nil {
+		s.paperMu.Unlock()
+		return rec, err
+	}
+	s.pending[rec.CommandID] = rec
+	if _, _, err := s.recalculateReplayPaperStateLocked(now); err != nil {
+		s.paperMu.Unlock()
+		return rec, err
+	}
+	s.paperMu.Unlock()
+	s.broadcast("trade_order_update", rec)
+	return rec, nil
+}
+
+func (s *Service) submitImmediatePaperOrder(commandID string, req SubmitOrderRequest) (OrderRecord, error) {
 	now := time.Now()
 	rec := OrderRecord{
 		AccountID:           s.accountID,
@@ -796,7 +893,7 @@ func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (Or
 	if err := s.store.AppendTrade(tradeRec); err != nil {
 		return rec, err
 	}
-	if err := s.applyPaperFill(tradeRec); err != nil {
+	if err := s.applyImmediatePaperFill(tradeRec); err != nil {
 		return rec, err
 	}
 	s.broadcast("trade_order_update", rec)
@@ -804,7 +901,7 @@ func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (Or
 	return rec, nil
 }
 
-func (s *Service) applyPaperFill(tr TradeRecord) error {
+func (s *Service) applyImmediatePaperFill(tr TradeRecord) error {
 	account, err := s.store.LatestAccountSnapshot(s.accountID)
 	if err != nil {
 		return err
@@ -813,11 +910,11 @@ func (s *Service) applyPaperFill(tr TradeRecord) error {
 	if err != nil {
 		return err
 	}
-	commission := tr.Price * float64(tr.Volume) * 0.0001
+	commission := paperCommission(tr)
 	account.Commission += commission
 	account.Balance -= commission
 	account.Available -= commission
-	positions = mergePaperPosition(positions, tr)
+	positions = applyFilledTradeToPositions(positions, tr)
 	margin := 0.0
 	for _, item := range positions {
 		margin += item.UseMargin
@@ -843,7 +940,241 @@ func (s *Service) applyPaperFill(tr TradeRecord) error {
 	return nil
 }
 
-func mergePaperPosition(items []PositionSnapshot, tr TradeRecord) []PositionSnapshot {
+func (s *Service) cancelPaperOrder(req CancelOrderRequest, orderRec OrderRecord) (OrderRecord, error) {
+	if !s.replayPaper {
+		return orderRec, fmt.Errorf("paper orders are filled immediately and cannot be canceled")
+	}
+	s.paperMu.Lock()
+	current, err := s.store.GetOrder(req.CommandID)
+	if err != nil {
+		s.paperMu.Unlock()
+		return orderRec, err
+	}
+	switch strings.TrimSpace(current.OrderStatus) {
+	case "all_traded", "canceled", "rejected":
+		s.paperMu.Unlock()
+		return current, ErrOrderAlreadyFinal
+	}
+	now := time.Now()
+	current.VolumeCanceled = current.VolumeTotalOriginal - current.VolumeTraded
+	if current.VolumeCanceled < 0 {
+		current.VolumeCanceled = 0
+	}
+	current.OrderStatus = "canceled"
+	current.SubmitStatus = "accepted"
+	current.StatusMsg = "paper replay order canceled"
+	current.UpdatedAt = now
+	if err := s.store.UpsertOrder(current); err != nil {
+		s.paperMu.Unlock()
+		return current, err
+	}
+	delete(s.pending, current.CommandID)
+	if _, _, err := s.recalculateReplayPaperStateLocked(now); err != nil {
+		s.paperMu.Unlock()
+		return current, err
+	}
+	s.paperMu.Unlock()
+	s.broadcast("trade_order_update", current)
+	return current, nil
+}
+
+func (s *Service) ConsumeBusEvent(_ context.Context, ev bus.BusEvent) error {
+	if !s.replayPaper || ev.Topic != bus.TopicTick {
+		return nil
+	}
+	var tick replayTick
+	if err := json.Unmarshal(ev.Payload, &tick); err != nil {
+		return fmt.Errorf("decode replay tick for paper trade failed: %w", err)
+	}
+	return s.matchReplayTick(tick)
+}
+
+func (s *Service) loadPendingOrders() error {
+	items, err := s.store.ListOpenOrders(s.accountID)
+	if err != nil {
+		return err
+	}
+	s.pending = make(map[string]OrderRecord, len(items))
+	for _, item := range items {
+		s.pending[item.CommandID] = item
+	}
+	return nil
+}
+
+func (s *Service) paperRiskState() (TradingAccountSnapshot, []PositionSnapshot, error) {
+	if !s.replayPaper {
+		account, err := s.Account()
+		if err != nil {
+			return TradingAccountSnapshot{}, nil, err
+		}
+		positions, err := s.Positions()
+		return account, positions, err
+	}
+	s.paperMu.Lock()
+	defer s.paperMu.Unlock()
+	account, positions, err := s.recalculateReplayPaperStateLocked(time.Now())
+	if err != nil {
+		return TradingAccountSnapshot{}, nil, err
+	}
+	return account, applyPendingCloseReservations(positions, pendingOrderSlice(s.pending)), nil
+}
+
+func (s *Service) matchReplayTick(tick replayTick) error {
+	s.paperMu.Lock()
+	defer s.paperMu.Unlock()
+	if len(s.pending) == 0 {
+		return nil
+	}
+	orders := pendingOrderSlice(s.pending)
+	sort.SliceStable(orders, func(i, j int) bool {
+		if orders[i].InsertedAt.Equal(orders[j].InsertedAt) {
+			return orders[i].CommandID < orders[j].CommandID
+		}
+		return orders[i].InsertedAt.Before(orders[j].InsertedAt)
+	})
+	now := tick.ReceivedAt
+	if now.IsZero() {
+		now = time.Now()
+	}
+	var filledOrders []OrderRecord
+	var trades []TradeRecord
+	for _, order := range orders {
+		if !strings.EqualFold(order.Symbol, tick.InstrumentID) {
+			continue
+		}
+		price, ok := marketableReplayPrice(order, tick)
+		if !ok {
+			continue
+		}
+		order.VolumeTraded = order.VolumeTotalOriginal - order.VolumeCanceled
+		if order.VolumeTraded < 0 {
+			order.VolumeTraded = 0
+		}
+		order.OrderStatus = "all_traded"
+		order.SubmitStatus = "accepted"
+		order.StatusMsg = "paper replay order filled by replay market"
+		order.UpdatedAt = now
+		tradeRec := TradeRecord{
+			AccountID:  s.accountID,
+			TradeID:    order.CommandID + "-fill",
+			OrderRef:   order.OrderRef,
+			OrderSysID: order.OrderSysID,
+			ExchangeID: firstNonEmpty(order.ExchangeID, tick.ExchangeID),
+			Symbol:     order.Symbol,
+			Direction:  order.Direction,
+			OffsetFlag: order.OffsetFlag,
+			Price:      price,
+			Volume:     order.VolumeTraded,
+			TradeTime:  now,
+			TradingDay: now.Format("20060102"),
+			ReceivedAt: now,
+		}
+		if err := s.store.UpsertOrder(order); err != nil {
+			return err
+		}
+		if err := s.store.AppendTrade(tradeRec); err != nil {
+			return err
+		}
+		delete(s.pending, order.CommandID)
+		filledOrders = append(filledOrders, order)
+		trades = append(trades, tradeRec)
+	}
+	if len(trades) == 0 {
+		return nil
+	}
+	if _, _, err := s.recalculateReplayPaperStateLocked(now); err != nil {
+		return err
+	}
+	for i := range filledOrders {
+		s.broadcast("trade_order_update", filledOrders[i])
+		s.broadcast("trade_trade_update", trades[i])
+	}
+	return nil
+}
+
+func (s *Service) recalculateReplayPaperState(now time.Time) error {
+	s.paperMu.Lock()
+	defer s.paperMu.Unlock()
+	_, _, err := s.recalculateReplayPaperStateLocked(now)
+	return err
+}
+
+func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccountSnapshot, []PositionSnapshot, error) {
+	if !s.replayPaper {
+		return TradingAccountSnapshot{}, nil, nil
+	}
+	if s.pending == nil {
+		s.pending = make(map[string]OrderRecord)
+	}
+	openOrders, err := s.store.ListOpenOrders(s.accountID)
+	if err != nil {
+		return TradingAccountSnapshot{}, nil, err
+	}
+	s.pending = make(map[string]OrderRecord, len(openOrders))
+	for _, item := range openOrders {
+		s.pending[item.CommandID] = item
+	}
+	trades, err := s.store.ListTrades(s.accountID, 100000)
+	if err != nil {
+		return TradingAccountSnapshot{}, nil, err
+	}
+	sort.SliceStable(trades, func(i, j int) bool {
+		if trades[i].TradeTime.Equal(trades[j].TradeTime) {
+			return trades[i].TradeID < trades[j].TradeID
+		}
+		return trades[i].TradeTime.Before(trades[j].TradeTime)
+	})
+	account := TradingAccountSnapshot{
+		AccountID:      s.accountID,
+		Balance:        replayPaperInitialBalance,
+		Available:      replayPaperInitialBalance,
+		Margin:         0,
+		FrozenCash:     0,
+		Commission:     0,
+		CloseProfit:    0,
+		PositionProfit: 0,
+		UpdatedAt:      now,
+	}
+	positions := make([]PositionSnapshot, 0)
+	for _, tr := range trades {
+		positions, account.CloseProfit = applyFilledTradeToPositionsWithProfit(positions, tr, account.CloseProfit)
+		commission := paperCommission(tr)
+		account.Commission += commission
+		account.Balance -= commission
+	}
+	for _, item := range positions {
+		account.Margin += item.UseMargin
+	}
+	for _, item := range s.pending {
+		if item.OffsetFlag == "open" {
+			account.FrozenCash += openOrderReserve(item)
+		}
+	}
+	account.Available = account.Balance - account.Margin - account.FrozenCash
+	if account.Available < 0 {
+		account.Available = 0
+	}
+	if err := s.store.ReplacePositions(s.accountID, positions); err != nil {
+		return TradingAccountSnapshot{}, nil, err
+	}
+	if err := s.store.SaveAccountSnapshot(account); err != nil {
+		return TradingAccountSnapshot{}, nil, err
+	}
+	s.mu.Lock()
+	s.account = account
+	s.positions = positions
+	s.mu.Unlock()
+	s.broadcast("trade_account_update", account)
+	s.broadcast("trade_position_update", map[string]any{"items": positions})
+	return account, positions, nil
+}
+
+func applyFilledTradeToPositions(items []PositionSnapshot, tr TradeRecord) []PositionSnapshot {
+	out, _ := applyFilledTradeToPositionsWithProfit(items, tr, 0)
+	return out
+}
+
+func applyFilledTradeToPositionsWithProfit(items []PositionSnapshot, tr TradeRecord, closeProfit float64) ([]PositionSnapshot, float64) {
 	out := make([]PositionSnapshot, 0, len(items)+1)
 	now := time.Now()
 	wantDir := "long"
@@ -870,7 +1201,22 @@ func mergePaperPosition(items []PositionSnapshot, tr TradeRecord) []PositionSnap
 				item.YdPosition = paperMaxInt(item.YdPosition-(used-item.TodayPosition), 0)
 				item.TodayPosition = 0
 			}
-			item.UseMargin = paperMaxFloat(item.UseMargin-float64(used)*tr.Price, 0)
+			avgOpenCost := 0.0
+			avgPositionCost := 0.0
+			avgMargin := 0.0
+			if item.Position > 0 {
+				avgOpenCost = item.OpenCost / float64(item.Position)
+				avgPositionCost = item.PositionCost / float64(item.Position)
+				avgMargin = item.UseMargin / float64(item.Position)
+			}
+			item.OpenCost = paperMaxFloat(item.OpenCost-avgOpenCost*float64(used), 0)
+			item.PositionCost = paperMaxFloat(item.PositionCost-avgPositionCost*float64(used), 0)
+			item.UseMargin = paperMaxFloat(item.UseMargin-avgMargin*float64(used), 0)
+			if closeDir == "long" {
+				closeProfit += (tr.Price - avgPositionCost) * float64(used)
+			} else {
+				closeProfit += (avgPositionCost - tr.Price) * float64(used)
+			}
 			item.UpdatedAt = now
 			remainingClose -= used
 			if item.Position > 0 {
@@ -912,7 +1258,92 @@ func mergePaperPosition(items []PositionSnapshot, tr TradeRecord) []PositionSnap
 			UpdatedAt:     now,
 		})
 	}
+	return out, closeProfit
+}
+
+func pendingOrderSlice(items map[string]OrderRecord) []OrderRecord {
+	out := make([]OrderRecord, 0, len(items))
+	for _, item := range items {
+		out = append(out, item)
+	}
 	return out
+}
+
+func applyPendingCloseReservations(items []PositionSnapshot, orders []OrderRecord) []PositionSnapshot {
+	out := make([]PositionSnapshot, len(items))
+	copy(out, items)
+	for _, order := range orders {
+		if order.OffsetFlag == "open" {
+			continue
+		}
+		closeDir := "long"
+		if order.Direction == "buy" {
+			closeDir = "short"
+		}
+		remaining := order.VolumeTotalOriginal - order.VolumeTraded - order.VolumeCanceled
+		if remaining <= 0 {
+			continue
+		}
+		for i := range out {
+			if !strings.EqualFold(out[i].Symbol, order.Symbol) || out[i].Direction != closeDir || remaining <= 0 {
+				continue
+			}
+			used := remaining
+			if out[i].Position < used {
+				used = out[i].Position
+			}
+			out[i].Position -= used
+			if out[i].TodayPosition >= used {
+				out[i].TodayPosition -= used
+			} else {
+				out[i].YdPosition = paperMaxInt(out[i].YdPosition-(used-out[i].TodayPosition), 0)
+				out[i].TodayPosition = 0
+			}
+			remaining -= used
+		}
+	}
+	filtered := make([]PositionSnapshot, 0, len(out))
+	for _, item := range out {
+		if item.Position > 0 {
+			filtered = append(filtered, item)
+		}
+	}
+	return filtered
+}
+
+func marketableReplayPrice(order OrderRecord, tick replayTick) (float64, bool) {
+	switch order.Direction {
+	case "buy":
+		if tick.AskPrice1 > 0 && order.LimitPrice >= tick.AskPrice1 {
+			return tick.AskPrice1, true
+		}
+	case "sell":
+		if tick.BidPrice1 > 0 && order.LimitPrice <= tick.BidPrice1 {
+			return tick.BidPrice1, true
+		}
+	}
+	return 0, false
+}
+
+func openOrderReserve(order OrderRecord) float64 {
+	remaining := order.VolumeTotalOriginal - order.VolumeTraded - order.VolumeCanceled
+	if remaining <= 0 {
+		return 0
+	}
+	return float64(remaining) * order.LimitPrice
+}
+
+func paperCommission(tr TradeRecord) float64 {
+	return tr.Price * float64(tr.Volume) * 0.0001
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, item := range values {
+		if strings.TrimSpace(item) != "" {
+			return item
+		}
+	}
+	return ""
 }
 
 func boolPtr(v bool) *bool { return &v }

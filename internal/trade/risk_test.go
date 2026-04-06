@@ -18,6 +18,7 @@ func TestValidateSubmitAllowsManualOrder(t *testing.T) {
 		TradingAccountSnapshot{Available: 100000},
 		nil,
 		SubmitOrderRequest{
+			ExchangeID: "SHFE",
 			Symbol:     "ag2605",
 			Direction:  "buy",
 			OffsetFlag: "open",
@@ -55,6 +56,52 @@ func TestValidateSubmitBlocksReplayContext(t *testing.T) {
 	)
 	if err == nil {
 		t.Fatal("ValidateSubmit() error = nil, want replay blocked")
+	}
+}
+
+func TestValidateSubmitRequiresSymbol(t *testing.T) {
+	t.Parallel()
+
+	_, err := ValidateSubmit(
+		context.Background(),
+		TradeStatus{TraderFront: true, TraderLogin: true, SettlementConfirmed: true},
+		config.TradeConfig{MaxOrderVolume: 10},
+		TradingAccountSnapshot{Available: 100000},
+		nil,
+		SubmitOrderRequest{
+			ExchangeID: "SHFE",
+			Direction:  "sell",
+			OffsetFlag: "open",
+			LimitPrice: 17150,
+			Volume:     1,
+			Reason:     "manual",
+		},
+	)
+	if err == nil || err.Error() != "symbol is required" {
+		t.Fatalf("ValidateSubmit() error = %v, want symbol is required", err)
+	}
+}
+
+func TestValidateSubmitRequiresExchangeID(t *testing.T) {
+	t.Parallel()
+
+	_, err := ValidateSubmit(
+		context.Background(),
+		TradeStatus{TraderFront: true, TraderLogin: true, SettlementConfirmed: true},
+		config.TradeConfig{MaxOrderVolume: 10},
+		TradingAccountSnapshot{Available: 100000},
+		nil,
+		SubmitOrderRequest{
+			Symbol:     "ag2605",
+			Direction:  "sell",
+			OffsetFlag: "open",
+			LimitPrice: 17150,
+			Volume:     1,
+			Reason:     "manual",
+		},
+	)
+	if err == nil || err.Error() != "exchange_id is required" {
+		t.Fatalf("ValidateSubmit() error = %v, want exchange_id is required", err)
 	}
 }
 

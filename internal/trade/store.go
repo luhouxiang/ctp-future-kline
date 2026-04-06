@@ -65,6 +65,33 @@ LIMIT 1
 	return out, err
 }
 
+func (s *Store) ResetPaperAccount(accountID string) (err error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	statements := []string{
+		`DELETE FROM trade_account_snapshots WHERE account_id=?`,
+		`DELETE FROM trade_positions WHERE account_id=?`,
+		`DELETE FROM trade_orders WHERE account_id=?`,
+		`DELETE FROM trade_trades WHERE account_id=?`,
+		`DELETE FROM trade_command_audits WHERE account_id=?`,
+		`DELETE FROM trade_query_audits WHERE account_id=?`,
+		`DELETE FROM trade_session_state WHERE account_id=?`,
+	}
+	for _, stmt := range statements {
+		if _, err = tx.Exec(stmt, accountID); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ReplacePositions(accountID string, items []PositionSnapshot) (err error) {
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -163,6 +190,29 @@ WHERE account_id=?
 ORDER BY updated_at DESC
 LIMIT ?
 `, accountID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []OrderRecord
+	for rows.Next() {
+		var item OrderRecord
+		if err := rows.Scan(&item.AccountID, &item.CommandID, &item.OrderRef, &item.FrontID, &item.SessionID, &item.ExchangeID, &item.OrderSysID, &item.Symbol, &item.Direction, &item.OffsetFlag, &item.LimitPrice, &item.VolumeTotalOriginal, &item.VolumeTraded, &item.VolumeCanceled, &item.OrderStatus, &item.SubmitStatus, &item.StatusMsg, &item.InsertedAt, &item.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, item)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) ListOpenOrders(accountID string) ([]OrderRecord, error) {
+	rows, err := s.db.Query(`
+SELECT account_id,command_id,order_ref,front_id,session_id,exchange_id,order_sys_id,symbol,direction,offset_flag,limit_price,volume_total_original,volume_traded,volume_canceled,order_status,submit_status,status_msg,inserted_at,updated_at
+FROM trade_orders
+WHERE account_id=?
+  AND order_status NOT IN ('all_traded','canceled','rejected')
+ORDER BY inserted_at ASC, command_id ASC
+`, accountID)
 	if err != nil {
 		return nil, err
 	}
