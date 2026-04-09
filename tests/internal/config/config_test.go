@@ -131,6 +131,10 @@ func TestLoadSuccessAndDefaults(t *testing.T) {
 	if cfg.CTP.ShardCapacity != 8192 || cfg.CTP.PersistCapacity != 16384 || cfg.CTP.MMDeferredCapacity != 16384 || cfg.CTP.L9TaskCapacity != 4096 {
 		t.Fatalf("unexpected primary queue defaults: shard=%d persist=%d mm=%d l9=%d", cfg.CTP.ShardCapacity, cfg.CTP.PersistCapacity, cfg.CTP.MMDeferredCapacity, cfg.CTP.L9TaskCapacity)
 	}
+	if cfg.CTP.DBWriterCount != 4 || cfg.CTP.DBFlushBatch != 512 || cfg.CTP.DBFlushIntervalMS != 30 || cfg.CTP.MMDeferredIntervalMS != 100 || cfg.CTP.MMDeferredBatch != 512 {
+		t.Fatalf("unexpected db writer defaults: workers=%d flush_batch=%d flush_interval=%d mm_interval=%d mm_batch=%d",
+			cfg.CTP.DBWriterCount, cfg.CTP.DBFlushBatch, cfg.CTP.DBFlushIntervalMS, cfg.CTP.MMDeferredIntervalMS, cfg.CTP.MMDeferredBatch)
+	}
 	if cfg.CTP.FilePerShardCapacity != 1025 || cfg.CTP.SideEffectTickCapacity != 16384 || cfg.CTP.SideEffectBarCapacity != 4096 {
 		t.Fatalf("unexpected side queue defaults: file=%d tick=%d bar=%d", cfg.CTP.FilePerShardCapacity, cfg.CTP.SideEffectTickCapacity, cfg.CTP.SideEffectBarCapacity)
 	}

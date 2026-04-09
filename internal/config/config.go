@@ -143,6 +143,16 @@ type CTPConfig struct {
 	ShardCapacity int `json:"shard_capacity"`
 	// PersistCapacity 是 DB writer 总内存队列容量。
 	PersistCapacity int `json:"persist_capacity"`
+	// DBWriterCount 是 DB writer 的总 worker 数。
+	DBWriterCount int `json:"db_writer_count"`
+	// DBFlushBatch 是 DB writer 单次 flush 目标批量。
+	DBFlushBatch int `json:"db_flush_batch"`
+	// DBFlushIntervalMS 是 DB writer 未攒满时的定时 flush 周期。
+	DBFlushIntervalMS int `json:"db_flush_interval_ms"`
+	// MMDeferredIntervalMS 是 mm/L9 延迟去重队列的 flush 周期。
+	MMDeferredIntervalMS int `json:"mm_deferred_interval_ms"`
+	// MMDeferredBatch 是 mm/L9 延迟去重队列的目标批量。
+	MMDeferredBatch int `json:"mm_deferred_batch"`
 	// MMDeferredCapacity 是 mm/L9 延迟去重队列容量。
 	MMDeferredCapacity int `json:"mm_deferred_capacity"`
 	// L9TaskCapacity 是 L9 异步任务队列容量。
@@ -431,6 +441,21 @@ func (c *AppConfig) Validate() error {
 	if c.CTP.PersistCapacity == 0 {
 		c.CTP.PersistCapacity = 16384
 	}
+	if c.CTP.DBWriterCount == 0 {
+		c.CTP.DBWriterCount = 4
+	}
+	if c.CTP.DBFlushBatch == 0 {
+		c.CTP.DBFlushBatch = 512
+	}
+	if c.CTP.DBFlushIntervalMS == 0 {
+		c.CTP.DBFlushIntervalMS = 30
+	}
+	if c.CTP.MMDeferredIntervalMS == 0 {
+		c.CTP.MMDeferredIntervalMS = 100
+	}
+	if c.CTP.MMDeferredBatch == 0 {
+		c.CTP.MMDeferredBatch = 512
+	}
 	if c.CTP.MMDeferredCapacity == 0 {
 		c.CTP.MMDeferredCapacity = 16384
 	}
@@ -476,7 +501,7 @@ func (c *AppConfig) Validate() error {
 	if c.CTP.QueueAlertRecoverPercent <= 0 || c.CTP.QueueAlertRecoverPercent >= c.CTP.QueueAlertWarnPercent {
 		return errors.New("ctp.queue_alert_recover_percent must be in (0,warn)")
 	}
-	if c.CTP.ShardCapacity <= 0 || c.CTP.PersistCapacity <= 0 || c.CTP.MMDeferredCapacity <= 0 || c.CTP.L9TaskCapacity <= 0 || c.CTP.FilePerShardCapacity <= 0 || c.CTP.SideEffectTickCapacity <= 0 || c.CTP.SideEffectBarCapacity <= 0 || c.CTP.ChartSubscriberCapacity <= 0 || c.CTP.StatusSubscriberCapacity <= 0 || c.CTP.StrategyEventCapacity <= 0 || c.CTP.TradeEventCapacity <= 0 || c.CTP.TradeGatewayEventCapacity <= 0 || c.CTP.MDDisconnectCapacity <= 0 {
+	if c.CTP.ShardCapacity <= 0 || c.CTP.PersistCapacity <= 0 || c.CTP.DBWriterCount <= 0 || c.CTP.DBFlushBatch <= 0 || c.CTP.DBFlushIntervalMS <= 0 || c.CTP.MMDeferredIntervalMS <= 0 || c.CTP.MMDeferredBatch <= 0 || c.CTP.MMDeferredCapacity <= 0 || c.CTP.L9TaskCapacity <= 0 || c.CTP.FilePerShardCapacity <= 0 || c.CTP.SideEffectTickCapacity <= 0 || c.CTP.SideEffectBarCapacity <= 0 || c.CTP.ChartSubscriberCapacity <= 0 || c.CTP.StatusSubscriberCapacity <= 0 || c.CTP.StrategyEventCapacity <= 0 || c.CTP.TradeEventCapacity <= 0 || c.CTP.TradeGatewayEventCapacity <= 0 || c.CTP.MDDisconnectCapacity <= 0 {
 		return errors.New("ctp queue capacities must be > 0")
 	}
 	if c.Calendar.AutoUpdateOnStart == nil {

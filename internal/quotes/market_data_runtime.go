@@ -26,9 +26,11 @@ const (
 	defaultShardChannelCapacity   = 8192
 	defaultPersistQueueCapacity   = 16384
 	defaultFileQueueCapacity      = 16384
-	defaultDBWriterCount          = 12
-	defaultDBFlushBatch           = 128
-	defaultDBFlushInterval        = 100 * time.Millisecond
+	defaultDBWriterCount          = 4
+	defaultDBFlushBatch           = 512
+	defaultDBFlushInterval        = 30 * time.Millisecond
+	defaultMMDeferredInterval     = 100 * time.Millisecond
+	defaultMMDeferredBatch        = 512
 	defaultFileFlushInterval      = 200 * time.Millisecond
 	defaultFileFsyncInterval      = time.Second
 	defaultSlowLogInterval        = 5 * time.Second
@@ -47,6 +49,16 @@ type runtimeOptions struct {
 	driftResumeTicks int
 	// enableMultiMinute 控制是否继续生成 mm 周期 bar。
 	enableMultiMinute bool
+	// dbWriterCount 是 DB writer 的总 worker 数。
+	dbWriterCount int
+	// dbFlushBatch 是 DB writer 单次 flush 目标批量。
+	dbFlushBatch int
+	// dbFlushInterval 是 DB writer 未攒满时的定时 flush 周期。
+	dbFlushInterval time.Duration
+	// mmDeferredInterval 是 mm/L9 延迟去重队列的 flush 周期。
+	mmDeferredInterval time.Duration
+	// mmDeferredBatch 是 mm/L9 延迟去重队列的目标批量。
+	mmDeferredBatch int
 	// flowPath 指向 flow 根目录，用于初始化文件输出。
 	flowPath string
 	// onTick 是 tick 旁路回调。
@@ -375,6 +387,21 @@ func newMarketDataRuntime(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCal
 	if opts.driftResumeTicks <= 0 {
 		opts.driftResumeTicks = 3
 	}
+	if opts.dbWriterCount <= 0 {
+		opts.dbWriterCount = defaultDBWriterCount
+	}
+	if opts.dbFlushBatch <= 0 {
+		opts.dbFlushBatch = defaultDBFlushBatch
+	}
+	if opts.dbFlushInterval <= 0 {
+		opts.dbFlushInterval = defaultDBFlushInterval
+	}
+	if opts.mmDeferredInterval <= 0 {
+		opts.mmDeferredInterval = defaultMMDeferredInterval
+	}
+	if opts.mmDeferredBatch <= 0 {
+		opts.mmDeferredBatch = defaultMMDeferredBatch
+	}
 
 	rt := &marketDataRuntime{
 		store:              store,
@@ -395,7 +422,7 @@ func newMarketDataRuntime(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCal
 	}
 	shardCount := defaultMarketDataShardCount
 	rt.shardQueueDepthGauge = make([]int64, shardCount)
-	rt.dbWriter = newDBBatchWriter(store, status, defaultDBWriterCount, queueCfg.PersistCapacity, defaultDBFlushBatch, defaultDBFlushInterval)
+	rt.dbWriter = newDBBatchWriter(store, status, opts.dbWriterCount, queueCfg.PersistCapacity, opts.dbFlushBatch, opts.dbFlushInterval, opts.mmDeferredInterval, opts.mmDeferredBatch)
 	if l9Async != nil {
 		l9Async.SetPersistSink(rt.enqueuePersistTasks)
 	}
@@ -469,7 +496,7 @@ func (r *marketDataRuntime) publishQueueMetrics() {
 			for i := range r.shards {
 				backlog = append(backlog, int(atomic.LoadInt64(&r.shardQueueDepthGauge[i])))
 			}
-			r.status.MarkRuntimeQueues(backlog, r.dbWriter.QueueDepth(), r.dbWriter.DropCount(), runtime.NumGoroutine())
+			r.status.MarkRuntimeQueues(backlog, r.dbWriter.QueueDepth(), r.dbWriter.InflightDepth(), r.dbWriter.DropCount(), runtime.NumGoroutine())
 		}
 	}
 }

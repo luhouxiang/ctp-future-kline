@@ -13,6 +13,7 @@ type KlineStore = klineStore
 type MdSpi = mdSpi
 type L9AsyncCalculator = l9AsyncCalculator
 type InstrumentInfo = instrumentInfo
+type InstrumentSyncLog = instrumentSyncLog
 type TickEvent = tickEvent
 
 const (
@@ -45,6 +46,10 @@ func NewMdSpi(store *klineStore, l9Async *l9AsyncCalculator) *mdSpi {
 
 func NewL9AsyncCalculator(store *klineStore, enabled bool, workers int, expectedByVariety map[string][]string) *l9AsyncCalculator {
 	return newL9AsyncCalculator(store, nil, nil, enabled, workers, expectedByVariety)
+}
+
+func NewInstrumentCatalogRepository(db *sql.DB) *InstrumentCatalogRepo {
+	return NewInstrumentCatalogRepo(db)
 }
 
 func SelectSubscribeTargets(queriedInstruments []instrumentInfo, configuredVarieties []string) []string {

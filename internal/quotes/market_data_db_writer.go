@@ -27,6 +27,7 @@ type dbWriterWorker struct {
 	spool         *queuewatch.JSONSpool[persistTask]
 
 	dropCount atomic.Int64
+	buffered  atomic.Int64
 
 	lastFlushRows int
 	lastFlushMS   float64
@@ -45,12 +46,13 @@ type dbBatchWriter struct {
 	mmDeferredBatch    int
 	mmDeferredQueue    *queuewatch.QueueHandle
 	mmDeferredSpool    *queuewatch.JSONSpool[persistTask]
+	mmDeferredPending  atomic.Int64
 
 	mu           sync.Mutex
 	ensuredMMTbl map[string]struct{}
 }
 
-func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCount int, queueCap int, flushBatch int, flushInterval time.Duration) *dbBatchWriter {
+func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCount int, queueCap int, flushBatch int, flushInterval time.Duration, mmDeferredInterval time.Duration, mmDeferredBatch int) *dbBatchWriter {
 	if workerCount <= 0 {
 		workerCount = 1
 	}
@@ -69,8 +71,14 @@ func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCoun
 	if flushInterval <= 0 {
 		flushInterval = defaultDBFlushInterval
 	}
+	if mmDeferredInterval <= 0 {
+		mmDeferredInterval = defaultMMDeferredInterval
+	}
+	if mmDeferredBatch <= 0 {
+		mmDeferredBatch = defaultMMDeferredBatch
+	}
 
-	minuteCount := workerCount - 1
+	minuteCount := workerCount / 2
 	if minuteCount <= 0 {
 		minuteCount = 1
 	}
@@ -87,10 +95,21 @@ func newDBBatchWriter(store *klineStore, status *RuntimeStatusCenter, workerCoun
 		minuteWorkers:      make([]*dbWriterWorker, 0, minuteCount),
 		mmWorkers:          make([]*dbWriterWorker, 0, mmCount),
 		mmDeferredCh:       make(chan any, queueCfg.MMDeferredCapacity),
-		mmDeferredInterval: time.Second,
-		mmDeferredBatch:    256,
+		mmDeferredInterval: mmDeferredInterval,
+		mmDeferredBatch:    mmDeferredBatch,
 		ensuredMMTbl:       make(map[string]struct{}),
 	}
+	logger.Info(
+		"db writer config ready",
+		"worker_count", workerCount,
+		"minute_workers", minuteCount,
+		"mm_workers", mmCount,
+		"worker_queue_capacity", workerQueueCap,
+		"flush_batch", flushBatch,
+		"flush_interval_ms", flushInterval.Milliseconds(),
+		"mm_deferred_batch", mmDeferredBatch,
+		"mm_deferred_interval_ms", mmDeferredInterval.Milliseconds(),
+	)
 	if registry != nil {
 		out.mmDeferredQueue = registry.Register(queuewatch.QueueSpec{
 			Name:        "db_mm_deferred",
@@ -287,6 +306,17 @@ func (w *dbBatchWriter) QueueDepth() int {
 	return total
 }
 
+func (w *dbBatchWriter) InflightDepth() int {
+	if w == nil {
+		return 0
+	}
+	total := int(w.mmDeferredPending.Load())
+	for _, worker := range w.allWorkers() {
+		total += int(worker.buffered.Load())
+	}
+	return total
+}
+
 func (w *dbBatchWriter) DropCount() int64 {
 	if w == nil {
 		return 0
@@ -320,13 +350,16 @@ func (w *dbBatchWriter) runMMDeferred() {
 			switch v := msg.(type) {
 			case persistTask:
 				pending[deferredTaskKey(v)] = v
+				w.mmDeferredPending.Store(int64(len(pending)))
 				if len(pending) >= w.mmDeferredBatch {
 					w.dispatchDeferredPending(pending)
 					pending = make(map[string]persistTask)
+					w.mmDeferredPending.Store(0)
 				}
 			case mmDeferredFlushRequest:
 				w.dispatchDeferredPending(pending)
 				pending = make(map[string]persistTask)
+				w.mmDeferredPending.Store(0)
 				v.done <- nil
 			}
 		default:
@@ -338,9 +371,11 @@ func (w *dbBatchWriter) runMMDeferred() {
 						w.mmDeferredQueue.MarkDequeued(depth)
 					}
 					pending[deferredTaskKey(task)] = task
+					w.mmDeferredPending.Store(int64(len(pending)))
 					if len(pending) >= w.mmDeferredBatch {
 						w.dispatchDeferredPending(pending)
 						pending = make(map[string]persistTask)
+						w.mmDeferredPending.Store(0)
 					}
 					continue
 				} else if err != nil {
@@ -352,6 +387,7 @@ func (w *dbBatchWriter) runMMDeferred() {
 		case <-ticker.C:
 			w.dispatchDeferredPending(pending)
 			pending = make(map[string]persistTask)
+			w.mmDeferredPending.Store(0)
 		default:
 			if len(pending) == 0 {
 				time.Sleep(5 * time.Millisecond)
@@ -416,14 +452,17 @@ func (w *dbWriterWorker) run() {
 			switch v := msg.(type) {
 			case persistTask:
 				buffer = append(buffer, v)
+				w.buffered.Store(int64(len(buffer)))
 				if len(buffer) >= w.flushBatch {
 					buffer = w.flush(buffer)
 					buffer = buffer[:0]
+					w.buffered.Store(0)
 				}
 			case dbFlushRequest:
 				if len(buffer) > 0 {
 					buffer = w.flush(buffer)
 					buffer = buffer[:0]
+					w.buffered.Store(0)
 				}
 				v.done <- nil
 			}
@@ -436,9 +475,11 @@ func (w *dbWriterWorker) run() {
 						w.queueHandle.MarkDequeued(depth)
 					}
 					buffer = append(buffer, task)
+					w.buffered.Store(int64(len(buffer)))
 					if len(buffer) >= w.flushBatch {
 						buffer = w.flush(buffer)
 						buffer = buffer[:0]
+						w.buffered.Store(0)
 					}
 					continue
 				} else if err != nil {
@@ -451,6 +492,7 @@ func (w *dbWriterWorker) run() {
 			if len(buffer) > 0 {
 				buffer = w.flush(buffer)
 				buffer = buffer[:0]
+				w.buffered.Store(0)
 			}
 		default:
 			if len(buffer) == 0 {
@@ -465,6 +507,7 @@ func (w *dbWriterWorker) flush(buffer []persistTask) []persistTask {
 		return buffer[:0]
 	}
 	startedAt := time.Now()
+	rawRows := len(buffer)
 	byTable := make(map[string][]persistTask)
 	for _, task := range buffer {
 		byTable[task.TableName] = append(byTable[task.TableName], task)
@@ -476,17 +519,21 @@ func (w *dbWriterWorker) flush(buffer []persistTask) []persistTask {
 	sort.Strings(tables)
 
 	totalRows := 0
+	totalDedupedRows := 0
 	executedStatements := 0
 	tableSummaries := make([]string, 0, len(tables))
 	for _, table := range tables {
 		batch := byTable[table]
+		rawBatchRows := len(batch)
+		batch = dedupePersistTasks(batch)
+		totalDedupedRows += rawBatchRows - len(batch)
 		if err := w.upsertBatch(table, batch); err != nil {
 			logger.Error("batch upsert failed", "table", table, "worker_id", w.id, "error", err)
 			continue
 		}
 		executedStatements++
 		totalRows += len(batch)
-		tableSummaries = append(tableSummaries, fmt.Sprintf("%s:%d", table, len(batch)))
+		tableSummaries = append(tableSummaries, fmt.Sprintf("%s:%d/%d", table, len(batch), rawBatchRows))
 		for _, task := range batch {
 			endToEndMS := time.Since(task.Trace.ReceivedAt).Seconds() * 1000
 			if w.status != nil {
@@ -497,22 +544,108 @@ func (w *dbWriterWorker) flush(buffer []persistTask) []persistTask {
 		}
 	}
 	elapsedMS := time.Since(startedAt).Seconds() * 1000
+	oldestEnqueuedAt := oldestPersistEnqueuedAt(buffer)
+	oldestQueueMS := 0.0
+	if !oldestEnqueuedAt.IsZero() {
+		oldestQueueMS = startedAt.Sub(oldestEnqueuedAt).Seconds() * 1000
+	}
+	w.buffered.Store(0)
+	queueDepthTotal := w.owner.QueueDepth()
+	queueDepthInflight := w.owner.InflightDepth()
 	w.lastFlushRows = totalRows
 	w.lastFlushMS = elapsedMS
 	if w.status != nil {
-		w.status.MarkDBFlush(totalRows, elapsedMS, w.pendingDepth())
+		w.status.MarkDBFlush(totalRows, elapsedMS, queueDepthTotal, queueDepthInflight)
+	}
+	logger.Debug(
+		"db batch flush",
+		"worker_id", w.id,
+		"rows", totalRows,
+		"deduped_rows", totalDedupedRows,
+		"raw_rows", rawRows,
+		"flush_ms", elapsedMS,
+		"statement_count", executedStatements,
+		"queue_depth_total", queueDepthTotal,
+		"queue_depth_worker", w.pendingDepth(),
+		"queue_depth_inflight", queueDepthInflight,
+		"tables", strings.Join(tableSummaries, ","),
+	)
+	if elapsedMS > 500 || oldestQueueMS > 1000 {
+		logger.Warn(
+			"db batch flush slow path",
+			"worker_id", w.id,
+			"rows", totalRows,
+			"deduped_rows", totalDedupedRows,
+			"flush_ms", elapsedMS,
+			"persist_queue_ms", oldestQueueMS,
+			"queue_depth_total", queueDepthTotal,
+			"queue_depth_inflight", queueDepthInflight,
+			"tables", strings.Join(tableSummaries, ","),
+		)
 	}
 	if elapsedMS >= latencyLogThreshold.Seconds()*1000 {
 		logger.Warn(
 			"db batch flush latency",
 			"worker_id", w.id,
 			"rows", totalRows,
+			"deduped_rows", totalDedupedRows,
 			"flush_ms", elapsedMS,
 			"statement_count", executedStatements,
 			"tables", strings.Join(tableSummaries, ","),
 		)
 	}
 	return buffer[:0]
+}
+
+func dedupePersistTasks(tasks []persistTask) []persistTask {
+	if len(tasks) <= 1 {
+		return tasks
+	}
+	lastByKey := make(map[string]persistTask, len(tasks))
+	for _, task := range tasks {
+		lastByKey[persistTaskKey(task)] = task
+	}
+	out := make([]persistTask, 0, len(lastByKey))
+	for _, task := range lastByKey {
+		out = append(out, task)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].TableName == out[j].TableName {
+			leftAdjusted := chooseAdjustedTime(out[i].Bar)
+			rightAdjusted := chooseAdjustedTime(out[j].Bar)
+			if leftAdjusted.Equal(rightAdjusted) {
+				if out[i].InstrumentID == out[j].InstrumentID {
+					return out[i].Bar.Period < out[j].Bar.Period
+				}
+				return out[i].InstrumentID < out[j].InstrumentID
+			}
+			return leftAdjusted.Before(rightAdjusted)
+		}
+		return out[i].TableName < out[j].TableName
+	})
+	return out
+}
+
+func persistTaskKey(task persistTask) string {
+	return strings.Join([]string{
+		task.TableName,
+		strings.ToLower(strings.TrimSpace(task.InstrumentID)),
+		task.Bar.Period,
+		task.Bar.MinuteTime.Format("2006-01-02 15:04:00"),
+	}, "|")
+}
+
+func oldestPersistEnqueuedAt(tasks []persistTask) time.Time {
+	oldest := time.Time{}
+	for _, task := range tasks {
+		if task.Trace.PersistEnqueuedAt.IsZero() {
+			continue
+		}
+		if oldest.IsZero() || task.Trace.PersistEnqueuedAt.Before(oldest) {
+			oldest = task.Trace.PersistEnqueuedAt
+		}
+	}
+	return oldest
 }
 
 func (w *dbWriterWorker) pendingDepth() int {

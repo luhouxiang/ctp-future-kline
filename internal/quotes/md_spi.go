@@ -43,6 +43,16 @@ type mdSpiOptions struct {
 	driftResumeTicks int
 	// enableMultiMinute 控制是否继续聚合 mm 周期 bar。
 	enableMultiMinute bool
+	// dbWriterCount 是 DB writer 的总 worker 数。
+	dbWriterCount int
+	// dbFlushBatch 是 DB writer 单次 flush 目标批量。
+	dbFlushBatch int
+	// dbFlushInterval 是 DB writer 未攒满时的定时 flush 周期。
+	dbFlushInterval time.Duration
+	// mmDeferredInterval 是 mm/L9 延迟去重队列的 flush 周期。
+	mmDeferredInterval time.Duration
+	// mmDeferredBatch 是 mm/L9 延迟去重队列的目标批量。
+	mmDeferredBatch int
 	// flowPath 用于初始化 flow 目录下的文件输出。
 	flowPath string
 	// onTick 是 tick 旁路回调，供策略和 bus 使用。

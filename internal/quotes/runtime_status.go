@@ -4,6 +4,8 @@
 package quotes
 
 import (
+	"math"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -82,8 +84,26 @@ type RuntimeSnapshot struct {
 	DBFlushMS float64 `json:"db_flush_ms"`
 	// DBFlushRows ???????? flush ????
 	DBFlushRows int `json:"db_flush_rows"`
+	// DBFlushRowsLast 保存最近一次 DB flush 成功写入行数。
+	DBFlushRowsLast int `json:"db_flush_rows_last"`
+	// DBFlushMSLast 保存最近一次 DB flush 执行耗时。
+	DBFlushMSLast float64 `json:"db_flush_ms_last"`
+	// DBFlushRowsAvg1m 保存最近 1 分钟 DB flush 行数均值。
+	DBFlushRowsAvg1m float64 `json:"db_flush_rows_avg_1m"`
+	// DBFlushMSAvg1m 保存最近 1 分钟 DB flush 耗时均值。
+	DBFlushMSAvg1m float64 `json:"db_flush_ms_avg_1m"`
+	// DBFlushRowsP951m 保存最近 1 分钟 DB flush 行数 P95。
+	DBFlushRowsP951m int `json:"db_flush_rows_p95_1m"`
+	// PersistQueueMSAvg1m 保存最近 1 分钟 DB 排队时间均值。
+	PersistQueueMSAvg1m float64 `json:"persist_queue_ms_avg_1m"`
+	// PersistQueueMSP951m 保存最近 1 分钟 DB 排队时间 P95。
+	PersistQueueMSP951m float64 `json:"persist_queue_ms_p95_1m"`
 	// DBQueueDepth ??? DB writer ?????
 	DBQueueDepth int `json:"db_queue_depth"`
+	// DBQueueDepthTotal 保存 DB writer 总队列深度。
+	DBQueueDepthTotal int `json:"db_queue_depth_total"`
+	// DBQueueDepthInflight 保存 DB writer 当前 in-flight 任务数。
+	DBQueueDepthInflight int `json:"db_queue_depth_inflight"`
 	// FileFlushMS ????????????
 	FileFlushMS float64 `json:"file_flush_ms"`
 	// FileQueueDepth ???????????
@@ -137,7 +157,25 @@ type RuntimeStatusCenter struct {
 	queueRegistry *queuewatch.Registry
 	// statusQueue ?? RuntimeStatusCenter ????????????
 	statusQueue *queuewatch.QueueHandle
+	// persistQueueSamples 保存最近 1 分钟排队时间样本。
+	persistQueueSamples []timedFloatSample
+	// dbFlushMSSamples 保存最近 1 分钟 DB flush 耗时样本。
+	dbFlushMSSamples []timedFloatSample
+	// dbFlushRowSamples 保存最近 1 分钟 DB flush 行数样本。
+	dbFlushRowSamples []timedIntSample
 }
+
+type timedFloatSample struct {
+	at    time.Time
+	value float64
+}
+
+type timedIntSample struct {
+	at    time.Time
+	value int
+}
+
+const runtimeStatusWindow = time.Minute
 
 func NewRuntimeStatusCenter(marketOpenStale time.Duration) *RuntimeStatusCenter {
 	cfg := queuewatch.DefaultConfig("")
@@ -428,10 +466,12 @@ func (c *RuntimeStatusCenter) MarkMMRebuildLatency(instrumentID string, queueMS 
 	})
 }
 
-func (c *RuntimeStatusCenter) MarkRuntimeQueues(shardBacklog []int, dbQueueDepth int, _ int64, goroutines int) {
+func (c *RuntimeStatusCenter) MarkRuntimeQueues(shardBacklog []int, dbQueueDepthTotal int, dbQueueDepthInflight int, _ int64, goroutines int) {
 	c.mutate(func(s *RuntimeSnapshot) {
 		s.ShardBacklog = append([]int(nil), shardBacklog...)
-		s.DBQueueDepth = dbQueueDepth
+		s.DBQueueDepth = dbQueueDepthTotal
+		s.DBQueueDepthTotal = dbQueueDepthTotal
+		s.DBQueueDepthInflight = dbQueueDepthInflight
 		s.Goroutines = goroutines
 	})
 }
@@ -465,7 +505,10 @@ func (c *RuntimeStatusCenter) MarkUpstreamLag(instrumentID string, upstreamLagMS
 
 func (c *RuntimeStatusCenter) MarkPersistLatency(instrumentID string, queueMS float64) {
 	c.mutate(func(s *RuntimeSnapshot) {
+		c.recordPersistQueueSampleLocked(time.Now(), queueMS)
 		s.PersistQueueMS = queueMS
+		s.PersistQueueMSAvg1m = avgFloatSamples(c.persistQueueSamples)
+		s.PersistQueueMSP951m = p95FloatSamples(c.persistQueueSamples)
 		s.LastLatencyInstrument = instrumentID
 		s.LastLatencyStage = "persist_queue"
 	})
@@ -479,11 +522,20 @@ func (c *RuntimeStatusCenter) MarkEndToEndLatency(instrumentID string, totalMS f
 	})
 }
 
-func (c *RuntimeStatusCenter) MarkDBFlush(rows int, flushMS float64, queueDepth int) {
+func (c *RuntimeStatusCenter) MarkDBFlush(rows int, flushMS float64, queueDepthTotal int, queueDepthInflight int) {
 	c.mutate(func(s *RuntimeSnapshot) {
+		now := time.Now()
+		c.recordDBFlushSamplesLocked(now, rows, flushMS)
 		s.DBFlushRows = rows
 		s.DBFlushMS = flushMS
-		s.DBQueueDepth = queueDepth
+		s.DBFlushRowsLast = rows
+		s.DBFlushMSLast = flushMS
+		s.DBFlushRowsAvg1m = avgIntSamples(c.dbFlushRowSamples)
+		s.DBFlushMSAvg1m = avgFloatSamples(c.dbFlushMSSamples)
+		s.DBFlushRowsP951m = p95IntSamples(c.dbFlushRowSamples)
+		s.DBQueueDepth = queueDepthTotal
+		s.DBQueueDepthTotal = queueDepthTotal
+		s.DBQueueDepthInflight = queueDepthInflight
 		s.LastLatencyStage = "db_flush"
 	})
 }
@@ -506,6 +558,104 @@ func (c *RuntimeStatusCenter) MarkLateTick() {
 	c.mutate(func(s *RuntimeSnapshot) {
 		s.LateTicks++
 	})
+}
+
+func (c *RuntimeStatusCenter) recordPersistQueueSampleLocked(now time.Time, value float64) {
+	c.persistQueueSamples = append(c.persistQueueSamples, timedFloatSample{at: now, value: value})
+	c.persistQueueSamples = pruneFloatSamples(c.persistQueueSamples, now.Add(-runtimeStatusWindow))
+}
+
+func (c *RuntimeStatusCenter) recordDBFlushSamplesLocked(now time.Time, rows int, flushMS float64) {
+	c.dbFlushRowSamples = append(c.dbFlushRowSamples, timedIntSample{at: now, value: rows})
+	c.dbFlushMSSamples = append(c.dbFlushMSSamples, timedFloatSample{at: now, value: flushMS})
+	c.dbFlushRowSamples = pruneIntSamples(c.dbFlushRowSamples, now.Add(-runtimeStatusWindow))
+	c.dbFlushMSSamples = pruneFloatSamples(c.dbFlushMSSamples, now.Add(-runtimeStatusWindow))
+}
+
+func pruneFloatSamples(in []timedFloatSample, cutoff time.Time) []timedFloatSample {
+	idx := 0
+	for idx < len(in) && in[idx].at.Before(cutoff) {
+		idx++
+	}
+	if idx == 0 {
+		return in
+	}
+	out := make([]timedFloatSample, len(in)-idx)
+	copy(out, in[idx:])
+	return out
+}
+
+func pruneIntSamples(in []timedIntSample, cutoff time.Time) []timedIntSample {
+	idx := 0
+	for idx < len(in) && in[idx].at.Before(cutoff) {
+		idx++
+	}
+	if idx == 0 {
+		return in
+	}
+	out := make([]timedIntSample, len(in)-idx)
+	copy(out, in[idx:])
+	return out
+}
+
+func avgFloatSamples(in []timedFloatSample) float64 {
+	if len(in) == 0 {
+		return 0
+	}
+	total := 0.0
+	for _, item := range in {
+		total += item.value
+	}
+	return total / float64(len(in))
+}
+
+func avgIntSamples(in []timedIntSample) float64 {
+	if len(in) == 0 {
+		return 0
+	}
+	total := 0
+	for _, item := range in {
+		total += item.value
+	}
+	return float64(total) / float64(len(in))
+}
+
+func p95FloatSamples(in []timedFloatSample) float64 {
+	if len(in) == 0 {
+		return 0
+	}
+	vals := make([]float64, 0, len(in))
+	for _, item := range in {
+		vals = append(vals, item.value)
+	}
+	sort.Float64s(vals)
+	return vals[p95Index(len(vals))]
+}
+
+func p95IntSamples(in []timedIntSample) int {
+	if len(in) == 0 {
+		return 0
+	}
+	vals := make([]int, 0, len(in))
+	for _, item := range in {
+		vals = append(vals, item.value)
+	}
+	sort.Ints(vals)
+	return vals[p95Index(len(vals))]
+}
+
+func p95Index(n int) int {
+	if n <= 1 {
+		return 0
+	}
+	idx := int(math.Ceil(float64(n)*0.95)) - 1
+	if idx < 0 {
+		return 0
+	}
+	if idx >= n {
+		return n - 1
+	}
+	return idx
 }
 
 func (c *RuntimeStatusCenter) mutate(fn func(*RuntimeSnapshot)) {

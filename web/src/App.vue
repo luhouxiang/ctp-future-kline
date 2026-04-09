@@ -27,9 +27,18 @@ const status = reactive({
   router_queue_ms: 0,
   shard_queue_ms: 0,
   persist_queue_ms: 0,
+  persist_queue_ms_avg_1m: 0,
+  persist_queue_ms_p95_1m: 0,
   db_flush_ms: 0,
   db_flush_rows: 0,
+  db_flush_ms_last: 0,
+  db_flush_rows_last: 0,
+  db_flush_ms_avg_1m: 0,
+  db_flush_rows_avg_1m: 0,
+  db_flush_rows_p95_1m: 0,
   db_queue_depth: 0,
+  db_queue_depth_total: 0,
+  db_queue_depth_inflight: 0,
   file_flush_ms: 0,
   file_queue_depth: 0,
   end_to_end_ms: 0,
@@ -1395,15 +1404,19 @@ onUnmounted(() => {
         <div class="status-item">回调到入队: {{ Number(status.callback_to_process_ms || 0).toFixed(1) }} ms</div>
         <div class="status-item">路由排队时间: {{ Number(status.router_queue_ms || 0).toFixed(1) }} ms</div>
         <div class="status-item">分片排队时间: {{ Number(status.shard_queue_ms || 0).toFixed(1) }} ms</div>
-        <div class="status-item">DB 排队时间: {{ Number(status.persist_queue_ms || 0).toFixed(1) }} ms</div>
-        <div class="status-item">DB 批量执行时间: {{ Number(status.db_flush_ms || 0).toFixed(1) }} ms</div>
-        <div class="status-item">DB 本批写入行数: {{ status.db_flush_rows || 0 }}</div>
-        <div class="status-item">DB 队列深度: {{ status.db_queue_depth || 0 }}</div>
+        <div class="status-item">DB 排队时间(最近一次): {{ Number(status.persist_queue_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 排队时间(1m均值/P95): {{ Number(status.persist_queue_ms_avg_1m || 0).toFixed(1) }} / {{ Number(status.persist_queue_ms_p95_1m || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 批量执行时间(最近一次): {{ Number(status.db_flush_ms_last || status.db_flush_ms || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 批量执行时间(1m均值): {{ Number(status.db_flush_ms_avg_1m || 0).toFixed(1) }} ms</div>
+        <div class="status-item">DB 本批写入行数(最近一次): {{ status.db_flush_rows_last || status.db_flush_rows || 0 }}</div>
+        <div class="status-item">DB 本批写入行数(1m均值/P95): {{ Number(status.db_flush_rows_avg_1m || 0).toFixed(1) }} / {{ status.db_flush_rows_p95_1m || 0 }}</div>
+        <div class="status-item">DB 队列深度(总量): {{ status.db_queue_depth_total || status.db_queue_depth || 0 }}</div>
+        <div class="status-item">DB 队列深度(InFlight): {{ status.db_queue_depth_inflight || 0 }}</div>
         <div class="status-item">文件批量落盘时间: {{ Number(status.file_flush_ms || 0).toFixed(1) }} ms</div>
         <div class="status-item">文件队列深度: {{ status.file_queue_depth || 0 }}</div>
         <div class="status-item">端到端总耗时: {{ Number(status.end_to_end_ms || 0).toFixed(1) }} ms</div>
       </div>
-      <p>说明: 排队时间看堆积，批量执行时间看数据库写入本身，总耗时看单条数据从接收到落库的整体延迟。</p>
+      <p>说明: 优先看 1 分钟均值/P95 判断是否持续堆积；最近一次指标只反映最新一批，不代表整体吞吐。</p>
     </div>
 
     <div class="panel">

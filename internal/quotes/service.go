@@ -138,25 +138,56 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 	logger.Info("user login request sent")
 	time.Sleep(time.Duration(s.cfg.LoginWaitSeconds) * time.Second)
 
+	metaDB, err := openSharedMetaDB(s.cfg)
+	if err != nil {
+		logger.Error("open shared meta db failed", "error", err)
+		return nil, err
+	}
+	defer metaDB.Close()
+	repo := NewInstrumentCatalogRepo(metaDB)
+
+	tradingDay := spi.getTradingDay()
+	if syncLog, ok, err := repo.LatestSyncLog(tradingDay); err != nil {
+		logger.Error("load instrument sync log failed", "trading_day", tradingDay, "error", err)
+	} else if ok {
+		instruments, loadErr := repo.ListInstrumentInfosByTradingDay(tradingDay)
+		if loadErr != nil {
+			logger.Error("load instrument catalog failed", "trading_day", tradingDay, "error", loadErr)
+		} else if len(instruments) > 0 {
+			logger.Info(
+				"instrument catalog already synced for trading day",
+				"trading_day", tradingDay,
+				"instrument_count", syncLog.InstrumentCount,
+				"updated_at", syncLog.UpdatedAt.Format("2006-01-02 15:04:05"),
+			)
+			return instruments, nil
+		}
+		logger.Warn(
+			"instrument sync log exists but catalog rows missing, falling back to ctp query",
+			"trading_day", tradingDay,
+			"instrument_count", syncLog.InstrumentCount,
+			"updated_at", syncLog.UpdatedAt.Format("2006-01-02 15:04:05"),
+		)
+	}
+
 	if err := s.queryInstrument(api, spi.nextReqID()); err != nil {
 		logger.Error("query instrument request failed", "error", err)
 		return nil, err
 	}
 	logger.Info("query instrument request sent")
 
-	instrumentResultCh := make(chan []instrumentInfo, 1)
-	go func() {
-		<-spi.queryFinished
-		instrumentResultCh <- dedupeInstrumentInfos(spi.instrumentInfos())
-	}()
-
 	waitTimeout := s.queryCallbacksWaitTimeout()
 	var instruments []instrumentInfo
 	select {
-	case instruments = <-instrumentResultCh:
+	case <-spi.queryFinished:
+		instruments = dedupeInstrumentInfos(spi.instrumentInfos())
 		logger.Info("query instrument callbacks finished")
 	case <-time.After(waitTimeout):
 		return nil, fmt.Errorf("wait query instrument callbacks timeout after %s", waitTimeout)
+	}
+
+	if err := repo.SyncTradingDay(tradingDay, spi.instrumentSnapshots(), time.Now()); err != nil {
+		logger.Error("sync instrument catalog failed", "trading_day", tradingDay, "error", err)
 	}
 
 	instrumentIDs := make([]string, 0, len(instruments))
@@ -165,7 +196,7 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 	}
 	logger.Info(
 		"query result summary",
-		"trading_day", spi.getTradingDay(),
+		"trading_day", tradingDay,
 		"instrument_count", len(instrumentIDs),
 		"instruments", instrumentIDs,
 	)
@@ -303,13 +334,18 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		},
 	)
 	options := mdSpiOptions{
-		tickDedupWindow:   time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
-		driftThreshold:    time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
-		driftResumeTicks:  s.cfg.DriftResumeTicks,
-		enableMultiMinute: true,
-		flowPath:          s.cfg.FlowPath,
-		onTick:            sideEffects.PublishTick,
-		onBar:             sideEffects.PublishBar,
+		tickDedupWindow:    time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
+		driftThreshold:     time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
+		driftResumeTicks:   s.cfg.DriftResumeTicks,
+		enableMultiMinute:  true,
+		dbWriterCount:      s.cfg.DBWriterCount,
+		dbFlushBatch:       s.cfg.DBFlushBatch,
+		dbFlushInterval:    time.Duration(s.cfg.DBFlushIntervalMS) * time.Millisecond,
+		mmDeferredInterval: time.Duration(s.cfg.MMDeferredIntervalMS) * time.Millisecond,
+		mmDeferredBatch:    s.cfg.MMDeferredBatch,
+		flowPath:           s.cfg.FlowPath,
+		onTick:             sideEffects.PublishTick,
+		onBar:              sideEffects.PublishBar,
 		onPartialBar: func(bar minuteBar) {
 			PublishChartPartialBar(bar, false)
 		},
