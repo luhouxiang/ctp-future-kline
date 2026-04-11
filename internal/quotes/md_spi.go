@@ -330,25 +330,25 @@ func (p *mdSpi) OnRtnDepthMarketData(pDepthMarketData ctp.CThostFtdcDepthMarketD
 		UpdateMillisec:     pDepthMarketData.GetUpdateMillisec(),
 		ReceivedAt:         receivedAt,
 		CallbackAt:         receivedAt,
-		LastPrice:          pDepthMarketData.GetLastPrice(),
-		PreSettlementPrice: sanitizeSettlementPrice(pDepthMarketData.GetPreSettlementPrice()),
-		PreClosePrice:      pDepthMarketData.GetPreClosePrice(),
-		PreOpenInterest:    pDepthMarketData.GetPreOpenInterest(),
-		OpenPrice:          pDepthMarketData.GetOpenPrice(),
-		HighestPrice:       pDepthMarketData.GetHighestPrice(),
-		LowestPrice:        pDepthMarketData.GetLowestPrice(),
+		LastPrice:          sanitizeMarketDataFloat(pDepthMarketData.GetLastPrice()),
+		PreSettlementPrice: sanitizeMarketDataFloat(pDepthMarketData.GetPreSettlementPrice()),
+		PreClosePrice:      sanitizeMarketDataFloat(pDepthMarketData.GetPreClosePrice()),
+		PreOpenInterest:    sanitizeMarketDataFloat(pDepthMarketData.GetPreOpenInterest()),
+		OpenPrice:          sanitizeMarketDataFloat(pDepthMarketData.GetOpenPrice()),
+		HighestPrice:       sanitizeMarketDataFloat(pDepthMarketData.GetHighestPrice()),
+		LowestPrice:        sanitizeMarketDataFloat(pDepthMarketData.GetLowestPrice()),
 		Volume:             pDepthMarketData.GetVolume(),
-		Turnover:           pDepthMarketData.GetTurnover(),
-		OpenInterest:       pDepthMarketData.GetOpenInterest(),
-		ClosePrice:         pDepthMarketData.GetClosePrice(),
-		SettlementPrice:    sanitizeSettlementPrice(pDepthMarketData.GetSettlementPrice()),
-		UpperLimitPrice:    pDepthMarketData.GetUpperLimitPrice(),
-		LowerLimitPrice:    pDepthMarketData.GetLowerLimitPrice(),
-		AveragePrice:       pDepthMarketData.GetAveragePrice(),
-		PreDelta:           pDepthMarketData.GetPreDelta(),
-		CurrDelta:          pDepthMarketData.GetCurrDelta(),
-		BidPrice1:          pDepthMarketData.GetBidPrice1(),
-		AskPrice1:          pDepthMarketData.GetAskPrice1(),
+		Turnover:           sanitizeMarketDataFloat(pDepthMarketData.GetTurnover()),
+		OpenInterest:       sanitizeMarketDataFloat(pDepthMarketData.GetOpenInterest()),
+		ClosePrice:         sanitizeMarketDataFloat(pDepthMarketData.GetClosePrice()),
+		SettlementPrice:    sanitizeMarketDataFloat(pDepthMarketData.GetSettlementPrice()),
+		UpperLimitPrice:    sanitizeMarketDataFloat(pDepthMarketData.GetUpperLimitPrice()),
+		LowerLimitPrice:    sanitizeMarketDataFloat(pDepthMarketData.GetLowerLimitPrice()),
+		AveragePrice:       sanitizeMarketDataFloat(pDepthMarketData.GetAveragePrice()),
+		PreDelta:           sanitizeMarketDataFloat(pDepthMarketData.GetPreDelta()),
+		CurrDelta:          sanitizeMarketDataFloat(pDepthMarketData.GetCurrDelta()),
+		BidPrice1:          sanitizeMarketDataFloat(pDepthMarketData.GetBidPrice1()),
+		AskPrice1:          sanitizeMarketDataFloat(pDepthMarketData.GetAskPrice1()),
 		BidVolume1:         pDepthMarketData.GetBidVolume1(),
 		AskVolume1:         pDepthMarketData.GetAskVolume1(),
 	})
@@ -492,10 +492,14 @@ func isValidTradePrice(price float64) bool {
 }
 
 func sanitizeSettlementPrice(price float64) float64 {
-	if !isFinitePrice(price) {
+	return sanitizeMarketDataFloat(price)
+}
+
+func sanitizeMarketDataFloat(v float64) float64 {
+	if !isFinitePrice(v) {
 		return 0
 	}
-	return price
+	return v
 }
 
 func isFinitePrice(price float64) bool {
