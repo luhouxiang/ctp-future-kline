@@ -23,33 +23,43 @@ var cleanupOnce sync.Once
 
 func NewDatabase(t *testing.T) string {
 	t.Helper()
+	return newDatabaseTB(t)
+}
+
+func NewBenchmarkDatabase(b *testing.B) string {
+	b.Helper()
+	return newDatabaseTB(b)
+}
+
+func newDatabaseTB(tb testing.TB) string {
+	tb.Helper()
 
 	cfg := baseConfig()
 	cleanupOnce.Do(func() {
 		if err := purgeStaleDatabases(cfg); err != nil {
-			t.Fatalf("purge stale test databases failed: %v", err)
+			tb.Fatalf("purge stale test databases failed: %v", err)
 		}
 	})
-	cfg.Database = dbName(t.Name())
+	cfg.Database = dbName(tb.Name())
 
 	if err := dbx.EnsureDatabase(cfg); err != nil {
-		t.Fatalf("ensure test database failed: %v", err)
+		tb.Fatalf("ensure test database failed: %v", err)
 	}
 
 	db, err := dbx.Open(dbx.BuildDSN(cfg))
 	if err != nil {
-		t.Fatalf("open test database failed: %v", err)
+		tb.Fatalf("open test database failed: %v", err)
 	}
 	if err := dbx.EnsureDatabaseAndSchema(cfg, db); err != nil {
 		_ = db.Close()
-		t.Fatalf("ensure test schema failed: %v", err)
+		tb.Fatalf("ensure test schema failed: %v", err)
 	}
 	if err := db.Close(); err != nil {
-		t.Fatalf("close test database failed: %v", err)
+		tb.Fatalf("close test database failed: %v", err)
 	}
 
-	t.Cleanup(func() {
-		dropDatabase(t, cfg)
+	tb.Cleanup(func() {
+		dropDatabaseTB(tb, cfg)
 	})
 	return dbx.BuildDSN(cfg)
 }
@@ -113,18 +123,23 @@ func dbName(testName string) string {
 
 func dropDatabase(t *testing.T, cfg config.DBConfig) {
 	t.Helper()
+	dropDatabaseTB(t, cfg)
+}
+
+func dropDatabaseTB(tb testing.TB, cfg config.DBConfig) {
+	tb.Helper()
 	if !strings.HasPrefix(cfg.Database, dbNamePrefix) {
-		t.Fatalf("refusing to drop non-test database %q", cfg.Database)
+		tb.Fatalf("refusing to drop non-test database %q", cfg.Database)
 	}
 
 	admin, err := openAdminDB(cfg)
 	if err != nil {
-		t.Fatalf("open mysql admin connection failed during cleanup: %v", err)
+		tb.Fatalf("open mysql admin connection failed during cleanup: %v", err)
 	}
 	defer admin.Close()
 
 	if err := dropDatabaseByName(admin, cfg.Database); err != nil {
-		t.Fatalf("drop test database failed: %v", err)
+		tb.Fatalf("drop test database failed: %v", err)
 	}
 }
 
