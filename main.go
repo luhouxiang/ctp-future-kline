@@ -14,6 +14,7 @@ import (
 	"runtime/debug"
 	"strconv"
 	"strings"
+	"time"
 
 	"ctp-future-kline/internal/calendar"
 	"ctp-future-kline/internal/config"
@@ -31,7 +32,7 @@ func main() {
 			os.Exit(1)
 		}
 	}()
-	configPath := flag.String("config", "../ctp-future-resources/config/config.json", "config file path")
+	configPath := flag.String("config", filepath.Join("config", "config.json"), "config file path")
 	noOpen := flag.Bool("no-open", false, "do not auto open browser")
 	flag.Parse()
 	logger.Info("backend version", "version", version.BackendVersion)
@@ -114,11 +115,6 @@ func main() {
 	}
 
 	tryFreeListenPort(cfg.Web.ListenAddr)
-	if ln, err := net.Listen("tcp", cfg.Web.ListenAddr); err == nil {
-		_ = ln.Close()
-	} else {
-		logger.Error("listen precheck failed", "addr", cfg.Web.ListenAddr, "error", err)
-	}
 	if err := server.Run(); err != nil {
 		logger.Error("run web server failed", "error", err)
 		os.Exit(1)
@@ -147,6 +143,7 @@ func tryFreeListenPort(addr string) {
 	}
 	selfPID := os.Getpid()
 	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	killedAny := false
 	for _, line := range lines {
 		line = strings.TrimSpace(line)
 		if line == "" {
@@ -160,7 +157,11 @@ func tryFreeListenPort(addr string) {
 			logger.Error("failed to stop occupied port process", "addr", addr, "pid", pid, "error", killErr)
 			continue
 		}
+		killedAny = true
 		logger.Info("stopped occupied port process", "addr", addr, "pid", pid)
+	}
+	if killedAny {
+		time.Sleep(500 * time.Millisecond)
 	}
 }
 
@@ -181,8 +182,10 @@ func resolveConfigPath(path string) string {
 	}
 
 	candidates := make([]string, 0, 4)
-	if path == "" || path == "config.json" {
+	if path == "" || path == "config.json" || path == filepath.Join("config", "config.json") {
 		candidates = append(candidates,
+			filepath.Join("config", "config.json"),
+			"config.json",
 			filepath.Join("..", "ctp-future-resources", "config", "config.json"),
 			filepath.Join("ctp-future-resources", "config", "config.json"),
 		)
@@ -190,6 +193,8 @@ func resolveConfigPath(path string) string {
 	if exe, err := os.Executable(); err == nil {
 		exeDir := filepath.Dir(exe)
 		candidates = append(candidates,
+			filepath.Join(exeDir, "config", "config.json"),
+			filepath.Join(exeDir, "..", "config", "config.json"),
 			filepath.Join(exeDir, "..", "ctp-future-resources", "config", "config.json"),
 			filepath.Join(exeDir, "ctp-future-resources", "config", "config.json"),
 		)

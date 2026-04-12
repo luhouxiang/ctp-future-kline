@@ -10,7 +10,7 @@
       "cwd": "${workspaceFolder}",
       "args": [
         "-config",
-        "${workspaceFolder}/config.json"
+        "${workspaceFolder}/config/config.json"
       ],
       "preLaunchTask": "go: debug prep",
       "presentation": {

@@ -1,0 +1,55 @@
+{
+  "ctp": {
+    "flow_path": "./flow",
+    "user_id": "668800200972",
+    "user_id_path": "../ctp-future-resources",
+    "subscribe_instruments": [],
+    "enable_l9_async": false,
+    "enable_multi_minute": false,
+    "connect_wait_seconds": 5,
+    "authenticate_wait_seconds": 5,
+    "login_wait_seconds": 5,
+    "md_connect_wait_seconds": 5,
+    "md_login_wait_seconds": 5,
+    "md_receive_seconds": 30
+  },
+  "db": {
+    "driver": "mysql",
+    "host": "localhost",
+    "port": 3306,
+    "user": "root",
+    "password": "ctp-future-kline-2026",
+    "database": "future_kline",
+    "params": "parseTime=true&loc=Local&multiStatements=true"
+  },
+  "web": {
+    "listen_addr": "127.0.0.1:8080",
+    "auto_open_browser": true,
+    "draw_debug_default": 1,
+    "browser_log_default": 0,
+    "market_open_stale_seconds": 60
+  },
+  "calendar": {
+    "auto_update_on_start": true,
+    "min_future_open_days": 90,
+    "source_url": "",
+    "source_csv_path": "",
+    "check_interval_hours": 24,
+    "browser_fallback": true,
+    "browser_path": "",
+    "browser_headless": true
+  },
+  "trade": {
+    "enabled": true,
+    "account_id": "default",
+    "auto_confirm_settlement": true,
+    "max_order_volume": 10,
+    "allowed_symbols": [],
+    "block_strategy_live_order": true,
+    "query_poll_interval_ms": 5000,
+    "position_sync_interval_ms": 3000
+  },
+  "log": {
+    "level": "debug"
+  }
+}

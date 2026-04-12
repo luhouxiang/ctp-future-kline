@@ -342,6 +342,125 @@ func TestLoadEnableL9AsyncConfig(t *testing.T) {
 	}
 }
 
+func TestLoadCTPAccountConfigByUserID(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "ctp": {
+    "flow_path": "./flow",
+    "user_id": "888888"
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("write test config failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "888888.json"), []byte(`{
+  "trader_front_addr": "tcp://180.168.146.187:10201",
+  "md_front_addr": "tcp://180.168.146.187:10211",
+  "broker_id": "9999",
+  "app_id": "simnow_client_test",
+  "auth_code": "0000000000000000",
+  "user_product_info": "",
+  "password": "simnowpassword"
+}`), 0o644); err != nil {
+		t.Fatalf("write account config failed: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.CTP.TraderFrontAddr != "tcp://180.168.146.187:10201" {
+		t.Fatalf("TraderFrontAddr = %q, want account config value", cfg.CTP.TraderFrontAddr)
+	}
+	if cfg.CTP.MdFrontAddr != "tcp://180.168.146.187:10211" {
+		t.Fatalf("MdFrontAddr = %q, want account config value", cfg.CTP.MdFrontAddr)
+	}
+	if cfg.CTP.BrokerID != "9999" || cfg.CTP.AppID != "simnow_client_test" || cfg.CTP.AuthCode != "0000000000000000" {
+		t.Fatalf("unexpected merged account config: %+v", cfg.CTP)
+	}
+	if cfg.CTP.Password != "simnowpassword" {
+		t.Fatalf("Password = %q, want account config value", cfg.CTP.Password)
+	}
+}
+
+func TestLoadCTPAccountConfigFromUserIDPath(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	configDir := filepath.Join(root, "config")
+	privateDir := filepath.Join(root, "private")
+	if err := os.MkdirAll(configDir, 0o755); err != nil {
+		t.Fatalf("mkdir config dir failed: %v", err)
+	}
+	if err := os.MkdirAll(privateDir, 0o755); err != nil {
+		t.Fatalf("mkdir private dir failed: %v", err)
+	}
+	path := filepath.Join(configDir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "ctp": {
+    "flow_path": "./flow",
+    "user_id": "888888",
+    "user_id_path": "../private"
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("write test config failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(privateDir, "888888.json"), []byte(`{
+  "trader_front_addr": "tcp://180.168.146.187:10201",
+  "md_front_addr": "tcp://180.168.146.187:10211",
+  "broker_id": "9999",
+  "app_id": "simnow_client_test",
+  "auth_code": "0000000000000000",
+  "password": "simnowpassword"
+}`), 0o644); err != nil {
+		t.Fatalf("write private account config failed: %v", err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.CTP.TraderFrontAddr != "tcp://180.168.146.187:10201" {
+		t.Fatalf("TraderFrontAddr = %q, want private account config value", cfg.CTP.TraderFrontAddr)
+	}
+	if cfg.CTP.Password != "simnowpassword" {
+		t.Fatalf("Password = %q, want private account config value", cfg.CTP.Password)
+	}
+}
+
+func TestLoadCTPAccountConfigUserIDMismatch(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.json")
+	if err := os.WriteFile(path, []byte(`{
+  "ctp": {
+    "flow_path": "./flow",
+    "user_id": "888888"
+  }
+}`), 0o644); err != nil {
+		t.Fatalf("write test config failed: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "888888.json"), []byte(`{
+  "user_id": "999999",
+  "trader_front_addr": "tcp://180.168.146.187:10201",
+  "md_front_addr": "tcp://180.168.146.187:10211",
+  "broker_id": "9999",
+  "app_id": "simnow_client_test",
+  "auth_code": "0000000000000000",
+  "password": "simnowpassword"
+}`), 0o644); err != nil {
+		t.Fatalf("write account config failed: %v", err)
+	}
+
+	_, err := config.Load(path)
+	if err == nil || !strings.Contains(err.Error(), "ctp account config user_id mismatch") {
+		t.Fatalf("Load() error = %v, want user_id mismatch", err)
+	}
+}
+
 func TestLoadInvalidReconnectRange(t *testing.T) {
 	t.Parallel()
 

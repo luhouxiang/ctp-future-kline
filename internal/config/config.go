@@ -12,6 +12,17 @@ import (
 	"strings"
 )
 
+type ctpAccountConfig struct {
+	TraderFrontAddr string `json:"trader_front_addr"`
+	MdFrontAddr     string `json:"md_front_addr"`
+	BrokerID        string `json:"broker_id"`
+	AppID           string `json:"app_id"`
+	AuthCode        string `json:"auth_code"`
+	UserProductInfo string `json:"user_product_info"`
+	UserID          string `json:"user_id"`
+	Password        string `json:"password"`
+}
+
 type AppConfig struct {
 	// CTP 保存行情和交易两条 CTP 链路共享的接入参数。
 	CTP CTPConfig `json:"ctp"`
@@ -79,6 +90,8 @@ type CTPConfig struct {
 	UserProductInfo string `json:"user_product_info"`
 	// UserID 是 CTP 账号。
 	UserID string `json:"user_id"`
+	// UserIDPath 是用户私有账号配置文件目录。
+	UserIDPath string `json:"user_id_path"`
 	// Password 是 CTP 密码。
 	Password string `json:"password"`
 	// SubscribeInstruments 指定需要订阅的合约或品种前缀过滤条件。
@@ -267,10 +280,98 @@ func Load(path string) (AppConfig, error) {
 	if err := json.Unmarshal(content, &cfg); err != nil {
 		return AppConfig{}, fmt.Errorf("parse config file failed: %w", err)
 	}
+	if err := mergeCTPAccountConfig(&cfg, path); err != nil {
+		return AppConfig{}, err
+	}
 	if err := cfg.Validate(); err != nil {
 		return AppConfig{}, err
 	}
 	return cfg, nil
+}
+
+func mergeCTPAccountConfig(cfg *AppConfig, configPath string) error {
+	if cfg == nil {
+		return nil
+	}
+	userID := strings.TrimSpace(cfg.CTP.UserID)
+	if userID == "" {
+		return nil
+	}
+	content, err := readCTPAccountConfig(configPath, userID, cfg.CTP.UserIDPath)
+	if err != nil {
+		return err
+	}
+	if len(content) == 0 {
+		return nil
+	}
+
+	var account ctpAccountConfig
+	if err := json.Unmarshal(content, &account); err != nil {
+		return fmt.Errorf("parse ctp account config failed: %w", err)
+	}
+	if account.UserID != "" && strings.TrimSpace(account.UserID) != userID {
+		return fmt.Errorf("ctp account config user_id mismatch: main=%s account=%s", userID, strings.TrimSpace(account.UserID))
+	}
+	if cfg.CTP.TraderFrontAddr == "" {
+		cfg.CTP.TraderFrontAddr = account.TraderFrontAddr
+	}
+	if cfg.CTP.MdFrontAddr == "" {
+		cfg.CTP.MdFrontAddr = account.MdFrontAddr
+	}
+	if cfg.CTP.BrokerID == "" {
+		cfg.CTP.BrokerID = account.BrokerID
+	}
+	if cfg.CTP.AppID == "" {
+		cfg.CTP.AppID = account.AppID
+	}
+	if cfg.CTP.AuthCode == "" {
+		cfg.CTP.AuthCode = account.AuthCode
+	}
+	if cfg.CTP.UserProductInfo == "" {
+		cfg.CTP.UserProductInfo = account.UserProductInfo
+	}
+	if cfg.CTP.Password == "" {
+		cfg.CTP.Password = account.Password
+	}
+	return nil
+}
+
+func readCTPAccountConfig(configPath, userID, userIDPath string) ([]byte, error) {
+	for _, accountPath := range candidateCTPAccountPaths(configPath, userID, userIDPath) {
+		content, err := os.ReadFile(accountPath)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return nil, fmt.Errorf("read ctp account config failed: %w", err)
+		}
+		return bytes.TrimPrefix(content, []byte{0xEF, 0xBB, 0xBF}), nil
+	}
+	return nil, nil
+}
+
+func candidateCTPAccountPaths(configPath, userID, userIDPath string) []string {
+	configDir := filepath.Dir(configPath)
+	candidates := []string{
+		filepath.Join(configDir, userID+".json"),
+	}
+	if userIDPath = strings.TrimSpace(userIDPath); userIDPath != "" {
+		dirPath := filepath.FromSlash(userIDPath)
+		dirCandidates := []string{dirPath}
+		if !filepath.IsAbs(dirPath) {
+			dirCandidates = []string{
+				filepath.Join(configDir, dirPath),
+				dirPath,
+			}
+		}
+		for _, candidateDir := range dirCandidates {
+			candidates = append(candidates,
+				filepath.Join(candidateDir, userID+".json"),
+				filepath.Join(candidateDir, "config", userID+".json"),
+			)
+		}
+	}
+	return candidates
 }
 
 func (c *AppConfig) Validate() error {

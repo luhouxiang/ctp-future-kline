@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 
 	"ctp-future-kline/internal/calendar"
 	"ctp-future-kline/internal/config"
@@ -11,7 +12,7 @@ import (
 )
 
 func main() {
-	configPath := flag.String("config", "../ctp-future-resources/config/config.json", "config file path")
+	configPath := flag.String("config", filepath.Join("config", "config.json"), "config file path")
 	source := flag.String("source", "csv", "import source: csv|url|shfe")
 	csvPath := flag.String("csv", "", "calendar csv file path")
 	url := flag.String("url", "", "calendar csv url")

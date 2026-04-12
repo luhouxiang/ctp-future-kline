@@ -49,13 +49,13 @@ cd ..
 ### 2. 启动服务
 
 ```bash
-go run . -config ../ctp-future-resources/config/config.json
+go run . -config ./config/config.json
 ```
 
 可选参数：
 
 ```bash
-go run . -config ../ctp-future-resources/config/config.json -no-open
+go run . -config ./config/config.json -no-open
 ```
 
 - `-no-open`: 不自动打开浏览器

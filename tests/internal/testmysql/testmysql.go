@@ -193,9 +193,15 @@ func findWorkspaceConfig() string {
 	}
 	dir := start
 	for {
-		candidate := filepath.Join(dir, "..", "ctp-future-resources", "config", "config.json")
-		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
-			return candidate
+		candidates := []string{
+			filepath.Join(dir, "config", "config.json"),
+			filepath.Join(dir, "config.json"),
+			filepath.Join(dir, "..", "ctp-future-resources", "config", "config.json"),
+		}
+		for _, candidate := range candidates {
+			if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+				return candidate
+			}
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
