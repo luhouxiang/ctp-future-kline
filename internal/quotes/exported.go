@@ -15,6 +15,9 @@ type L9AsyncCalculator = l9AsyncCalculator
 type InstrumentInfo = instrumentInfo
 type InstrumentSyncLog = instrumentSyncLog
 type TickEvent = tickEvent
+type ProductExchange = ProductExchangeRecord
+type ProductExchangeResolver = ProductExchangeCache
+type ResolvedProduct = ResolvedProductExchange
 
 const (
 	ColInstrumentID = colInstrumentID
@@ -50,6 +53,10 @@ func NewL9AsyncCalculator(store *klineStore, enabled bool, workers int, expected
 
 func NewInstrumentCatalogRepository(db *sql.DB) *InstrumentCatalogRepo {
 	return NewInstrumentCatalogRepo(db)
+}
+
+func NewProductExchangeResolver() *ProductExchangeCache {
+	return NewProductExchangeCache()
 }
 
 func SelectSubscribeTargets(queriedInstruments []instrumentInfo, configuredVarieties []string) []string {

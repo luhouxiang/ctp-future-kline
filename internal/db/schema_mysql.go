@@ -151,6 +151,7 @@ func sharedMetaSchemaStatements() []string {
 )`,
 		`CREATE TABLE IF NOT EXISTS ctp_product_exchange (
   product_id VARCHAR(32) NOT NULL,
+  product_id_norm VARCHAR(32) NOT NULL,
   exchange_id VARCHAR(16) NOT NULL,
   product_class VARCHAR(8) NOT NULL,
   volume_multiple INT NOT NULL DEFAULT 0,
@@ -158,6 +159,7 @@ func sharedMetaSchemaStatements() []string {
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (product_id, exchange_id)
 )`,
+		`CREATE UNIQUE INDEX idx_ctp_product_exchange_norm_exchange ON ctp_product_exchange(product_id_norm, exchange_id)`,
 		`CREATE INDEX idx_ctp_product_exchange_exchange ON ctp_product_exchange(exchange_id, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS user_config (
   owner VARCHAR(64) NOT NULL DEFAULT 'admin',
@@ -172,6 +174,16 @@ func sharedMetaSchemaStatements() []string {
 }
 
 func ensureSharedMetaTablesEvolution(db *sql.DB) error {
+	if err := ensureColumn(db, "ctp_product_exchange", "product_id_norm", "ALTER TABLE ctp_product_exchange ADD COLUMN product_id_norm VARCHAR(32) NOT NULL DEFAULT '' AFTER product_id"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE ctp_product_exchange SET product_id_norm=LOWER(TRIM(product_id)) WHERE product_id_norm IS NULL OR product_id_norm=''`); err != nil {
+		return fmt.Errorf("backfill ctp_product_exchange.product_id_norm failed: %w", err)
+	}
+	if _, err := db.Exec(`CREATE UNIQUE INDEX idx_ctp_product_exchange_norm_exchange ON ctp_product_exchange(product_id_norm, exchange_id)`); err != nil && !isDuplicateObjectError(err) {
+		return fmt.Errorf("ensure ctp_product_exchange norm-exchange index failed: %w", err)
+	}
+
 	drops := []struct {
 		table  string
 		column string

@@ -57,6 +57,11 @@ var domesticFuturesExchanges = map[string]struct{}{
 }
 
 func NewService(cfg config.CTPConfig) *Service {
+	if count, err := DefaultProductExchangeCache().EnsureLoadedFromDSN(cfg.SharedMetaDSN); err != nil {
+		logger.Error("load product exchange cache on service init failed", "error", err)
+	} else {
+		logger.Info("product exchange cache ready", "source", "quotes_service_init", "product_exchange_count", count)
+	}
 	return &Service{cfg: cfg}
 }
 
@@ -186,8 +191,26 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 		return nil, fmt.Errorf("wait query instrument callbacks timeout after %s", waitTimeout)
 	}
 
-	if err := repo.SyncTradingDay(tradingDay, spi.instrumentSnapshots(), time.Now()); err != nil {
+	updatedProductCount, err := repo.SyncTradingDay(tradingDay, spi.instrumentSnapshots(), time.Now())
+	if err != nil {
 		logger.Error("sync instrument catalog failed", "trading_day", tradingDay, "error", err)
+	} else if updatedProductCount > 0 {
+		count, loadErr := DefaultProductExchangeCache().LoadFromDSN(s.cfg.SharedMetaDSN)
+		if loadErr != nil {
+			logger.Error(
+				"refresh product exchange cache after sync failed",
+				"trading_day", tradingDay,
+				"updated_product_count", updatedProductCount,
+				"error", loadErr,
+			)
+		} else {
+			logger.Info(
+				"product exchange cache refreshed",
+				"trading_day", tradingDay,
+				"updated_product_count", updatedProductCount,
+				"product_exchange_count", count,
+			)
+		}
 	}
 
 	instrumentIDs := make([]string, 0, len(instruments))

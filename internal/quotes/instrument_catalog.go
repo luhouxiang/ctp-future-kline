@@ -61,8 +61,19 @@ type InstrumentCatalogRepo struct {
 	db *sql.DB
 }
 
+type ProductExchangeRecord struct {
+	ProductID      string
+	ProductIDNorm  string
+	ExchangeID     string
+	ProductClass   byte
+	VolumeMultiple int
+	PriceTick      float64
+	UpdatedAt      time.Time
+}
+
 type productExchangeRecord struct {
 	ProductID      string
+	ProductIDNorm  string
 	ExchangeID     string
 	ProductClass   byte
 	VolumeMultiple int
@@ -278,14 +289,14 @@ WHERE instrument_id=? AND exchange_id=?`,
 	return item, true, nil
 }
 
-func (r *InstrumentCatalogRepo) SyncTradingDay(tradingDay string, instruments []instrumentSnapshot, syncedAt time.Time) error {
+func (r *InstrumentCatalogRepo) SyncTradingDay(tradingDay string, instruments []instrumentSnapshot, syncedAt time.Time) (int, error) {
 	if r == nil || r.db == nil || strings.TrimSpace(tradingDay) == "" || len(instruments) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	tx, err := r.db.Begin()
 	if err != nil {
-		return fmt.Errorf("begin instrument catalog sync failed: %w", err)
+		return 0, fmt.Errorf("begin instrument catalog sync failed: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -305,7 +316,7 @@ sync_trading_day,updated_at
 ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	)
 	if err != nil {
-		return fmt.Errorf("prepare instrument catalog sync failed: %w", err)
+		return 0, fmt.Errorf("prepare instrument catalog sync failed: %w", err)
 	}
 	defer stmt.Close()
 
@@ -350,12 +361,12 @@ sync_trading_day,updated_at
 			strings.TrimSpace(tradingDay),
 			syncedAt,
 		); err != nil {
-			return fmt.Errorf("upsert instrument catalog failed: %w", err)
+			return 0, fmt.Errorf("upsert instrument catalog failed: %w", err)
 		}
 	}
 
 	if err := replaceProductExchangeRecords(tx, productRecords, syncedAt); err != nil {
-		return err
+		return 0, err
 	}
 
 	if _, err = tx.Exec(
@@ -364,11 +375,11 @@ sync_trading_day,updated_at
 		len(deduped),
 		syncedAt,
 	); err != nil {
-		return fmt.Errorf("upsert instrument sync log failed: %w", err)
+		return 0, fmt.Errorf("upsert instrument sync log failed: %w", err)
 	}
 
 	if err = tx.Commit(); err != nil {
-		return fmt.Errorf("commit instrument catalog sync failed: %w", err)
+		return 0, fmt.Errorf("commit instrument catalog sync failed: %w", err)
 	}
 
 	logger.Info(
@@ -378,7 +389,125 @@ sync_trading_day,updated_at
 		"updated_product_count", len(productRecords),
 		"updated_at", syncedAt.Format("2006-01-02 15:04:05"),
 	)
-	return nil
+	return len(productRecords), nil
+}
+
+func (r *InstrumentCatalogRepo) GetProductExchange(productID string, exchangeID string) (ProductExchangeRecord, bool, error) {
+	if r == nil || r.db == nil {
+		return ProductExchangeRecord{}, false, nil
+	}
+	productIDNorm := normalizeProductID(productID)
+	exchangeID = strings.TrimSpace(exchangeID)
+	if productIDNorm == "" || exchangeID == "" {
+		return ProductExchangeRecord{}, false, nil
+	}
+	var item ProductExchangeRecord
+	var productClass string
+	err := r.db.QueryRow(
+		`SELECT product_id,product_id_norm,exchange_id,product_class,volume_multiple,price_tick,updated_at
+FROM ctp_product_exchange
+WHERE product_id_norm=? AND exchange_id=?`,
+		productIDNorm,
+		exchangeID,
+	).Scan(
+		&item.ProductID,
+		&item.ProductIDNorm,
+		&item.ExchangeID,
+		&productClass,
+		&item.VolumeMultiple,
+		&item.PriceTick,
+		&item.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		return ProductExchangeRecord{}, false, nil
+	}
+	if err != nil {
+		return ProductExchangeRecord{}, false, fmt.Errorf("query product exchange record failed: %w", err)
+	}
+	item.ProductClass = byteFromDBString(productClass)
+	return item, true, nil
+}
+
+func (r *InstrumentCatalogRepo) ListProductExchangesByProduct(productID string) ([]ProductExchangeRecord, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	productIDNorm := normalizeProductID(productID)
+	if productIDNorm == "" {
+		return nil, nil
+	}
+	rows, err := r.db.Query(
+		`SELECT product_id,product_id_norm,exchange_id,product_class,volume_multiple,price_tick,updated_at
+FROM ctp_product_exchange
+WHERE product_id_norm=?
+ORDER BY exchange_id ASC`,
+		productIDNorm,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query product exchange records failed: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ProductExchangeRecord
+	for rows.Next() {
+		var item ProductExchangeRecord
+		var productClass string
+		if err := rows.Scan(
+			&item.ProductID,
+			&item.ProductIDNorm,
+			&item.ExchangeID,
+			&productClass,
+			&item.VolumeMultiple,
+			&item.PriceTick,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan product exchange record failed: %w", err)
+		}
+		item.ProductClass = byteFromDBString(productClass)
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate product exchange records failed: %w", err)
+	}
+	return out, nil
+}
+
+func (r *InstrumentCatalogRepo) ListAllProductExchanges() ([]ProductExchangeRecord, error) {
+	if r == nil || r.db == nil {
+		return nil, nil
+	}
+	rows, err := r.db.Query(
+		`SELECT product_id,product_id_norm,exchange_id,product_class,volume_multiple,price_tick,updated_at
+FROM ctp_product_exchange
+ORDER BY product_id_norm ASC, exchange_id ASC`,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query all product exchange records failed: %w", err)
+	}
+	defer rows.Close()
+
+	var out []ProductExchangeRecord
+	for rows.Next() {
+		var item ProductExchangeRecord
+		var productClass string
+		if err := rows.Scan(
+			&item.ProductID,
+			&item.ProductIDNorm,
+			&item.ExchangeID,
+			&productClass,
+			&item.VolumeMultiple,
+			&item.PriceTick,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan all product exchange records failed: %w", err)
+		}
+		item.ProductClass = byteFromDBString(productClass)
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate all product exchange records failed: %w", err)
+	}
+	return out, nil
 }
 
 func replaceProductExchangeRecords(tx *sql.Tx, items []productExchangeRecord, syncedAt time.Time) error {
@@ -410,11 +539,11 @@ func buildProductExchangeDeleteSQL(items []productExchangeRecord) (string, []any
 	clauses := make([]string, 0, len(items))
 	args := make([]any, 0, len(items)*2)
 	for _, item := range items {
-		if strings.TrimSpace(item.ProductID) == "" || strings.TrimSpace(item.ExchangeID) == "" {
+		if strings.TrimSpace(item.ProductIDNorm) == "" || strings.TrimSpace(item.ExchangeID) == "" {
 			continue
 		}
-		clauses = append(clauses, "(product_id=? AND exchange_id=?)")
-		args = append(args, item.ProductID, item.ExchangeID)
+		clauses = append(clauses, "(product_id_norm=? AND exchange_id=?)")
+		args = append(args, item.ProductIDNorm, item.ExchangeID)
 	}
 	if len(clauses) == 0 {
 		return "", nil
@@ -427,14 +556,15 @@ func buildProductExchangeInsertSQL(items []productExchangeRecord, syncedAt time.
 		return "", nil
 	}
 	values := make([]string, 0, len(items))
-	args := make([]any, 0, len(items)*6)
+	args := make([]any, 0, len(items)*7)
 	for _, item := range items {
-		if strings.TrimSpace(item.ProductID) == "" || strings.TrimSpace(item.ExchangeID) == "" {
+		if strings.TrimSpace(item.ProductID) == "" || strings.TrimSpace(item.ProductIDNorm) == "" || strings.TrimSpace(item.ExchangeID) == "" {
 			continue
 		}
-		values = append(values, "(?,?,?,?,?,?)")
+		values = append(values, "(?,?,?,?,?,?,?)")
 		args = append(args,
 			item.ProductID,
+			item.ProductIDNorm,
 			item.ExchangeID,
 			byteToDBString(item.ProductClass),
 			item.VolumeMultiple,
@@ -446,7 +576,7 @@ func buildProductExchangeInsertSQL(items []productExchangeRecord, syncedAt time.
 		return "", nil
 	}
 	return `INSERT INTO ctp_product_exchange(
-product_id,exchange_id,product_class,volume_multiple,price_tick,updated_at
+product_id,product_id_norm,exchange_id,product_class,volume_multiple,price_tick,updated_at
 ) VALUES ` + strings.Join(values, ","), args
 }
 
@@ -501,17 +631,19 @@ func dedupeProductExchangeRecords(items []instrumentSnapshot) []productExchangeR
 	out := make([]productExchangeRecord, 0, len(items))
 	for _, item := range items {
 		productID := strings.TrimSpace(item.ProductID)
+		productIDNorm := normalizeProductID(productID)
 		exchangeID := strings.TrimSpace(item.ExchangeID)
-		if productID == "" || exchangeID == "" {
+		if productID == "" || productIDNorm == "" || exchangeID == "" {
 			continue
 		}
-		key := exchangeID + "|" + productID
+		key := exchangeID + "|" + productIDNorm
 		if _, ok := seen[key]; ok {
 			continue
 		}
 		seen[key] = struct{}{}
 		out = append(out, productExchangeRecord{
 			ProductID:      productID,
+			ProductIDNorm:  productIDNorm,
 			ExchangeID:     exchangeID,
 			ProductClass:   item.ProductClass,
 			VolumeMultiple: item.VolumeMultiple,
@@ -519,6 +651,10 @@ func dedupeProductExchangeRecords(items []instrumentSnapshot) []productExchangeR
 		})
 	}
 	return out
+}
+
+func normalizeProductID(value string) string {
+	return strings.ToLower(strings.TrimSpace(value))
 }
 
 func byteToDBString(v byte) string {

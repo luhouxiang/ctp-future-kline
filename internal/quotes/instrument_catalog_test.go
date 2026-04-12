@@ -48,17 +48,21 @@ func TestInstrumentCatalogRepoSyncAndReload(t *testing.T) {
 			CombinationType:        0,
 		},
 		{
-			ID:           "ag2606",
-			ExchangeID:   "SHFE",
-			ProductID:    "ag",
+			ID:           "SR605",
+			ExchangeID:   "CZCE",
+			ProductID:    "SR",
 			ProductClass: byte('1'),
 			PriceTick:    1,
 			IsTrading:    1,
 		},
 	}
 
-	if err := repo.SyncTradingDay("20260407", snapshots, now); err != nil {
+	updatedProductCount, err := repo.SyncTradingDay("20260407", snapshots, now)
+	if err != nil {
 		t.Fatalf("SyncTradingDay() error = %v", err)
+	}
+	if updatedProductCount != 2 {
+		t.Fatalf("updatedProductCount = %d, want 2", updatedProductCount)
 	}
 
 	log, ok, err := repo.LatestSyncLog("20260407")
@@ -79,8 +83,8 @@ func TestInstrumentCatalogRepoSyncAndReload(t *testing.T) {
 	if len(infos) != 2 {
 		t.Fatalf("len(ListInstrumentInfosByTradingDay()) = %d, want 2", len(infos))
 	}
-	if infos[0].ID != "ag2606" || infos[1].ID != "rb2605" {
-		t.Fatalf("loaded IDs = %#v, want [ag2606 rb2605]", []string{infos[0].ID, infos[1].ID})
+	if infos[0].ID != "SR605" || infos[1].ID != "rb2605" {
+		t.Fatalf("loaded IDs = %#v, want [SR605 rb2605]", []string{infos[0].ID, infos[1].ID})
 	}
 
 	record, ok, err := repo.Get("rb2605", "SHFE")
@@ -104,11 +108,38 @@ func TestInstrumentCatalogRepoSyncAndReload(t *testing.T) {
 
 	var volumeMultiple int
 	var priceTick float64
-	if err := db.QueryRow(`SELECT volume_multiple,price_tick FROM ctp_product_exchange WHERE product_id=? AND exchange_id=?`, "rb", "SHFE").Scan(&volumeMultiple, &priceTick); err != nil {
+	var productID string
+	var productIDNorm string
+	if err := db.QueryRow(`SELECT product_id,product_id_norm,volume_multiple,price_tick FROM ctp_product_exchange WHERE product_id_norm=? AND exchange_id=?`, "rb", "SHFE").Scan(&productID, &productIDNorm, &volumeMultiple, &priceTick); err != nil {
 		t.Fatalf("load product exchange row error = %v", err)
+	}
+	if productID != "rb" || productIDNorm != "rb" {
+		t.Fatalf("product exchange ids = (%q,%q), want (rb,rb)", productID, productIDNorm)
 	}
 	if volumeMultiple != 10 || priceTick != 1 {
 		t.Fatalf("product exchange row = (%d,%v), want (10,1)", volumeMultiple, priceTick)
+	}
+
+	item, ok, err := repo.GetProductExchange("RB", "SHFE")
+	if err != nil {
+		t.Fatalf("GetProductExchange() error = %v", err)
+	}
+	if !ok {
+		t.Fatal("GetProductExchange() ok = false, want true")
+	}
+	if item.ProductID != "rb" || item.ProductIDNorm != "rb" || item.ExchangeID != "SHFE" {
+		t.Fatalf("unexpected product exchange record: %+v", item)
+	}
+
+	czceItem, ok, err := repo.GetProductExchange("sr", "CZCE")
+	if err != nil {
+		t.Fatalf("GetProductExchange() CZCE error = %v", err)
+	}
+	if !ok {
+		t.Fatal("GetProductExchange() CZCE ok = false, want true")
+	}
+	if czceItem.ProductID != "SR" || czceItem.ProductIDNorm != "sr" || czceItem.ExchangeID != "CZCE" {
+		t.Fatalf("unexpected CZCE product exchange record: %+v", czceItem)
 	}
 }
 
@@ -123,8 +154,12 @@ func TestInstrumentCatalogRepoSyncDedupByExchangeAndInstrument(t *testing.T) {
 		{ID: "rb2605", ExchangeID: "SHFE", ProductID: "rb", ProductClass: byte('1'), PriceTick: 1},
 	}
 
-	if err := repo.SyncTradingDay("20260407", snapshots, now); err != nil {
+	updatedProductCount, err := repo.SyncTradingDay("20260407", snapshots, now)
+	if err != nil {
 		t.Fatalf("SyncTradingDay() error = %v", err)
+	}
+	if updatedProductCount != 1 {
+		t.Fatalf("updatedProductCount = %d, want 1", updatedProductCount)
 	}
 
 	var rows int
@@ -195,6 +230,7 @@ func openInstrumentCatalogTestDB(t *testing.T) *sql.DB {
 )`,
 		`CREATE TABLE ctp_product_exchange (
   product_id TEXT NOT NULL,
+  product_id_norm TEXT NOT NULL,
   exchange_id TEXT NOT NULL,
   product_class TEXT NOT NULL,
   volume_multiple INTEGER NOT NULL DEFAULT 0,

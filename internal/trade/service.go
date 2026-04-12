@@ -17,6 +17,7 @@ import (
 	"ctp-future-kline/internal/config"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/queuewatch"
+	"ctp-future-kline/internal/quotes"
 )
 
 type Service struct {
@@ -59,6 +60,7 @@ type Service struct {
 	queueCap    int
 	paperMu     sync.Mutex
 	pending     map[string]OrderRecord
+	resolver    *quotes.ProductExchangeCache
 }
 
 const replayPaperInitialBalance = 100_000
@@ -72,6 +74,11 @@ type replayTick struct {
 }
 
 func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, registry *queuewatch.Registry) (*Service, error) {
+	if count, err := quotes.DefaultProductExchangeCache().EnsureLoadedFromDSN(ctpCfg.SharedMetaDSN); err != nil {
+		logger.Error("load product exchange cache for trade service failed", "error", err)
+	} else if count > 0 {
+		logger.Info("product exchange cache ready", "source", "trade_service_init", "product_exchange_count", count)
+	}
 	store, err := NewStore(dsn)
 	if err != nil {
 		return nil, err
@@ -95,6 +102,7 @@ func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, reg
 		status:    TradeStatus{Enabled: cfg.IsEnabled(), AccountID: cfg.AccountID, UpdatedAt: time.Now()},
 		ctx:       ctx,
 		cancel:    cancel,
+		resolver:  quotes.DefaultProductExchangeCache(),
 	}
 	if registry != nil {
 		s.queueHandle = registry.Register(queuewatch.QueueSpec{
@@ -146,14 +154,14 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 	cfg.Enabled = boolPtr(true)
 	cfg.AccountID = accountID
 	s := &Service{
-		cfg:       cfg,
-		store:     store,
-		accountID: accountID,
-		paper:     true,
+		cfg:         cfg,
+		store:       store,
+		accountID:   accountID,
+		paper:       true,
 		replayPaper: strings.EqualFold(accountID, "paper_replay"),
-		subs:      make(map[chan EventEnvelope]struct{}),
-		queueCap:  queueCfg.TradeEventCapacity,
-		pending:   make(map[string]OrderRecord),
+		subs:        make(map[chan EventEnvelope]struct{}),
+		queueCap:    queueCfg.TradeEventCapacity,
+		pending:     make(map[string]OrderRecord),
 		status: TradeStatus{
 			Enabled:             true,
 			AccountID:           accountID,
@@ -162,8 +170,9 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 			SettlementConfirmed: true,
 			UpdatedAt:           time.Now(),
 		},
-		ctx:    ctx,
-		cancel: cancel,
+		ctx:      ctx,
+		cancel:   cancel,
+		resolver: quotes.DefaultProductExchangeCache(),
 	}
 	if registry != nil {
 		s.queueHandle = registry.Register(queuewatch.QueueSpec{
@@ -427,6 +436,10 @@ func (s *Service) RefreshAll() error {
 }
 
 func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (OrderRecord, error) {
+	req, err := s.normalizeSubmitRequest(req)
+	if err != nil {
+		return OrderRecord{AccountID: s.accountID, Symbol: strings.TrimSpace(req.Symbol), ExchangeID: strings.TrimSpace(req.ExchangeID), UpdatedAt: time.Now()}, err
+	}
 	status := s.Status()
 	account, _ := s.Account()
 	positions, _ := s.Positions()
@@ -492,12 +505,16 @@ func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (Orde
 }
 
 func (s *Service) CancelOrder(ctx context.Context, req CancelOrderRequest) (OrderRecord, error) {
-	if isNoopCancel(req) {
-		return OrderRecord{CommandID: req.CommandID, AccountID: s.accountID}, fmt.Errorf("cancel request missing order identifiers")
-	}
 	orderRec, err := s.store.GetOrder(req.CommandID)
 	if err != nil {
 		return OrderRecord{CommandID: req.CommandID, AccountID: s.accountID}, err
+	}
+	req, err = s.normalizeCancelRequest(req, orderRec)
+	if err != nil {
+		return orderRec, err
+	}
+	if isNoopCancel(req) {
+		return orderRec, fmt.Errorf("cancel request missing order identifiers")
 	}
 	if err := ValidateCancel(ctx, req, orderRec); err != nil {
 		audit := OrderCommandAudit{
@@ -718,6 +735,45 @@ func (s *Service) auditQuery(kind string, err error) {
 		Detail:    detail,
 		CreatedAt: time.Now(),
 	})
+}
+
+func (s *Service) normalizeSubmitRequest(req SubmitOrderRequest) (SubmitOrderRequest, error) {
+	req.Symbol = strings.TrimSpace(req.Symbol)
+	req.ExchangeID = strings.TrimSpace(req.ExchangeID)
+	if s == nil || s.resolver == nil || s.resolver.Count() == 0 || req.Symbol == "" {
+		return req, nil
+	}
+	resolved, err := s.resolver.Resolve(req.Symbol, req.ExchangeID)
+	if err != nil {
+		return req, err
+	}
+	req.Symbol = resolved.Symbol
+	req.ExchangeID = resolved.ExchangeID
+	return req, nil
+}
+
+func (s *Service) normalizeCancelRequest(req CancelOrderRequest, orderRec OrderRecord) (CancelOrderRequest, error) {
+	req.OrderRef = firstNonEmpty(strings.TrimSpace(req.OrderRef), strings.TrimSpace(orderRec.OrderRef))
+	req.OrderSysID = firstNonEmpty(strings.TrimSpace(req.OrderSysID), strings.TrimSpace(orderRec.OrderSysID))
+	if req.FrontID == 0 {
+		req.FrontID = orderRec.FrontID
+	}
+	if req.SessionID == 0 {
+		req.SessionID = orderRec.SessionID
+	}
+	req.ExchangeID = strings.TrimSpace(req.ExchangeID)
+	orderExchangeID := strings.TrimSpace(orderRec.ExchangeID)
+	if req.ExchangeID == "" {
+		req.ExchangeID = orderExchangeID
+	} else if orderExchangeID != "" && !strings.EqualFold(req.ExchangeID, orderExchangeID) {
+		return req, fmt.Errorf("cancel exchange_id mismatch: want %s", orderExchangeID)
+	} else if orderExchangeID != "" {
+		req.ExchangeID = orderExchangeID
+	}
+	if req.ExchangeID == "" {
+		return req, fmt.Errorf("exchange_id is required")
+	}
+	return req, nil
 }
 
 func (s *Service) broadcast(eventType string, data any) {

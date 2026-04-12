@@ -9,6 +9,7 @@ import (
 
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/quotes"
 	"ctp-future-kline/internal/testmysql"
 )
 
@@ -291,6 +292,56 @@ func TestReplayPaperPendingCloseReducesClosableVolume(t *testing.T) {
 	}
 }
 
+func TestSubmitOrderNormalizesProductCaseAndInfersExchange(t *testing.T) {
+	dsn := testmysql.NewDatabase(t)
+	svc := newReplayPaperServiceForTest(t, dsn)
+	svc.resolver = quotes.NewProductExchangeResolver()
+	svc.resolver.Replace([]quotes.ProductExchange{
+		{ProductID: "SR", ProductIDNorm: "sr", ExchangeID: "CZCE"},
+	})
+
+	order, err := svc.SubmitOrder(context.Background(), SubmitOrderRequest{
+		AccountID:  svc.accountID,
+		Symbol:     "sr2509",
+		Direction:  "buy",
+		OffsetFlag: "open",
+		LimitPrice: 100,
+		Volume:     1,
+		Reason:     "manual",
+	})
+	if err != nil {
+		t.Fatalf("SubmitOrder() error = %v", err)
+	}
+	if order.Symbol != "SR2509" {
+		t.Fatalf("order.Symbol = %q, want SR2509", order.Symbol)
+	}
+	if order.ExchangeID != "CZCE" {
+		t.Fatalf("order.ExchangeID = %q, want CZCE", order.ExchangeID)
+	}
+}
+
+func TestSubmitOrderRejectsAmbiguousExchange(t *testing.T) {
+	dsn := testmysql.NewDatabase(t)
+	svc := newReplayPaperServiceForTest(t, dsn)
+	svc.resolver = quotes.NewProductExchangeResolver()
+	svc.resolver.Replace([]quotes.ProductExchange{
+		{ProductID: "AP", ProductIDNorm: "ap", ExchangeID: "CZCE"},
+		{ProductID: "AP", ProductIDNorm: "ap", ExchangeID: "GFEX"},
+	})
+
+	if _, err := svc.SubmitOrder(context.Background(), SubmitOrderRequest{
+		AccountID:  svc.accountID,
+		Symbol:     "ap2509",
+		Direction:  "buy",
+		OffsetFlag: "open",
+		LimitPrice: 100,
+		Volume:     1,
+		Reason:     "manual",
+	}); err == nil {
+		t.Fatal("SubmitOrder() error = nil, want ambiguity error")
+	}
+}
+
 func newReplayPaperServiceForTest(t *testing.T, dsn string) *Service {
 	t.Helper()
 	svc, err := NewPaperService(configForTradeTest(), "paper_replay", dsn, nil)
@@ -306,9 +357,9 @@ func newReplayPaperServiceForTest(t *testing.T, dsn string) *Service {
 
 func configForTradeTest() config.TradeConfig {
 	cfg := config.TradeConfig{
-		AccountID:           "paper_replay",
-		MaxOrderVolume:      10,
-		QueryPollIntervalMS: 1000,
+		AccountID:              "paper_replay",
+		MaxOrderVolume:         10,
+		QueryPollIntervalMS:    1000,
 		PositionSyncIntervalMS: 1000,
 	}
 	cfg.Enabled = boolPtr(true)

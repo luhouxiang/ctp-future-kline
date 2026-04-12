@@ -139,6 +139,11 @@ func NewServer(cfg config.AppConfig) *Server {
 	if err := dbx.MigrateSharedMetaTables(cfg.DB); err != nil {
 		logger.Error("migrate shared meta tables failed", "error", err)
 	}
+	if count, err := quotes.DefaultProductExchangeCache().EnsureLoadedFromDSN(sharedDSN); err != nil {
+		logger.Error("load product exchange cache on startup failed", "error", err)
+	} else {
+		logger.Info("product exchange cache ready", "source", "web_server_startup", "product_exchange_count", count)
+	}
 	if cfg.CTP.IsBusEnabled() {
 		busPath := strings.TrimSpace(cfg.CTP.BusLogPath)
 		if busPath == "" {
