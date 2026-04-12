@@ -2,6 +2,7 @@ package quotes
 
 import (
 	"database/sql"
+	"time"
 
 	"ctp-future-kline/internal/mmkline"
 )
@@ -57,6 +58,10 @@ func NewInstrumentCatalogRepository(db *sql.DB) *InstrumentCatalogRepo {
 
 func NewProductExchangeResolver() *ProductExchangeCache {
 	return NewProductExchangeCache()
+}
+
+func ArchiveTickFilesOnStartup(baseDir string, now time.Time) error {
+	return ArchiveTickDirOnStartup(baseDir, now)
 }
 
 func SelectSubscribeTargets(queriedInstruments []instrumentInfo, configuredVarieties []string) []string {

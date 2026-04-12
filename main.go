@@ -20,6 +20,7 @@ import (
 	"ctp-future-kline/internal/config"
 	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/quotes"
 	"ctp-future-kline/internal/userconfig"
 	"ctp-future-kline/internal/version"
 	"ctp-future-kline/internal/web"
@@ -61,6 +62,9 @@ func main() {
 	// Ensure the first line in file logs is the backend version.
 	logger.Debug("config loaded", "config_path", resolvedConfigPath)
 	logger.Info("log files enabled", "base_log_path", logPath, "level", cfg.Log.Level)
+	if err := quotes.ArchiveTickFilesOnStartup(cfg.CTP.FlowPath, time.Now()); err != nil {
+		logger.Error("archive tick files on startup failed", "flow_path", cfg.CTP.FlowPath, "error", err)
+	}
 	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
 	}
