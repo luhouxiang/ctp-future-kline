@@ -230,6 +230,7 @@ const tradingSessionSelection = reactive({
 const tradingSessionImportResult = ref(null)
 const logs = ref([])
 const wsConnected = ref(false)
+const serverStarting = ref(false)
 const loadingImport = ref(false)
 const loadingTradingDayImport = ref(false)
 const loadingTradingSessionImport = ref(false)
@@ -245,7 +246,14 @@ const marketBadgeClass = computed(() => (status.is_market_open ? 'badge open' : 
 const marketBadgeText = computed(() => (status.is_market_open ? '开市中' : '非开市'))
 const isReplayAppMode = computed(() => appMode.mode === 'replay_paper')
 const isPaperAppMode = computed(() => appMode.mode === 'live_paper' || appMode.mode === 'replay_paper')
-const canStartServer = computed(() => !isReplayAppMode.value)
+const serverState = computed(() => String(status.state || '').trim().toLowerCase())
+const isServerBusy = computed(() => serverStarting.value || ['starting', 'running'].includes(serverState.value))
+const canStartServer = computed(() => !isReplayAppMode.value && !isServerBusy.value)
+const startServerButtonText = computed(() => {
+  if (serverStarting.value || serverState.value === 'starting') return '启动中...'
+  if (serverState.value === 'running') return '服务器运行中'
+  return '启动服务器'
+})
 const tradePanelTitle = computed(() => (isPaperAppMode.value ? '模拟交易' : '实盘交易'))
 const tradeEnableLabel = computed(() => (isPaperAppMode.value ? '启用模拟交易' : '启用实盘交易'))
 const formattedTradingDay = computed(() => {
@@ -860,15 +868,23 @@ async function updateReplaySpeed() {
 
 async function startServer() {
   if (!canStartServer.value) {
-    addLog('回放模拟模式不允许启动实时服务器')
+    if (isReplayAppMode.value) {
+      addLog('回放模拟模式不允许启动实时服务器')
+    }
     return
   }
-  const resp = await fetch('/api/server/start', { method: 'POST' })
-  if (!resp.ok) {
-    addLog('启动服务器失败')
-    return
+  serverStarting.value = true
+  try {
+    const resp = await fetch('/api/server/start', { method: 'POST' })
+    if (!resp.ok) {
+      addLog('启动服务器失败')
+      return
+    }
+    addLog('已触发启动服务器')
+    await fetchStatus()
+  } finally {
+    serverStarting.value = false
   }
-  addLog('已触发启动服务器')
 }
 
 function onSelectFiles(event) {
@@ -1358,7 +1374,7 @@ onUnmounted(() => {
       <h2>CTP Kline 控制台</h2>
       <p>版本号: {{ APP_VERSION }}</p>
       <div class="row">
-        <button :disabled="!canStartServer" @click="startServer">启动服务器</button>
+        <button :disabled="!canStartServer" @click="startServer">{{ startServerButtonText }}</button>
         <span>WebSocket: {{ wsConnected ? '已连接' : '未连接' }}</span>
         <span :class="marketBadgeClass">{{ marketBadgeText }}</span>
         <span>运行模式:</span>
