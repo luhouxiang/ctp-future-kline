@@ -12,6 +12,9 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 	if err := ensureSchemaStatements(db, fullSchemaStatements()); err != nil {
 		return err
 	}
+	if err := ensureSharedMetaTablesEvolution(db); err != nil {
+		return err
+	}
 	if err := ensureChartTablesEvolution(db); err != nil {
 		return err
 	}
@@ -22,6 +25,11 @@ func EnsureDatabaseAndSchemaForRole(cfg config.DBConfig, role string, db *sql.DB
 	stmts := schemaStatementsForRole(role)
 	if err := ensureSchemaStatements(db, stmts); err != nil {
 		return err
+	}
+	if role == RoleSharedMeta {
+		if err := ensureSharedMetaTablesEvolution(db); err != nil {
+			return err
+		}
 	}
 	if role == RoleChartUserRealtime || role == RoleChartUserReplay {
 		if err := ensureChartTablesEvolution(db); err != nil {
@@ -141,6 +149,16 @@ func sharedMetaSchemaStatements() []string {
   instrument_count INT NOT NULL DEFAULT 0,
   updated_at DATETIME NOT NULL
 )`,
+		`CREATE TABLE IF NOT EXISTS ctp_product_exchange (
+  product_id VARCHAR(32) NOT NULL,
+  exchange_id VARCHAR(16) NOT NULL,
+  product_class VARCHAR(8) NOT NULL,
+  volume_multiple INT NOT NULL DEFAULT 0,
+  price_tick DOUBLE NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (product_id, exchange_id)
+)`,
+		`CREATE INDEX idx_ctp_product_exchange_exchange ON ctp_product_exchange(exchange_id, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS user_config (
   owner VARCHAR(64) NOT NULL DEFAULT 'admin',
   scope_name VARCHAR(64) NOT NULL,
@@ -151,6 +169,26 @@ func sharedMetaSchemaStatements() []string {
 )`,
 		`CREATE INDEX idx_user_config_updated_at ON user_config(updated_at DESC)`,
 	}
+}
+
+func ensureSharedMetaTablesEvolution(db *sql.DB) error {
+	drops := []struct {
+		table  string
+		column string
+	}{
+		{"ctp_product_exchange", "long_margin_ratio"},
+		{"ctp_product_exchange", "short_margin_ratio"},
+		{"ctp_product_exchange", "max_market_order_volume"},
+		{"ctp_product_exchange", "min_market_order_volume"},
+		{"ctp_product_exchange", "max_limit_order_volume"},
+		{"ctp_product_exchange", "min_limit_order_volume"},
+	}
+	for _, item := range drops {
+		if err := dropColumnIfExists(db, item.table, item.column); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func marketSchemaStatements(includeReplayDedup bool) []string {
@@ -525,6 +563,20 @@ func ensureColumn(db *sql.DB, tableName, columnName, ddl string) error {
 	}
 	if _, err := db.Exec(ddl); err != nil {
 		return fmt.Errorf("add column %s.%s failed: %w", tableName, columnName, err)
+	}
+	return nil
+}
+
+func dropColumnIfExists(db *sql.DB, tableName, columnName string) error {
+	var cnt int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?`, tableName, columnName).Scan(&cnt); err != nil {
+		return fmt.Errorf("check column %s.%s failed: %w", tableName, columnName, err)
+	}
+	if cnt == 0 {
+		return nil
+	}
+	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", tableName, columnName)); err != nil {
+		return fmt.Errorf("drop column %s.%s failed: %w", tableName, columnName, err)
 	}
 	return nil
 }

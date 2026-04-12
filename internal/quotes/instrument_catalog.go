@@ -12,6 +12,7 @@ import (
 const (
 	ctpInstrumentTableName    = "ctp_instruments"
 	ctpInstrumentSyncLogTable = "ctp_instrument_sync_log"
+	ctpProductExchangeTable   = "ctp_product_exchange"
 )
 
 type instrumentSyncLog struct {
@@ -58,6 +59,14 @@ type InstrumentCatalogRecord struct {
 
 type InstrumentCatalogRepo struct {
 	db *sql.DB
+}
+
+type productExchangeRecord struct {
+	ProductID      string
+	ExchangeID     string
+	ProductClass   byte
+	VolumeMultiple int
+	PriceTick      float64
 }
 
 func NewInstrumentCatalogRepo(db *sql.DB) *InstrumentCatalogRepo {
@@ -301,6 +310,7 @@ sync_trading_day,updated_at
 	defer stmt.Close()
 
 	deduped := dedupeInstrumentSnapshots(instruments)
+	productRecords := dedupeProductExchangeRecords(deduped)
 	for _, item := range deduped {
 		if strings.TrimSpace(item.ID) == "" || strings.TrimSpace(item.ExchangeID) == "" {
 			continue
@@ -344,6 +354,10 @@ sync_trading_day,updated_at
 		}
 	}
 
+	if err := replaceProductExchangeRecords(tx, productRecords, syncedAt); err != nil {
+		return err
+	}
+
 	if _, err = tx.Exec(
 		`REPLACE INTO ctp_instrument_sync_log(trading_day,instrument_count,updated_at) VALUES (?,?,?)`,
 		strings.TrimSpace(tradingDay),
@@ -361,9 +375,79 @@ sync_trading_day,updated_at
 		"instrument catalog synced",
 		"trading_day", strings.TrimSpace(tradingDay),
 		"instrument_count", len(deduped),
+		"updated_product_count", len(productRecords),
 		"updated_at", syncedAt.Format("2006-01-02 15:04:05"),
 	)
 	return nil
+}
+
+func replaceProductExchangeRecords(tx *sql.Tx, items []productExchangeRecord, syncedAt time.Time) error {
+	if tx == nil || len(items) == 0 {
+		return nil
+	}
+
+	deleteSQL, deleteArgs := buildProductExchangeDeleteSQL(items)
+	if deleteSQL != "" {
+		if _, err := tx.Exec(deleteSQL, deleteArgs...); err != nil {
+			return fmt.Errorf("delete product exchange rows failed: %w", err)
+		}
+	}
+
+	insertSQL, insertArgs := buildProductExchangeInsertSQL(items, syncedAt)
+	if insertSQL == "" {
+		return nil
+	}
+	if _, err := tx.Exec(insertSQL, insertArgs...); err != nil {
+		return fmt.Errorf("insert product exchange rows failed: %w", err)
+	}
+	return nil
+}
+
+func buildProductExchangeDeleteSQL(items []productExchangeRecord) (string, []any) {
+	if len(items) == 0 {
+		return "", nil
+	}
+	clauses := make([]string, 0, len(items))
+	args := make([]any, 0, len(items)*2)
+	for _, item := range items {
+		if strings.TrimSpace(item.ProductID) == "" || strings.TrimSpace(item.ExchangeID) == "" {
+			continue
+		}
+		clauses = append(clauses, "(product_id=? AND exchange_id=?)")
+		args = append(args, item.ProductID, item.ExchangeID)
+	}
+	if len(clauses) == 0 {
+		return "", nil
+	}
+	return `DELETE FROM ctp_product_exchange WHERE ` + strings.Join(clauses, " OR "), args
+}
+
+func buildProductExchangeInsertSQL(items []productExchangeRecord, syncedAt time.Time) (string, []any) {
+	if len(items) == 0 {
+		return "", nil
+	}
+	values := make([]string, 0, len(items))
+	args := make([]any, 0, len(items)*6)
+	for _, item := range items {
+		if strings.TrimSpace(item.ProductID) == "" || strings.TrimSpace(item.ExchangeID) == "" {
+			continue
+		}
+		values = append(values, "(?,?,?,?,?,?)")
+		args = append(args,
+			item.ProductID,
+			item.ExchangeID,
+			byteToDBString(item.ProductClass),
+			item.VolumeMultiple,
+			item.PriceTick,
+			syncedAt,
+		)
+	}
+	if len(values) == 0 {
+		return "", nil
+	}
+	return `INSERT INTO ctp_product_exchange(
+product_id,exchange_id,product_class,volume_multiple,price_tick,updated_at
+) VALUES ` + strings.Join(values, ","), args
 }
 
 func dedupeInstrumentCatalogRecords(items []InstrumentCatalogRecord) []InstrumentCatalogRecord {
@@ -404,6 +488,35 @@ func dedupeInstrumentSnapshots(items []instrumentSnapshot) []instrumentSnapshot 
 		}
 		seen[key] = struct{}{}
 		out = append(out, item)
+	}
+	return out
+}
+
+func dedupeProductExchangeRecords(items []instrumentSnapshot) []productExchangeRecord {
+	if len(items) == 0 {
+		return nil
+	}
+
+	seen := make(map[string]struct{}, len(items))
+	out := make([]productExchangeRecord, 0, len(items))
+	for _, item := range items {
+		productID := strings.TrimSpace(item.ProductID)
+		exchangeID := strings.TrimSpace(item.ExchangeID)
+		if productID == "" || exchangeID == "" {
+			continue
+		}
+		key := exchangeID + "|" + productID
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, productExchangeRecord{
+			ProductID:      productID,
+			ExchangeID:     exchangeID,
+			ProductClass:   item.ProductClass,
+			VolumeMultiple: item.VolumeMultiple,
+			PriceTick:      item.PriceTick,
+		})
 	}
 	return out
 }

@@ -93,6 +93,23 @@ func TestInstrumentCatalogRepoSyncAndReload(t *testing.T) {
 	if record.InstrumentName != "螺纹钢2605" {
 		t.Fatalf("InstrumentName = %q, want %q", record.InstrumentName, "螺纹钢2605")
 	}
+
+	var productRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM ctp_product_exchange`).Scan(&productRows); err != nil {
+		t.Fatalf("count product rows error = %v", err)
+	}
+	if productRows != 2 {
+		t.Fatalf("product row count = %d, want 2", productRows)
+	}
+
+	var volumeMultiple int
+	var priceTick float64
+	if err := db.QueryRow(`SELECT volume_multiple,price_tick FROM ctp_product_exchange WHERE product_id=? AND exchange_id=?`, "rb", "SHFE").Scan(&volumeMultiple, &priceTick); err != nil {
+		t.Fatalf("load product exchange row error = %v", err)
+	}
+	if volumeMultiple != 10 || priceTick != 1 {
+		t.Fatalf("product exchange row = (%d,%v), want (10,1)", volumeMultiple, priceTick)
+	}
 }
 
 func TestInstrumentCatalogRepoSyncDedupByExchangeAndInstrument(t *testing.T) {
@@ -116,6 +133,14 @@ func TestInstrumentCatalogRepoSyncDedupByExchangeAndInstrument(t *testing.T) {
 	}
 	if rows != 1 {
 		t.Fatalf("synced row count = %d, want 1", rows)
+	}
+
+	var productRows int
+	if err := db.QueryRow(`SELECT COUNT(1) FROM ctp_product_exchange WHERE product_id=? AND exchange_id=?`, "rb", "SHFE").Scan(&productRows); err != nil {
+		t.Fatalf("count product rows error = %v", err)
+	}
+	if productRows != 1 {
+		t.Fatalf("product row count = %d, want 1", productRows)
 	}
 }
 
@@ -167,6 +192,15 @@ func openInstrumentCatalogTestDB(t *testing.T) *sql.DB {
   trading_day TEXT PRIMARY KEY,
   instrument_count INTEGER NOT NULL DEFAULT 0,
   updated_at DATETIME NOT NULL
+)`,
+		`CREATE TABLE ctp_product_exchange (
+  product_id TEXT NOT NULL,
+  exchange_id TEXT NOT NULL,
+  product_class TEXT NOT NULL,
+  volume_multiple INTEGER NOT NULL DEFAULT 0,
+  price_tick REAL NOT NULL DEFAULT 0,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (product_id, exchange_id)
 )`,
 	}
 	for _, stmt := range stmts {
