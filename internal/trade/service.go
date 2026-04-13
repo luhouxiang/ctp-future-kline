@@ -60,6 +60,7 @@ type Service struct {
 	queueCap    int
 	paperMu     sync.Mutex
 	pending     map[string]OrderRecord
+	replayQuotes map[string]replayQuote
 	resolver    *quotes.ProductExchangeCache
 }
 
@@ -71,6 +72,11 @@ type replayTick struct {
 	ReceivedAt   time.Time
 	BidPrice1    float64
 	AskPrice1    float64
+}
+
+type replayQuote struct {
+	BidPrice1 float64
+	AskPrice1 float64
 }
 
 func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, registry *queuewatch.Registry) (*Service, error) {
@@ -162,6 +168,7 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 		subs:        make(map[chan EventEnvelope]struct{}),
 		queueCap:    queueCfg.TradeEventCapacity,
 		pending:     make(map[string]OrderRecord),
+		replayQuotes: make(map[string]replayQuote),
 		status: TradeStatus{
 			Enabled:             true,
 			AccountID:           accountID,
@@ -268,6 +275,7 @@ func (s *Service) ResetPaperReplay() error {
 		return err
 	}
 	s.pending = make(map[string]OrderRecord)
+	s.replayQuotes = make(map[string]replayQuote)
 	if err := s.ensurePaperAccount(); err != nil {
 		return err
 	}
@@ -1078,9 +1086,7 @@ func (s *Service) paperRiskState() (TradingAccountSnapshot, []PositionSnapshot, 
 func (s *Service) matchReplayTick(tick replayTick) error {
 	s.paperMu.Lock()
 	defer s.paperMu.Unlock()
-	if len(s.pending) == 0 {
-		return nil
-	}
+	s.rememberReplayQuoteLocked(tick)
 	orders := pendingOrderSlice(s.pending)
 	sort.SliceStable(orders, func(i, j int) bool {
 		if orders[i].InsertedAt.Equal(orders[j].InsertedAt) {
@@ -1091,6 +1097,9 @@ func (s *Service) matchReplayTick(tick replayTick) error {
 	now := tick.ReceivedAt
 	if now.IsZero() {
 		now = time.Now()
+	}
+	if len(orders) == 0 {
+		return s.markReplayPaperToMarketLocked(now)
 	}
 	var filledOrders []OrderRecord
 	var trades []TradeRecord
@@ -1136,7 +1145,7 @@ func (s *Service) matchReplayTick(tick replayTick) error {
 		trades = append(trades, tradeRec)
 	}
 	if len(trades) == 0 {
-		return nil
+		return s.markReplayPaperToMarketLocked(now)
 	}
 	if _, _, err := s.recalculateReplayPaperStateLocked(now); err != nil {
 		return err
@@ -1200,6 +1209,7 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 	}
 	for _, item := range positions {
 		account.Margin += item.UseMargin
+		account.PositionProfit += replayPositionProfit(item, s.replayQuotes[item.Symbol])
 	}
 	for _, item := range s.pending {
 		if item.OffsetFlag == "open" {
@@ -1223,6 +1233,34 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 	s.broadcast("trade_account_update", account)
 	s.broadcast("trade_position_update", map[string]any{"items": positions})
 	return account, positions, nil
+}
+
+func (s *Service) rememberReplayQuoteLocked(tick replayTick) {
+	symbol := strings.TrimSpace(tick.InstrumentID)
+	if symbol == "" {
+		return
+	}
+	s.replayQuotes[symbol] = replayQuote{
+		BidPrice1: tick.BidPrice1,
+		AskPrice1: tick.AskPrice1,
+	}
+}
+
+func (s *Service) markReplayPaperToMarketLocked(now time.Time) error {
+	account := s.account
+	if account.AccountID == "" {
+		return nil
+	}
+	account.PositionProfit = 0
+	account.UpdatedAt = now
+	for _, item := range s.positions {
+		account.PositionProfit += replayPositionProfit(item, s.replayQuotes[item.Symbol])
+	}
+	s.mu.Lock()
+	s.account = account
+	s.mu.Unlock()
+	s.broadcast("trade_account_update", account)
+	return nil
 }
 
 func applyFilledTradeToPositions(items []PositionSnapshot, tr TradeRecord) []PositionSnapshot {
@@ -1365,6 +1403,40 @@ func applyPendingCloseReservations(items []PositionSnapshot, orders []OrderRecor
 		}
 	}
 	return filtered
+}
+
+func replayPositionProfit(pos PositionSnapshot, quote replayQuote) float64 {
+	if pos.Position <= 0 || pos.PositionCost <= 0 {
+		return 0
+	}
+	cost := pos.PositionCost / float64(pos.Position)
+	mark := replayMarkPrice(pos.Direction, quote, cost)
+	switch pos.Direction {
+	case "short":
+		return (cost - mark) * float64(pos.Position)
+	default:
+		return (mark - cost) * float64(pos.Position)
+	}
+}
+
+func replayMarkPrice(direction string, quote replayQuote, fallback float64) float64 {
+	switch direction {
+	case "short":
+		if quote.AskPrice1 > 0 {
+			return quote.AskPrice1
+		}
+		if quote.BidPrice1 > 0 {
+			return quote.BidPrice1
+		}
+	default:
+		if quote.BidPrice1 > 0 {
+			return quote.BidPrice1
+		}
+		if quote.AskPrice1 > 0 {
+			return quote.AskPrice1
+		}
+	}
+	return fallback
 }
 
 func marketableReplayPrice(order OrderRecord, tick replayTick) (float64, bool) {

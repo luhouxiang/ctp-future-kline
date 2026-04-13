@@ -78,8 +78,16 @@ type RuntimeSnapshot struct {
 	ShardQueueMS float64 `json:"shard_queue_ms"`
 	// PersistQueueMS ??????? DB writer ???????
 	PersistQueueMS float64 `json:"persist_queue_ms"`
+	// PersistQueueMSMax1m 保存最近 1 分钟 DB 排队时间最大值。
+	PersistQueueMSMax1m float64 `json:"persist_queue_ms_max_1m"`
 	// EndToEndMS ? tick ?????????????
 	EndToEndMS float64 `json:"end_to_end_ms"`
+	// EndToEndMSAvg1m 保存最近 1 分钟端到端耗时均值。
+	EndToEndMSAvg1m float64 `json:"end_to_end_ms_avg_1m"`
+	// EndToEndMSP951m 保存最近 1 分钟端到端耗时 P95。
+	EndToEndMSP951m float64 `json:"end_to_end_ms_p95_1m"`
+	// EndToEndMSMax1m 保存最近 1 分钟端到端耗时最大值。
+	EndToEndMSMax1m float64 `json:"end_to_end_ms_max_1m"`
 	// DBFlushMS ???????? flush ????
 	DBFlushMS float64 `json:"db_flush_ms"`
 	// DBFlushRows ???????? flush ????
@@ -92,6 +100,8 @@ type RuntimeSnapshot struct {
 	DBFlushRowsAvg1m float64 `json:"db_flush_rows_avg_1m"`
 	// DBFlushMSAvg1m 保存最近 1 分钟 DB flush 耗时均值。
 	DBFlushMSAvg1m float64 `json:"db_flush_ms_avg_1m"`
+	// DBFlushMSP951m 保存最近 1 分钟 DB flush 耗时 P95。
+	DBFlushMSP951m float64 `json:"db_flush_ms_p95_1m"`
 	// DBFlushRowsP951m 保存最近 1 分钟 DB flush 行数 P95。
 	DBFlushRowsP951m int `json:"db_flush_rows_p95_1m"`
 	// PersistQueueMSAvg1m 保存最近 1 分钟 DB 排队时间均值。
@@ -159,6 +169,8 @@ type RuntimeStatusCenter struct {
 	statusQueue *queuewatch.QueueHandle
 	// persistQueueSamples 保存最近 1 分钟排队时间样本。
 	persistQueueSamples []timedFloatSample
+	// endToEndSamples 保存最近 1 分钟端到端耗时样本。
+	endToEndSamples []timedFloatSample
 	// dbFlushMSSamples 保存最近 1 分钟 DB flush 耗时样本。
 	dbFlushMSSamples []timedFloatSample
 	// dbFlushRowSamples 保存最近 1 分钟 DB flush 行数样本。
@@ -505,10 +517,12 @@ func (c *RuntimeStatusCenter) MarkUpstreamLag(instrumentID string, upstreamLagMS
 
 func (c *RuntimeStatusCenter) MarkPersistLatency(instrumentID string, queueMS float64) {
 	c.mutate(func(s *RuntimeSnapshot) {
-		c.recordPersistQueueSampleLocked(time.Now(), queueMS)
+		now := time.Now()
+		c.recordPersistQueueSampleLocked(now, queueMS)
 		s.PersistQueueMS = queueMS
 		s.PersistQueueMSAvg1m = avgFloatSamples(c.persistQueueSamples)
 		s.PersistQueueMSP951m = p95FloatSamples(c.persistQueueSamples)
+		s.PersistQueueMSMax1m = maxFloatSamples(c.persistQueueSamples)
 		s.LastLatencyInstrument = instrumentID
 		s.LastLatencyStage = "persist_queue"
 	})
@@ -516,7 +530,12 @@ func (c *RuntimeStatusCenter) MarkPersistLatency(instrumentID string, queueMS fl
 
 func (c *RuntimeStatusCenter) MarkEndToEndLatency(instrumentID string, totalMS float64) {
 	c.mutate(func(s *RuntimeSnapshot) {
+		now := time.Now()
+		c.recordEndToEndSampleLocked(now, totalMS)
 		s.EndToEndMS = totalMS
+		s.EndToEndMSAvg1m = avgFloatSamples(c.endToEndSamples)
+		s.EndToEndMSP951m = p95FloatSamples(c.endToEndSamples)
+		s.EndToEndMSMax1m = maxFloatSamples(c.endToEndSamples)
 		s.LastLatencyInstrument = instrumentID
 		s.LastLatencyStage = "end_to_end"
 	})
@@ -532,6 +551,7 @@ func (c *RuntimeStatusCenter) MarkDBFlush(rows int, flushMS float64, queueDepthT
 		s.DBFlushMSLast = flushMS
 		s.DBFlushRowsAvg1m = avgIntSamples(c.dbFlushRowSamples)
 		s.DBFlushMSAvg1m = avgFloatSamples(c.dbFlushMSSamples)
+		s.DBFlushMSP951m = p95FloatSamples(c.dbFlushMSSamples)
 		s.DBFlushRowsP951m = p95IntSamples(c.dbFlushRowSamples)
 		s.DBQueueDepth = queueDepthTotal
 		s.DBQueueDepthTotal = queueDepthTotal
@@ -563,6 +583,11 @@ func (c *RuntimeStatusCenter) MarkLateTick() {
 func (c *RuntimeStatusCenter) recordPersistQueueSampleLocked(now time.Time, value float64) {
 	c.persistQueueSamples = append(c.persistQueueSamples, timedFloatSample{at: now, value: value})
 	c.persistQueueSamples = pruneFloatSamples(c.persistQueueSamples, now.Add(-runtimeStatusWindow))
+}
+
+func (c *RuntimeStatusCenter) recordEndToEndSampleLocked(now time.Time, value float64) {
+	c.endToEndSamples = append(c.endToEndSamples, timedFloatSample{at: now, value: value})
+	c.endToEndSamples = pruneFloatSamples(c.endToEndSamples, now.Add(-runtimeStatusWindow))
 }
 
 func (c *RuntimeStatusCenter) recordDBFlushSamplesLocked(now time.Time, rows int, flushMS float64) {
@@ -642,6 +667,19 @@ func p95IntSamples(in []timedIntSample) int {
 	}
 	sort.Ints(vals)
 	return vals[p95Index(len(vals))]
+}
+
+func maxFloatSamples(in []timedFloatSample) float64 {
+	if len(in) == 0 {
+		return 0
+	}
+	maxVal := in[0].value
+	for _, item := range in[1:] {
+		if item.value > maxVal {
+			maxVal = item.value
+		}
+	}
+	return maxVal
 }
 
 func p95Index(n int) int {

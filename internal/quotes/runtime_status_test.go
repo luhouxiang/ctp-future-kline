@@ -12,6 +12,8 @@ func TestRuntimeStatusCenterTracksDBWindowsAndQueueDepths(t *testing.T) {
 	center := NewRuntimeStatusCenter(time.Minute)
 	center.MarkPersistLatency("rb2501", 100)
 	center.MarkPersistLatency("rb2501", 300)
+	center.MarkEndToEndLatency("rb2501", 40)
+	center.MarkEndToEndLatency("rb2501", 600)
 	center.MarkDBFlush(10, 20, 15, 5)
 	center.MarkDBFlush(30, 40, 9, 3)
 
@@ -29,6 +31,9 @@ func TestRuntimeStatusCenterTracksDBWindowsAndQueueDepths(t *testing.T) {
 	if math.Abs(snap.DBFlushMSAvg1m-30) > 0.001 {
 		t.Fatalf("DBFlushMSAvg1m = %v, want 30", snap.DBFlushMSAvg1m)
 	}
+	if math.Abs(snap.DBFlushMSP951m-40) > 0.001 {
+		t.Fatalf("DBFlushMSP951m = %v, want 40", snap.DBFlushMSP951m)
+	}
 	if snap.DBFlushRowsP951m != 30 {
 		t.Fatalf("DBFlushRowsP951m = %d, want 30", snap.DBFlushRowsP951m)
 	}
@@ -37,6 +42,21 @@ func TestRuntimeStatusCenterTracksDBWindowsAndQueueDepths(t *testing.T) {
 	}
 	if math.Abs(snap.PersistQueueMSP951m-300) > 0.001 {
 		t.Fatalf("PersistQueueMSP951m = %v, want 300", snap.PersistQueueMSP951m)
+	}
+	if math.Abs(snap.PersistQueueMSMax1m-300) > 0.001 {
+		t.Fatalf("PersistQueueMSMax1m = %v, want 300", snap.PersistQueueMSMax1m)
+	}
+	if snap.EndToEndMS != 600 {
+		t.Fatalf("EndToEndMS = %v, want 600", snap.EndToEndMS)
+	}
+	if math.Abs(snap.EndToEndMSAvg1m-320) > 0.001 {
+		t.Fatalf("EndToEndMSAvg1m = %v, want 320", snap.EndToEndMSAvg1m)
+	}
+	if math.Abs(snap.EndToEndMSP951m-600) > 0.001 {
+		t.Fatalf("EndToEndMSP951m = %v, want 600", snap.EndToEndMSP951m)
+	}
+	if math.Abs(snap.EndToEndMSMax1m-600) > 0.001 {
+		t.Fatalf("EndToEndMSMax1m = %v, want 600", snap.EndToEndMSMax1m)
 	}
 	if snap.DBQueueDepthTotal != 9 {
 		t.Fatalf("DBQueueDepthTotal = %d, want 9", snap.DBQueueDepthTotal)

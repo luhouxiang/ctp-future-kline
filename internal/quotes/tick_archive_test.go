@@ -1,7 +1,6 @@
 package quotes
 
 import (
-	"archive/zip"
 	"os"
 	"path/filepath"
 	"testing"
@@ -27,18 +26,14 @@ func TestArchiveTickDirOnStartupArchivesOldTradingDay(t *testing.T) {
 		t.Fatalf("tick dir still exists after archive, err = %v", err)
 	}
 
-	zipPath := filepath.Join(baseDir, "ticks-20260411.zip")
-	reader, err := zip.OpenReader(zipPath)
-	if err != nil {
-		t.Fatalf("open archive zip failed: %v", err)
+	archiveDir := filepath.Join(baseDir, "ticks-20260411")
+	if info, err := os.Stat(archiveDir); err != nil {
+		t.Fatalf("archive dir missing: %v", err)
+	} else if !info.IsDir() {
+		t.Fatalf("archive path is not dir: %s", archiveDir)
 	}
-	defer reader.Close()
-
-	if len(reader.File) != 1 {
-		t.Fatalf("zip file count = %d, want 1", len(reader.File))
-	}
-	if reader.File[0].Name != "ticks-20260411/rb2505.csv" {
-		t.Fatalf("zip entry = %q, want ticks-20260411/rb2505.csv", reader.File[0].Name)
+	if _, err := os.Stat(filepath.Join(archiveDir, "rb2505.csv")); err != nil {
+		t.Fatalf("archived csv missing: %v", err)
 	}
 }
 
@@ -51,9 +46,9 @@ func TestArchiveTickDirOnStartupSkipsCurrentTradingDay(t *testing.T) {
 		t.Fatalf("mkdir tick dir failed: %v", err)
 	}
 	writeTickArchiveCSV(t, filepath.Join(tickDir, "rb2505.csv"), "20260412")
-	zipPath := filepath.Join(baseDir, "ticks-20260412.zip")
-	if err := os.WriteFile(zipPath, []byte("stub"), 0o644); err != nil {
-		t.Fatalf("write existing zip failed: %v", err)
+	archiveDir := filepath.Join(baseDir, "ticks-20260412")
+	if err := os.MkdirAll(archiveDir, 0o755); err != nil {
+		t.Fatalf("write existing archive dir failed: %v", err)
 	}
 
 	now := time.Date(2026, 4, 12, 16, 30, 0, 0, time.Local)
@@ -64,8 +59,8 @@ func TestArchiveTickDirOnStartupSkipsCurrentTradingDay(t *testing.T) {
 	if _, err := os.Stat(tickDir); err != nil {
 		t.Fatalf("tick dir missing after skip: %v", err)
 	}
-	if _, err := os.Stat(zipPath); err != nil {
-		t.Fatalf("existing archive zip missing after skip: %v", err)
+	if _, err := os.Stat(archiveDir); err != nil {
+		t.Fatalf("existing archive dir missing after skip: %v", err)
 	}
 }
 

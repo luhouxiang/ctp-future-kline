@@ -1,7 +1,6 @@
 package quotes
 
 import (
-	"archive/zip"
 	"encoding/csv"
 	"fmt"
 	"io"
@@ -48,36 +47,15 @@ func ArchiveTickDirOnStartup(baseDir string, now time.Time) error {
 	}
 
 	archiveDir := filepath.Join(baseDir, "ticks-"+tradingDay)
-	archiveZip := archiveDir + ".zip"
 	if _, err := os.Stat(archiveDir); err == nil {
-		return fmt.Errorf("tick archive target dir already exists: %s", archiveDir)
-	}
-	if _, err := os.Stat(archiveZip); err == nil {
-		logger.Info("tick archive skipped", "reason", "archive_zip_already_exists", "trading_day", tradingDay, "archive_zip", archiveZip, "tick_dir", tickDir, "file_count", fileCount)
+		logger.Info("tick archive skipped", "reason", "archive_dir_already_exists", "trading_day", tradingDay, "archive_dir", archiveDir, "tick_dir", tickDir, "file_count", fileCount)
 		return nil
 	}
 
 	if err := os.Rename(tickDir, archiveDir); err != nil {
 		return fmt.Errorf("rename tick dir failed: %w", err)
 	}
-	success := false
-	defer func() {
-		if success {
-			return
-		}
-		if _, err := os.Stat(archiveDir); err == nil {
-			_ = os.Rename(archiveDir, tickDir)
-		}
-	}()
-
-	if err := zipDirWithRoot(archiveDir, archiveZip); err != nil {
-		return err
-	}
-	if err := os.RemoveAll(archiveDir); err != nil {
-		return fmt.Errorf("remove archived tick dir failed: %w", err)
-	}
-	success = true
-	logger.Info("tick archive completed", "tick_dir", tickDir, "archive_zip", archiveZip, "trading_day", tradingDay, "file_count", fileCount)
+	logger.Info("tick archive completed", "tick_dir", tickDir, "archive_dir", archiveDir, "trading_day", tradingDay, "file_count", fileCount)
 	return nil
 }
 
@@ -196,58 +174,4 @@ func tickCSVArchiveString(record []string, index map[string]int, key string) str
 		return ""
 	}
 	return strings.TrimSpace(record[pos])
-}
-
-func zipDirWithRoot(srcDir string, destZip string) error {
-	out, err := os.OpenFile(destZip, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o644)
-	if err != nil {
-		return fmt.Errorf("create tick archive zip failed: %w", err)
-	}
-	defer out.Close()
-
-	zw := zip.NewWriter(out)
-
-	root := filepath.Base(srcDir)
-	err = filepath.Walk(srcDir, func(path string, info os.FileInfo, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if info.IsDir() {
-			return nil
-		}
-		rel, err := filepath.Rel(srcDir, path)
-		if err != nil {
-			return err
-		}
-		zipName := filepath.ToSlash(filepath.Join(root, rel))
-		header, err := zip.FileInfoHeader(info)
-		if err != nil {
-			return err
-		}
-		header.Name = zipName
-		header.Method = zip.Deflate
-		writer, err := zw.CreateHeader(header)
-		if err != nil {
-			return err
-		}
-		in, err := os.Open(path)
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(writer, in); err != nil {
-			_ = in.Close()
-			return err
-		}
-		if err := in.Close(); err != nil {
-			return err
-		}
-		return nil
-	})
-	if err != nil {
-		return fmt.Errorf("zip tick dir failed: %w", err)
-	}
-	if err := zw.Close(); err != nil {
-		return fmt.Errorf("close tick archive zip failed: %w", err)
-	}
-	return nil
 }
