@@ -1188,6 +1188,22 @@ async function openChart(item) {
   window.open(url, '_blank')
 }
 
+function openChartTradeDock() {
+  const symbol = String(tradeForm.symbol || '').trim().toLowerCase()
+  const inferredType = symbol && (symbol === 'l9' || symbol.endsWith('l9')) ? 'l9' : 'contract'
+  const inferredVariety = inferredType === 'l9'
+    ? (symbol.endsWith('l9') ? symbol.slice(0, -2) : symbol)
+    : ((symbol.match(/^[a-z]+/) || [])[0] || '')
+  const params = new URLSearchParams({
+    symbol,
+    type: inferredType || 'contract',
+    variety: inferredVariety || '',
+    data_mode: appMode.kline_data_mode,
+    open_trade: '1',
+  })
+  window.open(`/chart?${params.toString()}`, '_blank')
+}
+
 async function setAppMode(mode) {
   if (!mode || mode === appMode.mode || appMode.switching) return
   appMode.switching = true
@@ -1375,6 +1391,7 @@ onUnmounted(() => {
       <p>版本号: {{ APP_VERSION }}</p>
       <div class="row">
         <button :disabled="!canStartServer" @click="startServer">{{ startServerButtonText }}</button>
+        <button class="secondary" @click="openChartTradeDock">打开图表交易窗口</button>
         <span>WebSocket: {{ wsConnected ? '已连接' : '未连接' }}</span>
         <span :class="marketBadgeClass">{{ marketBadgeText }}</span>
         <span>运行模式:</span>

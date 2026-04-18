@@ -3,6 +3,7 @@ package web
 import (
 	"bytes"
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -46,8 +47,8 @@ func TestHandleReplayStartResetsReplayPaperTradeState(t *testing.T) {
 	srv := &Server{
 		cfg: config.AppConfig{
 			CTP: config.CTPConfig{
-				FlowPath:          t.TempDir(),
-				ReplayDefaultMode: "fast",
+				FlowPath:           t.TempDir(),
+				ReplayDefaultMode:  "fast",
 				ReplayDefaultSpeed: 1,
 			},
 		},
@@ -92,6 +93,63 @@ func TestHandleReplayStartResetsReplayPaperTradeState(t *testing.T) {
 	}
 	if len(trades) != 0 {
 		t.Fatalf("trades after replay start = %d, want 0", len(trades))
+	}
+}
+
+func TestHandleTradeTerminalReturnsAggregatedSnapshot(t *testing.T) {
+	dsn := testmysql.NewDatabase(t)
+	tradeSvc, err := trade.NewPaperService(tradeTestConfig(), "paper_replay", dsn, nil)
+	if err != nil {
+		t.Fatalf("new paper replay service failed: %v", err)
+	}
+	t.Cleanup(func() { _ = tradeSvc.Close() })
+
+	if _, err := tradeSvc.SubmitOrder(httptest.NewRequest(http.MethodPost, "/", nil).Context(), trade.SubmitOrderRequest{
+		AccountID:  "paper_replay",
+		Symbol:     "rb2505",
+		ExchangeID: "SHFE",
+		Direction:  "buy",
+		OffsetFlag: "open",
+		LimitPrice: 100,
+		Volume:     2,
+		Reason:     "manual",
+	}); err != nil {
+		t.Fatalf("seed working order failed: %v", err)
+	}
+
+	srv := &Server{
+		cfg: config.AppConfig{
+			Trade: config.TradeConfig{AccountID: "paper_replay"},
+		},
+		tradePaperReplay: tradeSvc,
+		currentMode:      appmode.ReplayPaper,
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/trade/terminal?symbol=rb2505", nil)
+	rr := httptest.NewRecorder()
+	srv.handleTradeTerminal(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("handleTradeTerminal status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+
+	var got trade.TerminalSnapshot
+	if err := json.NewDecoder(rr.Body).Decode(&got); err != nil {
+		t.Fatalf("decode terminal snapshot failed: %v", err)
+	}
+	if got.Summary.AccountID != "paper_replay" {
+		t.Fatalf("summary account_id = %q, want paper_replay", got.Summary.AccountID)
+	}
+	if got.OrderEntryDefaults.Symbol != "rb2505" {
+		t.Fatalf("defaults symbol = %q, want rb2505", got.OrderEntryDefaults.Symbol)
+	}
+	if got.OrderEntryDefaults.Volume != 1 {
+		t.Fatalf("defaults volume = %d, want 1", got.OrderEntryDefaults.Volume)
+	}
+	if len(got.WorkingOrders) != 1 {
+		t.Fatalf("working orders len = %d, want 1", len(got.WorkingOrders))
+	}
+	if got.WorkingOrders[0].RemainingVolume != 2 {
+		t.Fatalf("remaining volume = %d, want 2", got.WorkingOrders[0].RemainingVolume)
 	}
 }
 

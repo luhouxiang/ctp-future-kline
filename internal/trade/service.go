@@ -75,8 +75,9 @@ type replayTick struct {
 }
 
 type replayQuote struct {
-	BidPrice1 float64
-	AskPrice1 float64
+	BidPrice1  float64
+	AskPrice1  float64
+	LastTickAt time.Time
 }
 
 func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, registry *queuewatch.Registry) (*Service, error) {
@@ -881,7 +882,7 @@ func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (Or
 		return s.submitImmediatePaperOrder(commandID, req)
 	}
 	s.paperMu.Lock()
-	now := time.Now()
+	now := s.replayNowLocked()
 	rec := OrderRecord{
 		AccountID:           s.accountID,
 		CommandID:           commandID,
@@ -1019,7 +1020,7 @@ func (s *Service) cancelPaperOrder(req CancelOrderRequest, orderRec OrderRecord)
 		s.paperMu.Unlock()
 		return current, ErrOrderAlreadyFinal
 	}
-	now := time.Now()
+	now := s.replayNowLocked()
 	current.VolumeCanceled = current.VolumeTotalOriginal - current.VolumeTraded
 	if current.VolumeCanceled < 0 {
 		current.VolumeCanceled = 0
@@ -1240,10 +1241,34 @@ func (s *Service) rememberReplayQuoteLocked(tick replayTick) {
 	if symbol == "" {
 		return
 	}
-	s.replayQuotes[symbol] = replayQuote{
-		BidPrice1: tick.BidPrice1,
-		AskPrice1: tick.AskPrice1,
+	lastTickAt := tick.ReceivedAt
+	if lastTickAt.IsZero() {
+		lastTickAt = time.Now()
 	}
+	s.replayQuotes[symbol] = replayQuote{
+		BidPrice1:  tick.BidPrice1,
+		AskPrice1:  tick.AskPrice1,
+		LastTickAt: lastTickAt,
+	}
+}
+
+func (s *Service) replayNowLocked() time.Time {
+	if len(s.replayQuotes) == 0 {
+		return time.Now()
+	}
+	var latest time.Time
+	for _, q := range s.replayQuotes {
+		if q.LastTickAt.IsZero() {
+			continue
+		}
+		if latest.IsZero() || q.LastTickAt.After(latest) {
+			latest = q.LastTickAt
+		}
+	}
+	if latest.IsZero() {
+		return time.Now()
+	}
+	return latest
 }
 
 func (s *Service) markReplayPaperToMarketLocked(now time.Time) error {

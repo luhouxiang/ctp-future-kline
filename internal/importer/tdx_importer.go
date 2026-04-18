@@ -985,6 +985,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
+  "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   "%s" VARCHAR(8) NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
@@ -1000,6 +1001,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		quotes.ColExchange,
 		quotes.ColTime,
 		quotes.ColAdjustedTime,
+		quotes.ColUpdateTime,
 		quotes.ColPeriod,
 		quotes.ColOpen,
 		quotes.ColHigh,
@@ -1013,6 +1015,9 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure kline table failed: %w", err)
 	}
+	if err := ensureUpdateTimeColumnImporter(db, tableName); err != nil {
+		return err
+	}
 	if _, err := db.Exec(fmt.Sprintf(`CREATE INDEX "idx_%s_inst_period_adj" ON "%s"("%s","%s","%s" DESC)`,
 		tableName, tableName, quotes.ColInstrumentID, quotes.ColPeriod, quotes.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
@@ -1024,26 +1029,25 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	return nil
 }
 
-func tableHasColumn(db *sql.DB, tableName string, column string) (bool, error) {
-	rows, err := db.Query(`
-SELECT column_name
-FROM information_schema.columns
-WHERE table_schema = DATABASE()
-  AND table_name = ?`, tableName)
+func ensureUpdateTimeColumnImporter(db *sql.DB, tableName string) error {
+	has, err := dbx.TableHasColumn(db, tableName, quotes.ColUpdateTime)
 	if err != nil {
-		return false, err
+		return fmt.Errorf("check update-time column failed: %w", err)
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var name string
-		if err := rows.Scan(&name); err != nil {
-			return false, err
+	if !has {
+		stmt := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+			tableName, quotes.ColUpdateTime)
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("add update-time column failed: %w", err)
 		}
-		if strings.EqualFold(name, column) {
-			return true, nil
-		}
+		return nil
 	}
-	return false, rows.Err()
+	stmt := fmt.Sprintf(`ALTER TABLE "%s" MODIFY COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+		tableName, quotes.ColUpdateTime)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("modify update-time column failed: %w", err)
+	}
+	return nil
 }
 
 func upsertBarsInTx(db *sql.DB, tableName string, bars []quotes.MinuteBar) error {

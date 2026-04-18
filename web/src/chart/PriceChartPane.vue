@@ -22,10 +22,11 @@ import {
 } from "./analysis/reversalDetector";
 import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
 import { mergeRealtimeBarUpdate } from "./realtimeBars";
+import { getComposedBar, initKlineComposer, pushComposeTick } from "./klineComposeBridge";
 
 const CHUNK_SIZE = 2000;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
-const RESIZER_H = 12;
+const RESIZER_H = 5;
 const MIN_CANDLE_H = 140;
 const MIN_MACD_H = 70;
 const MIN_VOLUME_H = 120;
@@ -100,9 +101,7 @@ const paneHeights = reactive({
 });
 const syncCrosshair = reactive({
   visible: false,
-  xCandle: 0,
-  xMacd: 0,
-  xVolume: 0,
+  x: 0,
   time: 0,
 });
 const rightValueOverlay = reactive({
@@ -117,6 +116,8 @@ const rightValueOverlay = reactive({
   volumeValue: 0,
 });
 const viewVersion = ref(0);
+const composeTicketRef = ref(null);
+const negativeVolumeLogged = new Set();
 
 const chartRefs = { candle: null, macd: null, volume: null };
 const seriesRefs = {
@@ -348,8 +349,10 @@ function buildChart(container, height) {
         color: dark ? "#8ea5bf" : "#5c7897",
       },
       vertLine: {
-        visible: true,
-        labelVisible: true,
+        // Render one unified custom vertical guide across all panes to avoid
+        // per-pane drift/ghost lines from three independent chart instances.
+        visible: false,
+        labelVisible: false,
         style: LineStyle.Dashed,
         width: 1,
         color: dark ? "#8ea5bf" : "#5c7897",
@@ -389,6 +392,7 @@ function applyPaneScaleVisibility() {
     rightPriceScale: {
       borderColor: props.theme !== "light" ? "#263449" : "#d2dfeb",
       minimumWidth: DATA_ZONE_WIDTH_PX,
+      scaleMargins: { top: 0.08, bottom: 0.0 },
     },
   });
 }
@@ -478,6 +482,18 @@ function initCharts() {
   seriesRefs.volume = chartRefs.volume.addSeries(HistogramSeries, {
     color: "#6b88a6",
     priceFormat: { type: "volume" },
+    autoscaleInfoProvider: (original) => {
+      const info = typeof original === "function" ? original() : null;
+      if (!info || !info.priceRange) return info;
+      const minRaw = Number(info.priceRange.minValue);
+      const maxRaw = Number(info.priceRange.maxValue);
+      const minValue = Number.isFinite(minRaw) ? Math.max(0, minRaw) : 0;
+      const maxValue = Number.isFinite(maxRaw) ? Math.max(minValue, maxRaw) : minValue;
+      return {
+        ...info,
+        priceRange: { minValue, maxValue },
+      };
+    },
   });
   seriesRefs.hist = chartRefs.macd.addSeries(HistogramSeries, { color: "#90caf9" });
   seriesRefs.dif = chartRefs.macd.addSeries(LineSeries, {
@@ -574,27 +590,16 @@ function initCharts() {
       syncCrosshair.time = 0;
       return;
     }
-    const candleX = chartRefs.candle?.timeScale().timeToCoordinate(ts);
-    const macdX = chartRefs.macd?.timeScale().timeToCoordinate(ts);
-    const volumeX = chartRefs.volume?.timeScale().timeToCoordinate(ts);
-    if (
-      candleX === null ||
-      candleX === undefined ||
-      macdX === null ||
-      macdX === undefined ||
-      volumeX === null ||
-      volumeX === undefined
-    ) {
+    const x = chartRefs.candle?.timeScale().timeToCoordinate(ts);
+    if (x === null || x === undefined || !Number.isFinite(Number(x))) {
       syncCrosshair.visible = false;
       syncCrosshair.time = 0;
       return;
     }
     syncCrosshair.visible = true;
     syncCrosshair.time = ts;
-    // Render helper lines on non-active panes to keep one shared time cursor.
-    syncCrosshair.xMacd = source === "macd" ? -1 : macdX;
-    syncCrosshair.xVolume = source === "volume" ? -1 : volumeX;
-    syncCrosshair.xCandle = source === "candle" ? -1 : candleX;
+    // Use one shared x from the candle pane for all panes to avoid per-pane drift.
+    syncCrosshair.x = Number(x);
   };
   candleCrosshairHandler = (param) => {
     updateSyncFrom("candle", param);
@@ -719,6 +724,25 @@ function normalizeBarsAscendingUnique(rawBars, source = "unknown") {
   return times.map((t) => byTime.get(t));
 }
 
+function normalizedVolumeValue(raw, bar, source = "unknown") {
+  const n = Number(raw);
+  if (!Number.isFinite(n)) return 0;
+  if (n >= 0) return n;
+  const ts = Number(bar?.adjusted_time || bar?.time || 0);
+  const key = `${source}|${String(bar?.instrument_id || bar?.InstrumentID || props.scope?.symbol || "")}|${ts}`;
+  if (!negativeVolumeLogged.has(key)) {
+    negativeVolumeLogged.add(key);
+    console.error("[chart] negative volume detected, clamped to 0", {
+      source,
+      symbol: props.scope?.symbol || "",
+      timeframe: props.scope?.timeframe || "",
+      adjusted_time: ts,
+      original_volume: n,
+    });
+  }
+  return 0;
+}
+
 function renderSeries() {
   const bars = normalizeBarsAscendingUnique(state.bars, "render");
   if (!seriesRefs.candle) return;
@@ -740,7 +764,7 @@ function renderSeries() {
     );
   const volumeData = bars.map((bar) => ({
     time: getDisplayTime(bar),
-    value: Number.isFinite(Number(bar?.volume)) ? Number(bar?.volume) : 0,
+    value: normalizedVolumeValue(bar?.volume, bar, "render_volume_setdata"),
     color: "rgba(0,0,0,0)",
   }));
 
@@ -792,7 +816,7 @@ function updatePrimarySeriesForRealtime() {
   };
   const volumePoint = {
     time: getDisplayTime(last),
-    value: Number.isFinite(Number(last?.volume)) ? Number(last?.volume) : 0,
+    value: normalizedVolumeValue(last?.volume, last, "realtime_volume_update"),
     color: "rgba(0,0,0,0)",
   };
   if (
@@ -1833,20 +1857,267 @@ function applyChannelSettings(payload) {
   publishChannelView();
 }
 
+async function reloadRecentWindow() {
+  if (!props.scope.symbol || !props.scope.type) return;
+  try {
+    const endParam = fmtTime(Math.floor(Date.now() / 1000));
+    const chunk = await fetchChunk(endParam);
+    const latest = normalizeBarsAscendingUnique(chunk.bars, "recent_window");
+    if (!latest.length) return;
+    const latestTimes = new Set(latest.map((x) => Number(x.adjusted_time || 0)));
+    const historical = (Array.isArray(state.bars) ? state.bars : []).filter((x) => !latestTimes.has(Number(x?.adjusted_time || 0)));
+    state.bars = normalizeBarsAscendingUnique([...historical, ...latest], "recent_window_merge");
+    renderSeries();
+    scheduleDerivedSeriesRender();
+  } catch {
+    // ignore
+  }
+}
+
 function applyRealtimeBarUpdate(update) {
   realtimeApplyCount += 1;
   const sub = update?.subscription || {};
+  const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
+  const localDataMode = String(props.dataMode || "realtime").trim().toLowerCase();
+  if (subDataMode && subDataMode !== localDataMode) {
+    return;
+  }
   if (
     String(sub.symbol || "").trim().toLowerCase() !== String(props.scope?.symbol || "").trim().toLowerCase() ||
     String(sub.type || "").trim().toLowerCase() !== String(props.scope?.type || "").trim().toLowerCase() ||
-    String(sub.variety || "").trim().toLowerCase() !== String(props.scope?.variety || "").trim().toLowerCase() ||
     String(sub.timeframe || "").trim().toLowerCase() !== String(props.scope?.timeframe || "").trim().toLowerCase()
   ) {
     return;
   }
-  state.bars = normalizeBarsAscendingUnique(mergeRealtimeBarUpdate(state.bars, update), "realtime_update");
+  const merged = mergeRealtimeBarUpdate(state.bars, update);
+  const barTs = Number(update?.bar?.adjusted_time || 0);
+  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
+  if (Number.isFinite(barTs) && barTs > 0) {
+    const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
+    if (idx >= 0) {
+      merged[idx] = { ...merged[idx], __source: "server", __phase: phase };
+    }
+  }
+  state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   updatePrimarySeriesForRealtime();
   scheduleDerivedSeriesRender();
+}
+
+function setComposeTicket(payload) {
+  composeTicketRef.value = payload || null;
+  initKlineComposer(composeTicketRef.value);
+}
+
+function resetComposeSession(ticketID) {
+  composeTicketRef.value = composeTicketRef.value || {};
+  if (ticketID) {
+    composeTicketRef.value.ticket_id = ticketID;
+  }
+  state.bars = [];
+  renderSeries();
+  viewVersion.value += 1;
+}
+
+function applyQuoteSynthesis(update, ticketPayload) {
+  const sub = update?.subscription || {};
+  const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
+  const localDataMode = String(props.dataMode || "realtime").trim().toLowerCase();
+  if (subDataMode && subDataMode !== localDataMode) return;
+  if (
+    String(sub.symbol || "").trim().toLowerCase() !== String(props.scope?.symbol || "").trim().toLowerCase() ||
+    String(sub.type || "").trim().toLowerCase() !== String(props.scope?.type || "").trim().toLowerCase() ||
+    String(sub.timeframe || "").trim().toLowerCase() !== String(props.scope?.timeframe || "").trim().toLowerCase()
+  ) {
+    return;
+  }
+  const synthesized = synthesizeBarFromQuote(update, ticketPayload || composeTicketRef.value);
+  if (!synthesized) return;
+  const ts = Number(synthesized.bar?.adjusted_time || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return;
+  const merged = Array.isArray(state.bars) ? [...state.bars] : [];
+  const idx = merged.findIndex((x) => Number(x?.adjusted_time) === ts);
+  if (idx >= 0) {
+    const existing = merged[idx] || {};
+    // server final bar always wins over local synthesis
+    if (String(existing.__source || "") === "server" && String(existing.__phase || "") === "final") {
+      maybeReportComposeMismatch(existing, synthesized.bar, sub);
+      return;
+    }
+    merged[idx] = { ...existing, ...synthesized.bar, __source: "client", __phase: "partial" };
+  } else {
+    merged.push({ ...synthesized.bar, __source: "client", __phase: "partial" });
+  }
+  state.bars = normalizeBarsAscendingUnique(merged, "quote_synthesis");
+  updatePrimarySeriesForRealtime();
+  scheduleDerivedSeriesRender();
+}
+
+function maybeReportComposeMismatch(serverBar, localBar, sub) {
+  const fields = ["open", "high", "low", "close", "volume"];
+  const mismatch = fields.some((k) => Math.abs(Number(serverBar?.[k] || 0) - Number(localBar?.[k] || 0)) > (k === "volume" ? 1 : 1e-6));
+  if (!mismatch) return;
+  console.warn("[chart_compose_mismatch]", {
+    symbol: sub?.symbol || "",
+    type: sub?.type || "",
+    timeframe: sub?.timeframe || "",
+    adjusted_time: Number(localBar?.adjusted_time || 0),
+    server: {
+      open: serverBar?.open,
+      high: serverBar?.high,
+      low: serverBar?.low,
+      close: serverBar?.close,
+      volume: serverBar?.volume,
+    },
+    local: {
+      open: localBar?.open,
+      high: localBar?.high,
+      low: localBar?.low,
+      close: localBar?.close,
+      volume: localBar?.volume,
+    },
+  });
+}
+
+function synthesizeBarFromQuote(update, ticketPayload) {
+  const snapshot = update?.snapshot || {};
+  const updateTime = String(snapshot?.update_time || snapshot?.time || "").trim();
+  const tradingDay = String(snapshot?.trading_day || "").trim();
+  const actionDay = String(snapshot?.action_day || "").trim();
+  if (!tradingDay && !actionDay) return null;
+  const timeText = updateTime;
+  if (!timeText) return null;
+  const clock = parseClockTimeToSecond(timeText);
+  if (!clock) return null;
+  const sessions = Array.isArray(ticketPayload?.sessions) ? ticketPayload.sessions : [];
+  const rawMinute = clock.hour * 60 + clock.minute;
+  const labelMinute = resolveLabelMinuteBySessions(rawMinute, sessions);
+  const adjusted = buildAdjustedSecondByTradingDay(tradingDay, actionDay, clock, labelMinute);
+  if (!Number.isFinite(adjusted) || adjusted <= 0) return null;
+  const n = (v) => {
+    const x = Number(v);
+    return Number.isFinite(x) ? x : 0;
+  };
+  const tickPayload = {
+    update_time: `${String(clock.hour).padStart(2, "0")}:${String(clock.minute).padStart(2, "0")}:${String(clock.second).padStart(2, "0")}`,
+    update_millisec: Number(snapshot?.update_millisec || 0),
+    last_price: n(snapshot?.close ?? snapshot?.latest_price),
+    volume: Math.max(0, Math.trunc(n(snapshot?.volume))),
+    open_interest: n(snapshot?.open_interest),
+  };
+  initKlineComposer(ticketPayload || composeTicketRef.value);
+  const wasmBar = pushComposeTick(tickPayload) || getComposedBar("1m");
+  if (wasmBar && Number.isFinite(Number(wasmBar.adjusted_time || 0)) && Number(wasmBar.adjusted_time) > 0) {
+    return {
+      subscription: update?.subscription || {},
+      phase: "partial",
+      source: "client_compose_wasm",
+      bar: {
+        adjusted_time: adjusted,
+        data_time: adjusted,
+        open: n(snapshot?.open ?? wasmBar.open),
+        high: n(snapshot?.high ?? wasmBar.high),
+        low: n(snapshot?.low ?? wasmBar.low),
+        close: n(snapshot?.close ?? snapshot?.latest_price ?? wasmBar.close),
+        volume: Math.max(0, Math.trunc(n(snapshot?.volume ?? wasmBar.volume))),
+        open_interest: n(snapshot?.open_interest ?? wasmBar.open_interest),
+      },
+    };
+  }
+  return {
+    subscription: update?.subscription || {},
+    phase: "partial",
+    source: "client_compose",
+    bar: {
+      adjusted_time: adjusted,
+      data_time: adjusted,
+      open: n(snapshot?.open),
+      high: n(snapshot?.high),
+      low: n(snapshot?.low),
+      close: n(snapshot?.close ?? snapshot?.latest_price),
+      volume: Math.max(0, Math.trunc(n(snapshot?.volume))),
+      open_interest: n(snapshot?.open_interest),
+    },
+  };
+}
+
+function parseClockTimeToSecond(raw) {
+  const m = String(raw || "").trim().match(/^(\d{2}):(\d{2}):(\d{2})$/);
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  const second = Number(m[3]);
+  if (!Number.isFinite(hour) || !Number.isFinite(minute) || !Number.isFinite(second)) return null;
+  return { hour, minute, second };
+}
+
+function buildSecondOnDay(day, minuteOfDay, second) {
+  const h = Math.max(0, Math.min(23, Math.floor(minuteOfDay / 60)));
+  const m = Math.max(0, Math.min(59, minuteOfDay % 60));
+  return Math.floor(new Date(day.getFullYear(), day.getMonth(), day.getDate(), h, m, second).getTime() / 1000);
+}
+
+function parseTradingDayText(raw) {
+  const txt = String(raw || "").trim();
+  const m = txt.match(/^(\d{4})(\d{2})(\d{2})$/);
+  if (!m) return null;
+  const y = Number(m[1]);
+  const mon = Number(m[2]) - 1;
+  const d = Number(m[3]);
+  if (!Number.isFinite(y) || !Number.isFinite(mon) || !Number.isFinite(d)) return null;
+  return new Date(y, mon, d, 0, 0, 0, 0);
+}
+
+function prevWorkingDay(day) {
+  const d = new Date(day.getFullYear(), day.getMonth(), day.getDate(), 0, 0, 0, 0);
+  d.setDate(d.getDate() - 1);
+  const wd = d.getDay();
+  if (wd === 6) d.setDate(d.getDate() - 1);
+  else if (wd === 0) d.setDate(d.getDate() - 2);
+  return d;
+}
+
+function buildAdjustedSecondByTradingDay(tradingDay, actionDay, clock, labelMinute) {
+  let baseDay = parseTradingDayText(tradingDay);
+  if (!baseDay) baseDay = parseTradingDayText(actionDay);
+  if (!baseDay) return 0;
+  const hhmm = clock.hour * 100 + clock.minute;
+  if (hhmm >= 800 && hhmm <= 1600) {
+    return buildSecondOnDay(baseDay, labelMinute, 0);
+  }
+  const prev = prevWorkingDay(baseDay);
+  let adjustedDay = prev;
+  if (hhmm < 800) {
+    adjustedDay = new Date(prev.getFullYear(), prev.getMonth(), prev.getDate() + 1, 0, 0, 0, 0);
+  }
+  return buildSecondOnDay(adjustedDay, labelMinute, 0);
+}
+
+function resolveLabelMinuteBySessions(rawMinute, sessions) {
+  const normalized = normalizeSessionRanges(sessions);
+  for (const s of normalized) {
+    const startEdge = s.start > 0 ? s.start - 1 : s.start;
+    if (rawMinute < startEdge || rawMinute > s.end) continue;
+    const labelStart = s.start < s.end ? s.start + 1 : s.end;
+    let label = rawMinute + 1;
+    if (label < labelStart) label = labelStart;
+    if (label > s.end) label = s.end;
+    return label;
+  }
+  const fallback = rawMinute + 1;
+  if (fallback >= 24 * 60) return (fallback % (24 * 60));
+  return fallback;
+}
+
+function normalizeSessionRanges(sessions) {
+  const items = (Array.isArray(sessions) ? sessions : [])
+    .map((x) => ({ start: Number(x?.start), end: Number(x?.end) }))
+    .filter((x) => Number.isFinite(x.start) && Number.isFinite(x.end) && x.start >= 0 && x.end >= 0 && x.start < 24 * 60 && x.end < 24 * 60);
+  items.sort((a, b) => tradingOrderKey(a.start) - tradingOrderKey(b.start));
+  return items;
+}
+
+function tradingOrderKey(minute) {
+  return minute >= 18 * 60 ? minute : minute + 24 * 60;
 }
 
 function applyReversalSettings(payload) {
@@ -1916,7 +2187,11 @@ function getChannelPanelState() {
 defineExpose({
   onDeleteSelected,
   reload: loadInitialChunk,
+  reloadRecentWindow,
   applyRealtimeBarUpdate,
+  applyQuoteSynthesis,
+  setComposeTicket,
+  resetComposeSession,
   setSelectedDrawing,
   getChannelSegments,
   getChannelPanelState,
@@ -2228,7 +2503,7 @@ const volumeBars = computed(() => {
   return state.bars
     .map((bar) => {
       const x = Number(chartRefs.candle.timeScale().timeToCoordinate(getDisplayTime(bar)));
-      const topY = Number(seriesRefs.volume.priceToCoordinate(bar.volume));
+      const topY = Number(seriesRefs.volume.priceToCoordinate(normalizedVolumeValue(bar?.volume, bar, "volume_outline")));
       if (!Number.isFinite(x) || !Number.isFinite(topY)) return null;
       const geom = candleBodyGeometryCss(x, barSpacing, pixelRatio);
       if (!geom) return null;
@@ -2254,7 +2529,7 @@ const syncTimeLabelText = computed(() => {
 
 const syncTimeLabelStyle = computed(() => {
   const hostW = volumeRef.value?.clientWidth || 0;
-  const x = Number(syncCrosshair.xVolume || 0);
+  const x = Number(syncCrosshair.x || 0);
   // Keep label centered on crosshair and clamped inside pane.
   let left = x - 74;
   if (left < 6) left = 6;
@@ -2342,8 +2617,9 @@ function buildRightAxisTicks(chart, hostEl, mode = "price") {
   const out = [];
   for (let i = 0; i <= count; i += 1) {
     const y = Math.round((i / count) * (h - 1));
-    const value = Number(series.coordinateToPrice(y));
+    let value = Number(series.coordinateToPrice(y));
     if (!Number.isFinite(value)) continue;
+    if (mode === "volume") value = Math.max(0, value);
     let text = "";
     if (mode === "volume") {
       text = Number(value).toLocaleString("en-US", { maximumFractionDigits: 0 });
@@ -2430,7 +2706,7 @@ const quoteHeader = computed(() => {
     high: bar ? formatPrice(bar.high) : "--",
     low: bar ? formatPrice(bar.low) : "--",
     close: bar ? formatPrice(bar.close) : "--",
-    volume: bar ? formatVolume(bar.volume) : "--",
+    volume: bar ? formatVolume(normalizedVolumeValue(bar.volume, bar, "quote_header")) : "--",
     change: Number.isFinite(changeRaw) ? formatSignedChange(changeRaw) : "--",
     index: barIndex >= 0 ? String(barIndex) : "--",
     changeClass,
@@ -2893,7 +3169,12 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div ref="containerRef" class="tv-chart-pane">
+    <div ref="containerRef" class="tv-chart-pane">
+    <div
+      v-if="syncCrosshair.visible && syncCrosshair.x >= 0"
+      class="sync-vline sync-vline-unified"
+      :style="{ left: `${syncCrosshair.x}px` }"
+    ></div>
     <div
       ref="candleSlotRef"
       class="pane-slot"
@@ -2969,11 +3250,6 @@ onUnmounted(() => {
             {{ row.text }}
           </div>
         </div>
-        <div
-          v-if="syncCrosshair.visible && syncCrosshair.xCandle >= 0"
-          class="sync-vline"
-          :style="{ left: `${syncCrosshair.xCandle}px` }"
-        ></div>
         <div class="candle-vline-layer">
           <div
             v-for="item in candleVLines"
@@ -3215,11 +3491,6 @@ onUnmounted(() => {
           />
         </svg>
       </div>
-      <div
-        v-if="syncCrosshair.visible && syncCrosshair.xMacd >= 0"
-        class="sync-vline"
-        :style="{ left: `${syncCrosshair.xMacd}px` }"
-      ></div>
     </div>
 
     <div
@@ -3232,7 +3503,7 @@ onUnmounted(() => {
 
     <div
       ref="volumeSlotRef"
-      class="pane-slot"
+      class="pane-slot with-time-gutter"
       :style="{ height: `${paneHeights.volume}px` }"
     >
       <div ref="volumeRef" class="chart-box sub"></div>
@@ -3270,11 +3541,6 @@ onUnmounted(() => {
           />
         </svg>
       </div>
-      <div
-        v-if="syncCrosshair.visible && syncCrosshair.xVolume >= 0"
-        class="sync-vline"
-        :style="{ left: `${syncCrosshair.xVolume}px` }"
-      ></div>
       <div v-if="syncTimeLabelText" class="sync-time-label" :style="syncTimeLabelStyle">
         {{ syncTimeLabelText }}
       </div>

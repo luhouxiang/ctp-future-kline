@@ -46,6 +46,9 @@ type StartRequest struct {
 	TickDir string `json:"tick_dir"`
 	// FullReplay 表示开始前是否清空去重记录并做全量回放。
 	FullReplay bool `json:"full_replay"`
+	// SharedMetaDSN 是 shared_meta 库 DSN，仅服务端内部注入用于交易时段过滤。
+	// 不通过 API 暴露给前端。
+	SharedMetaDSN string `json:"-"`
 }
 
 // TaskSnapshot 是 replay 任务的可观测状态快照。

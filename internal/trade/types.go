@@ -264,6 +264,69 @@ type EventEnvelope struct {
 	Data any `json:"data"`
 }
 
+type TerminalSummary struct {
+	AccountID      string    `json:"account_id"`
+	Mode           string    `json:"mode"`
+	TradingDay     string    `json:"trading_day"`
+	ReplayTime     string    `json:"replay_time,omitempty"`
+	Symbol         string    `json:"symbol,omitempty"`
+	Balance        float64   `json:"balance"`
+	Available      float64   `json:"available"`
+	Margin         float64   `json:"margin"`
+	FrozenCash     float64   `json:"frozen_cash"`
+	PositionProfit float64   `json:"position_profit"`
+	CloseProfit    float64   `json:"close_profit"`
+	RiskRatio      float64   `json:"risk_ratio"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type TerminalOrderEntryDefaults struct {
+	AccountID  string  `json:"account_id"`
+	Symbol     string  `json:"symbol,omitempty"`
+	ExchangeID string  `json:"exchange_id,omitempty"`
+	Volume     int     `json:"volume"`
+	LimitPrice float64 `json:"limit_price,omitempty"`
+}
+
+type TerminalWorkingOrder struct {
+	OrderRecord
+	RemainingVolume int `json:"remaining_volume"`
+}
+
+type TerminalPosition struct {
+	PositionSnapshot
+	Closable     int     `json:"closable"`
+	FrozenVolume int     `json:"frozen_volume"`
+	AvgPrice     float64 `json:"avg_price"`
+	MarketPrice  float64 `json:"market_price"`
+	FloatPnL     float64 `json:"float_pnl"`
+	MarketValue  float64 `json:"market_value"`
+}
+
+type TerminalFunds struct {
+	AccountID      string    `json:"account_id"`
+	StaticBalance  float64   `json:"static_balance"`
+	DynamicBalance float64   `json:"dynamic_balance"`
+	Available      float64   `json:"available"`
+	FrozenCash     float64   `json:"frozen_cash"`
+	Margin         float64   `json:"margin"`
+	Commission     float64   `json:"commission"`
+	CloseProfit    float64   `json:"close_profit"`
+	PositionProfit float64   `json:"position_profit"`
+	RiskRatio      float64   `json:"risk_ratio"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+type TerminalSnapshot struct {
+	Summary            TerminalSummary            `json:"summary"`
+	OrderEntryDefaults TerminalOrderEntryDefaults `json:"order_entry_defaults"`
+	WorkingOrders      []TerminalWorkingOrder     `json:"working_orders"`
+	Positions          []TerminalPosition         `json:"positions"`
+	Orders             []OrderRecord              `json:"orders"`
+	Trades             []TradeRecord              `json:"trades"`
+	Funds              TerminalFunds              `json:"funds"`
+}
+
 type GatewayEvent struct {
 	// Type 是底层网关事件类型。
 	Type string

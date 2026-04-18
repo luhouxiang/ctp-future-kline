@@ -5,6 +5,8 @@ import LeftDrawToolbar from './LeftDrawToolbar.vue'
 import WatchlistPanel from './WatchlistPanel.vue'
 import PriceChartPane from './PriceChartPane.vue'
 import KeyboardSprite from './KeyboardSprite.vue'
+import TradeDockWindow from './TradeDockWindow.vue'
+import { bootKlineComposerWASM } from './klineComposeBridge'
 import { DEFAULT_CHANNEL_SETTINGS, normalizeChannelSettingsV2 } from './analysis/channelDetector'
 import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis/reversalDetector'
 
@@ -71,6 +73,47 @@ let chartScopeSyncSeq = 0
 const realtimeStatus = ref('connecting')
 const activeChartSubscriptionKey = ref('')
 const dataMode = ref('realtime')
+const chartSubscribedTicket = ref(null)
+const autoOpenTradeWindow = ref(false)
+const chartHealth = reactive({
+  lastBarUpdateAt: 0,
+  lastQuoteUpdateAt: 0,
+  lastWindowResyncAt: 0,
+})
+const quoteOnlyResyncThresholdMS = 3000
+const quoteOnlyWindowResyncIntervalMS = 5000
+const tradeWindow = reactive({
+  visible: false,
+  x: 0,
+  y: 74,
+  width: 1322,
+  height: 268,
+  activeTab: 'positions',
+  dragging: false,
+  resizing: false,
+  symbolLocked: false,
+})
+const tradeTerminal = reactive({
+  summary: {},
+  order_entry_defaults: { account_id: '', symbol: '', exchange_id: '', volume: 1, limit_price: 0 },
+  working_orders: [],
+  positions: [],
+  orders: [],
+  trades: [],
+  funds: {},
+})
+const tradeForm = reactive({
+  account_id: '',
+  symbol: '',
+  exchange_id: '',
+  direction: 'buy',
+  offset_flag: 'open',
+  limit_price: '',
+  volume: 1,
+  client_tag: 'chart-trade-dock',
+})
+let tradeWindowDrag = null
+let tradeWindowResize = null
 const DRAWING_TYPE_LABELS = {
   trendline: '趋势线',
   hline: '水平线',
@@ -168,6 +211,7 @@ function getParams() {
   scope.variety = variety || inferVarietyBySymbol(symbol, scope.type)
   scope.timeframe = p.get('timeframe') || '1m'
   scope.end = p.get('end') || ''
+  autoOpenTradeWindow.value = p.get('open_trade') === '1'
 }
 
 function inferKlineTypeBySymbol(symbol) {
@@ -344,6 +388,9 @@ function onSelectWatch(item) {
   scope.symbol = String(item?.symbol || '').trim().toLowerCase()
   scope.type = item.type || 'contract'
   scope.variety = item.variety || ''
+  if (!tradeWindow.symbolLocked) {
+    tradeForm.symbol = scope.symbol
+  }
   const qs = new URLSearchParams({
     symbol: scope.symbol,
     type: scope.type,
@@ -369,6 +416,304 @@ function isEditableTarget(target) {
   const tag = String(el.tagName || '').toLowerCase()
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || tag === 'button') return true
   return !!el.closest('input, textarea, select, button, [contenteditable="true"]')
+}
+
+function pickQuoteNumber(...values) {
+  for (const item of values) {
+    const n = Number(item)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return 0
+}
+
+function currentTradeSymbol() {
+  return String(scope.symbol || '').trim()
+}
+
+function syncTradeFormWithScope(force = false) {
+  const symbol = currentTradeSymbol()
+  if (!symbol) return
+  if (force || !tradeWindow.symbolLocked || !String(tradeForm.symbol || '').trim()) {
+    tradeForm.symbol = symbol
+    tradeWindow.symbolLocked = false
+  }
+  const defaults = tradeTerminal.order_entry_defaults || {}
+  if (!String(tradeForm.account_id || '').trim()) tradeForm.account_id = defaults.account_id || ''
+  if (!String(tradeForm.exchange_id || '').trim()) tradeForm.exchange_id = defaults.exchange_id || ''
+  if (!String(tradeForm.limit_price || '').trim()) {
+    const price = pickQuoteNumber(defaults.limit_price, quoteSnapshot.value?.latest_price, quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1)
+    tradeForm.limit_price = price > 0 ? String(price) : ''
+  }
+  tradeForm.volume = 1
+}
+
+const MIN_TRADE_WINDOW_WIDTH = 980
+const MIN_TRADE_WINDOW_HEIGHT = 220
+
+function tradeWindowHostRect() {
+  const host = document.querySelector('.tv-terminal')
+  return host?.getBoundingClientRect?.() || null
+}
+
+function clampTradeWindowPosition(nextX, nextY, width = tradeWindow.width, height = tradeWindow.height) {
+  const hostRect = tradeWindowHostRect()
+  if (!hostRect) return
+  const boundedMaxX = Math.max(0, Number(hostRect.width || 0) - width - 12)
+  const boundedMaxY = Math.max(24, Number(hostRect.height || 0) - height - 12)
+  tradeWindow.x = Math.max(0, Math.min(Math.round(nextX), boundedMaxX))
+  tradeWindow.y = Math.max(22, Math.min(Math.round(nextY), boundedMaxY))
+}
+
+function applyTradeWindowRect(nextX, nextY, nextWidth, nextHeight) {
+  const hostRect = tradeWindowHostRect()
+  if (!hostRect) return
+  const width = Math.max(MIN_TRADE_WINDOW_WIDTH, Math.round(nextWidth))
+  const height = Math.max(MIN_TRADE_WINDOW_HEIGHT, Math.round(nextHeight))
+  const maxWidth = Math.max(MIN_TRADE_WINDOW_WIDTH, Math.floor(hostRect.width - 12))
+  const maxHeight = Math.max(MIN_TRADE_WINDOW_HEIGHT, Math.floor(hostRect.height - 22))
+  tradeWindow.width = Math.min(width, maxWidth)
+  tradeWindow.height = Math.min(height, maxHeight)
+  clampTradeWindowPosition(nextX, nextY, tradeWindow.width, tradeWindow.height)
+}
+
+function placeTradeWindowDefault() {
+  const hostRect = tradeWindowHostRect()
+  const maxX = Math.max(0, Number(hostRect?.width || 0) - tradeWindow.width - 16)
+  tradeWindow.x = Math.max(2, Math.min(maxX, 2))
+  tradeWindow.y = 1
+}
+
+function openTradeWindow(forceSync = true) {
+  if (!tradeWindow.visible) {
+    if (tradeWindow.x === 0 && tradeWindow.y <= 24) placeTradeWindowDefault()
+    tradeWindow.visible = true
+  }
+  syncTradeFormWithScope(forceSync)
+  void fetchTradeTerminal().catch(() => {})
+}
+
+function closeTradeWindow() {
+  tradeWindow.visible = false
+}
+
+async function fetchTradeTerminal() {
+  const params = new URLSearchParams()
+  if (currentTradeSymbol()) params.set('symbol', currentTradeSymbol())
+  const resp = await fetch(`/api/trade/terminal?${params.toString()}`)
+  if (!resp.ok) throw new Error(`trade terminal http ${resp.status}`)
+  const data = await resp.json()
+  tradeTerminal.summary = data.summary || {}
+  tradeTerminal.order_entry_defaults = data.order_entry_defaults || {}
+  tradeTerminal.working_orders = data.working_orders || []
+  tradeTerminal.positions = data.positions || []
+  tradeTerminal.orders = data.orders || []
+  tradeTerminal.trades = data.trades || []
+  tradeTerminal.funds = data.funds || {}
+  if (!String(tradeForm.account_id || '').trim()) tradeForm.account_id = tradeTerminal.order_entry_defaults.account_id || ''
+  if (!tradeWindow.symbolLocked && currentTradeSymbol()) tradeForm.symbol = currentTradeSymbol()
+  if (!String(tradeForm.exchange_id || '').trim()) tradeForm.exchange_id = tradeTerminal.order_entry_defaults.exchange_id || ''
+  if (!String(tradeForm.limit_price || '').trim()) {
+    const price = pickQuoteNumber(tradeTerminal.order_entry_defaults.limit_price, quoteSnapshot.value?.latest_price, quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1)
+    tradeForm.limit_price = price > 0 ? String(price) : ''
+  }
+}
+
+function updateTradeFormField(field, value) {
+  if (!(field in tradeForm)) return
+  if (field === 'volume') {
+    const n = Number(value)
+    tradeForm.volume = Number.isFinite(n) && n > 0 ? Math.floor(n) : 1
+    return
+  }
+  tradeForm[field] = typeof value === 'string' ? value : String(value ?? '')
+  if (field === 'symbol') {
+    tradeWindow.symbolLocked = String(value || '').trim().toLowerCase() !== currentTradeSymbol().toLowerCase()
+  }
+}
+
+async function submitTradeOrder() {
+  try {
+    const payload = {
+      account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
+      symbol: String(tradeForm.symbol || '').trim(),
+      exchange_id: String(tradeForm.exchange_id || '').trim(),
+      direction: tradeForm.direction,
+      offset_flag: tradeForm.offset_flag,
+      limit_price: Number(tradeForm.limit_price),
+      volume: Number(tradeForm.volume || 1),
+      client_tag: tradeForm.client_tag,
+      reason: 'manual',
+    }
+    const resp = await fetch('/api/trade/orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchTradeTerminal()
+  } catch (err) {
+    console.warn('[trade-dock] submit order failed', err)
+  }
+}
+
+async function cancelTradeOrder(item) {
+  try {
+    const payload = {
+      account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
+      order_ref: item.order_ref,
+      exchange_id: item.exchange_id,
+      order_sys_id: item.order_sys_id,
+      front_id: item.front_id,
+      session_id: item.session_id,
+      reason: 'manual_cancel',
+    }
+    const resp = await fetch(`/api/trade/orders/${item.command_id}/cancel`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchTradeTerminal()
+  } catch (err) {
+    console.warn('[trade-dock] cancel order failed', err)
+  }
+}
+
+async function closeTradePosition(item) {
+  try {
+    const direction = String(item?.direction || '').trim().toLowerCase()
+    const volume = Number(item?.closable || 0)
+    if (!item?.symbol || volume <= 0) return
+    const price = direction === 'short'
+      ? pickQuoteNumber(quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
+      : pickQuoteNumber(quoteSnapshot.value?.bid_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
+    const resp = await fetch(`/api/trade/positions/${encodeURIComponent(item.symbol)}/close`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
+        exchange_id: item.exchange,
+        direction,
+        offset_flag: 'close',
+        price,
+        volume,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchTradeTerminal()
+  } catch (err) {
+    console.warn('[trade-dock] close position failed', err)
+  }
+}
+
+async function quickTradeOrder(kind) {
+  const lastPrice = pickQuoteNumber(
+    quoteSnapshot.value?.latest_price,
+    quoteSnapshot.value?.ask_price1,
+    quoteSnapshot.value?.bid_price1,
+    tradeTerminal.order_entry_defaults?.limit_price,
+  )
+  if (kind === 'buy_open') {
+    tradeForm.direction = 'buy'
+    tradeForm.offset_flag = 'open'
+    if (!String(tradeForm.limit_price || '').trim() && lastPrice > 0) tradeForm.limit_price = String(lastPrice)
+    await submitTradeOrder()
+    return
+  }
+  if (kind === 'sell_open') {
+    tradeForm.direction = 'sell'
+    tradeForm.offset_flag = 'open'
+    if (!String(tradeForm.limit_price || '').trim() && lastPrice > 0) tradeForm.limit_price = String(lastPrice)
+    await submitTradeOrder()
+    return
+  }
+  if (kind === 'close') {
+    if (tradeTerminal.positions?.length) {
+      const target = tradeTerminal.positions.find((item) => Number(item?.closable || 0) > 0) || tradeTerminal.positions[0]
+      await closeTradePosition(target)
+      return
+    }
+    tradeForm.offset_flag = 'close'
+    if (!String(tradeForm.limit_price || '').trim() && lastPrice > 0) tradeForm.limit_price = String(lastPrice)
+    await submitTradeOrder()
+  }
+}
+
+function startTradeWindowDrag(evt) {
+  if (!(evt.target instanceof HTMLElement) || !evt.target.closest('.trade-classic-titlebar')) return
+  const hostRect = tradeWindowHostRect()
+  if (!hostRect) return
+  evt.preventDefault()
+  tradeWindow.dragging = true
+  tradeWindowDrag = {
+    hostRect,
+    offsetX: evt.clientX - hostRect.left - tradeWindow.x,
+    offsetY: evt.clientY - hostRect.top - tradeWindow.y,
+  }
+}
+
+function startTradeWindowResize(direction, evt) {
+  const hostRect = tradeWindowHostRect()
+  if (!hostRect) return
+  evt.preventDefault()
+  evt.stopPropagation()
+  tradeWindow.resizing = true
+  tradeWindowResize = {
+    direction,
+    hostRect,
+    startX: evt.clientX,
+    startY: evt.clientY,
+    startLeft: tradeWindow.x,
+    startTop: tradeWindow.y,
+    startWidth: tradeWindow.width,
+    startHeight: tradeWindow.height,
+  }
+}
+
+function onTradeWindowPointerMove(evt) {
+  if (tradeWindowResize) {
+    const dx = evt.clientX - tradeWindowResize.startX
+    const dy = evt.clientY - tradeWindowResize.startY
+    let nextX = tradeWindowResize.startLeft
+    let nextY = tradeWindowResize.startTop
+    let nextWidth = tradeWindowResize.startWidth
+    let nextHeight = tradeWindowResize.startHeight
+    const dir = tradeWindowResize.direction
+
+    if (dir.includes('e')) nextWidth = tradeWindowResize.startWidth + dx
+    if (dir.includes('s')) nextHeight = tradeWindowResize.startHeight + dy
+    if (dir.includes('w')) {
+      nextWidth = tradeWindowResize.startWidth - dx
+      nextX = tradeWindowResize.startLeft + dx
+    }
+    if (dir.includes('n')) {
+      nextHeight = tradeWindowResize.startHeight - dy
+      nextY = tradeWindowResize.startTop + dy
+    }
+
+    if (nextWidth < MIN_TRADE_WINDOW_WIDTH) {
+      if (dir.includes('w')) nextX -= MIN_TRADE_WINDOW_WIDTH - nextWidth
+      nextWidth = MIN_TRADE_WINDOW_WIDTH
+    }
+    if (nextHeight < MIN_TRADE_WINDOW_HEIGHT) {
+      if (dir.includes('n')) nextY -= MIN_TRADE_WINDOW_HEIGHT - nextHeight
+      nextHeight = MIN_TRADE_WINDOW_HEIGHT
+    }
+
+    applyTradeWindowRect(nextX, nextY, nextWidth, nextHeight)
+    return
+  }
+  if (!tradeWindowDrag) return
+  const nextX = evt.clientX - tradeWindowDrag.hostRect.left - tradeWindowDrag.offsetX
+  const nextY = evt.clientY - tradeWindowDrag.hostRect.top - tradeWindowDrag.offsetY
+  clampTradeWindowPosition(nextX, nextY)
+}
+
+function stopTradeWindowDrag() {
+  tradeWindow.dragging = false
+  tradeWindowDrag = null
+  tradeWindow.resizing = false
+  tradeWindowResize = null
 }
 
 function isSpriteKey(evt) {
@@ -422,6 +767,16 @@ function chooseKeyboardSprite(item) {
 }
 
 function onKeyboardSpriteKeydown(evt) {
+  if (!isEditableTarget(evt.target) && evt.code === 'Space') {
+    evt.preventDefault()
+    openTradeWindow(true)
+    return
+  }
+  if (!isEditableTarget(evt.target) && evt.key === 'Escape' && tradeWindow.visible) {
+    evt.preventDefault()
+    closeTradeWindow()
+    return
+  }
   if (isEditableTarget(evt.target)) return
   if (!keyboardSprite.visible) {
     if (!isSpriteKey(evt)) return
@@ -532,6 +887,10 @@ function applyAppModeSnapshot(snapshot) {
 function resetQuotePanel() {
   quoteSnapshot.value = {}
   quoteTicks.value = []
+  chartSubscribedTicket.value = null
+  chartHealth.lastBarUpdateAt = 0
+  chartHealth.lastQuoteUpdateAt = 0
+  chartHealth.lastWindowResyncAt = 0
 }
 
 function sendChartWS(type, data) {
@@ -598,10 +957,33 @@ function connectChartWS() {
       return
     }
     if (msg?.type === 'chart_bar_update' && msg.data) {
+      chartHealth.lastBarUpdateAt = Date.now()
       paneRef.value?.applyRealtimeBarUpdate?.(msg.data)
       return
     }
+    if (msg?.type === 'chart_subscribed' && msg.data) {
+      const sub = msg.data?.subscription || {}
+      const key = chartSubscriptionKey({
+        symbol: sub.symbol,
+        type: sub.type,
+        variety: sub.variety,
+        timeframe: sub.timeframe,
+        data_mode: sub.data_mode,
+      })
+      if (key === activeChartSubscriptionKey.value) {
+        const prevTicketID = String(chartSubscribedTicket.value?.ticket_id || '')
+        chartSubscribedTicket.value = msg.data
+        const nextTicketID = String(msg.data?.ticket_id || '')
+        if (nextTicketID && nextTicketID !== prevTicketID) {
+          paneRef.value?.resetComposeSession?.(nextTicketID)
+          chartHealth.lastBarUpdateAt = 0
+        }
+        paneRef.value?.setComposeTicket?.(msg.data)
+      }
+      return
+    }
     if (msg?.type === 'quote_snapshot_update' && msg.data) {
+      chartHealth.lastQuoteUpdateAt = Date.now()
       const sub = msg.data?.subscription || {}
       const key = chartSubscriptionKey({
         symbol: sub.symbol,
@@ -613,11 +995,24 @@ function connectChartWS() {
       if (key === activeChartSubscriptionKey.value) {
         quoteSnapshot.value = msg.data?.snapshot || {}
         quoteTicks.value = Array.isArray(msg.data?.ticks) ? msg.data.ticks : []
+        paneRef.value?.applyQuoteSynthesis?.(msg.data, chartSubscribedTicket.value)
+        const now = Date.now()
+        if (now - chartHealth.lastBarUpdateAt >= quoteOnlyResyncThresholdMS && now - chartHealth.lastWindowResyncAt >= quoteOnlyWindowResyncIntervalMS) {
+          chartHealth.lastWindowResyncAt = now
+          paneRef.value?.reloadRecentWindow?.()
+        }
       }
       return
     }
     if (msg?.type === 'app_mode_update' && msg.data) {
       applyAppModeSnapshot(msg.data)
+      return
+    }
+    if (
+      tradeWindow.visible &&
+      ['trade_status_update', 'trade_account_update', 'trade_position_update', 'trade_order_update', 'trade_trade_update'].includes(msg?.type)
+    ) {
+      void fetchTradeTerminal().catch(() => {})
       return
     }
     if (msg?.type === 'chart_subscription_error') {
@@ -731,9 +1126,9 @@ function onReversalAction(action) {
 
 const bodyStyle = computed(() => {
   const rightCol = layout.panes.right_watchlist_open ? `${watchlistWidth.value}px` : '48px'
-  const resizerCol = layout.panes.right_watchlist_open ? '8px' : '0px'
+  const resizerCol = layout.panes.right_watchlist_open ? '4px' : '0px'
   return {
-    gridTemplateColumns: `88px minmax(0, 1fr) ${resizerCol} ${rightCol}`,
+    gridTemplateColumns: `84px minmax(0, 1fr) ${resizerCol} ${rightCol}`,
   }
 })
 
@@ -766,7 +1161,17 @@ function startResizeWatchlist(evt) {
 watch(
   () => [scope.symbol, scope.type, scope.variety, scope.timeframe],
   async () => {
+    if (!tradeWindow.symbolLocked) {
+      tradeForm.symbol = currentTradeSymbol()
+    }
     await syncChartScopeAndReload()
+    if (tradeWindow.visible) {
+      try {
+        await fetchTradeTerminal()
+      } catch {
+        // ignore trade terminal refresh failures when hidden backend is unavailable
+      }
+    }
   },
 )
 
@@ -774,6 +1179,13 @@ watch(
   () => dataMode.value,
   async () => {
     await syncChartScopeAndReload()
+    if (tradeWindow.visible) {
+      try {
+        await fetchTradeTerminal()
+      } catch {
+        // ignore
+      }
+    }
   },
 )
 
@@ -807,8 +1219,26 @@ watch(
   },
 )
 
+watch(
+  () => quoteSnapshot.value,
+  () => {
+    if (String(tradeForm.limit_price || '').trim()) return
+    const price = pickQuoteNumber(
+      tradeTerminal.order_entry_defaults?.limit_price,
+      quoteSnapshot.value?.latest_price,
+      quoteSnapshot.value?.ask_price1,
+      quoteSnapshot.value?.bid_price1,
+    )
+    if (price > 0) tradeForm.limit_price = String(price)
+  },
+  { deep: true },
+)
+
 onMounted(async () => {
+  document.getElementById('app')?.classList.add('chart-app-root')
+  void bootKlineComposerWASM().catch(() => {})
   getParams()
+  tradeForm.symbol = currentTradeSymbol()
   try {
     const resp = await fetch('/api/app-mode')
     if (resp.ok) {
@@ -823,19 +1253,28 @@ onMounted(async () => {
   connectChartWS()
   spriteKeyHandler = (evt) => onKeyboardSpriteKeydown(evt)
   window.addEventListener('keydown', spriteKeyHandler)
+  window.addEventListener('pointermove', onTradeWindowPointerMove)
+  window.addEventListener('pointerup', stopTradeWindowDrag)
   beforeUnloadHandler = () => {
     closeChartWS()
     flushSaveOnUnload()
     if (saveTimer) clearTimeout(saveTimer)
   }
   window.addEventListener('beforeunload', beforeUnloadHandler)
+  if (autoOpenTradeWindow.value) {
+    setTimeout(() => openTradeWindow(true), 30)
+  }
 })
 
 onUnmounted(() => {
+  document.getElementById('app')?.classList.remove('chart-app-root')
   stopResizeWatchlist()
   closeChartWS()
+  stopTradeWindowDrag()
   if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
   if (spriteKeyHandler) window.removeEventListener('keydown', spriteKeyHandler)
+  window.removeEventListener('pointermove', onTradeWindowPointerMove)
+  window.removeEventListener('pointerup', stopTradeWindowDrag)
   if (beforeUnloadHandler) window.removeEventListener('beforeunload', beforeUnloadHandler)
 })
 </script>
@@ -925,6 +1364,27 @@ onUnmounted(() => {
         />
       </div>
     </div>
+
+    <TradeDockWindow
+      :visible="tradeWindow.visible"
+      :x="tradeWindow.x"
+      :y="tradeWindow.y"
+      :width="tradeWindow.width"
+      :height="tradeWindow.height"
+      :dragging="tradeWindow.dragging"
+      :resizing="tradeWindow.resizing"
+      :active-tab="tradeWindow.activeTab"
+      :order-form="tradeForm"
+      :terminal="tradeTerminal"
+      :quote-snapshot="quoteSnapshot"
+      @close="closeTradeWindow"
+      @start-drag="startTradeWindowDrag"
+      @start-resize="startTradeWindowResize"
+      @set-tab="tradeWindow.activeTab = $event"
+      @update-order-field="updateTradeFormField"
+      @cancel-order="cancelTradeOrder"
+      @quick-order="quickTradeOrder"
+    />
 
     <KeyboardSprite
       :visible="keyboardSprite.visible"

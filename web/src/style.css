@@ -210,11 +210,12 @@ select {
 }
 
 .tv-terminal {
-  height: calc(100vh - 40px);
+  position: relative;
+  height: 100vh;
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: 6px;
-  padding: 8px;
+  gap: 1px;
+  padding: 1px 3px 0;
 }
 
 .tv-terminal.theme-dark {
@@ -230,11 +231,11 @@ select {
 .tv-topbar {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr) auto auto;
-  gap: 8px;
+  gap: 3px;
   align-items: center;
-  padding: 8px 10px;
-  border: 1px solid #223247;
-  border-radius: 8px;
+  padding: 1px 5px;
+  border: 1px solid #1f2d3f;
+  border-radius: 3px;
   background: #131c2b;
 }
 
@@ -248,9 +249,14 @@ select {
   margin-left: 4px;
 }
 
+.tv-brand {
+  font-size: 11px;
+  line-height: 1.1;
+}
+
 .tv-group {
   display: flex;
-  gap: 6px;
+  gap: 2px;
   flex-wrap: nowrap;
   align-items: center;
   min-width: 0;
@@ -327,8 +333,10 @@ select {
   border: 1px solid #2e4159;
   background: #1a2637;
   color: #d6e0ee;
-  border-radius: 6px;
-  padding: 6px 10px;
+  border-radius: 3px;
+  padding: 2px 7px;
+  line-height: 1.1;
+  font-size: 11px;
   cursor: pointer;
 }
 
@@ -350,16 +358,24 @@ select {
 
 .tv-body {
   display: grid;
-  grid-template-columns: 88px minmax(0, 1fr) 8px 280px;
-  gap: 6px;
+  grid-template-columns: 84px minmax(0, 1fr) 4px 280px;
+  gap: 2px;
   min-height: 0;
   height: 100%;
 }
 
+#app.chart-app-root {
+  width: 100%;
+  height: 100vh;
+  min-height: 0;
+  padding: 0;
+  overflow: hidden;
+}
+
 .tv-left-tools {
-  border: 1px solid #223247;
-  border-radius: 8px;
-  padding: 8px 6px;
+  border: 1px solid #1f2d3f;
+  border-radius: 6px;
+  padding: 7px 5px;
   display: grid;
   gap: 6px;
   align-content: start;
@@ -393,8 +409,9 @@ select {
 }
 
 .tv-center {
-  border: 1px solid #223247;
-  border-radius: 8px;
+  position: relative;
+  border: 1px solid #1f2d3f;
+  border-radius: 6px;
   background: #101722;
   overflow: hidden;
   min-height: 0;
@@ -408,9 +425,9 @@ select {
 
 .tv-col-resizer {
   cursor: col-resize;
-  border-radius: 6px;
-  background: linear-gradient(90deg, #122035 0%, #1a2d47 100%);
-  border: 1px solid #2b3f58;
+  border-radius: 4px;
+  background: linear-gradient(90deg, #112035 0%, #18293f 100%);
+  border: 1px solid #24364c;
   transition: background 120ms ease, border-color 120ms ease;
 }
 
@@ -436,8 +453,8 @@ select {
 }
 
 .tv-watchlist {
-  border: 1px solid #223247;
-  border-radius: 8px;
+  border: 1px solid #1f2d3f;
+  border-radius: 6px;
   background: #131c2b;
   display: grid;
   grid-template-rows: auto 1fr;
@@ -1138,6 +1155,10 @@ select {
   border-radius: 0;
 }
 
+.pane-slot.with-time-gutter .chart-box {
+  height: calc(100% - 30px);
+}
+
 .right-data-mask {
   position: absolute;
   top: 2px;
@@ -1207,11 +1228,11 @@ select {
 }
 
 .pane-resizer {
-  height: 12px;
+  height: 5px;
   cursor: row-resize;
-  background: linear-gradient(180deg, #18253a 0%, #223349 100%);
-  border-top: 1px solid #2b3f58;
-  border-bottom: 1px solid #2b3f58;
+  background: linear-gradient(180deg, #172439 0%, #1b2a40 100%);
+  border-top: 1px solid #223246;
+  border-bottom: 1px solid #223246;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -1239,9 +1260,9 @@ select {
 }
 
 .pane-resizer-grip {
-  font-size: 11px;
+  font-size: 9px;
   line-height: 1;
-  letter-spacing: 2px;
+  letter-spacing: 1px;
   color: #8ea5bf;
   user-select: none;
 }
@@ -1404,13 +1425,17 @@ select {
   z-index: 7;
 }
 
+.sync-vline-unified {
+  z-index: 21;
+}
+
 .theme-light .sync-vline {
   border-left-color: #5c7897;
 }
 
 .sync-time-label {
   position: absolute;
-  bottom: 4px;
+  bottom: 3px;
   width: 148px;
   text-align: center;
   font-size: 11px;
@@ -1421,6 +1446,12 @@ select {
   border-radius: 4px;
   pointer-events: none;
   z-index: 15;
+}
+
+.pane-slot.with-time-gutter .right-data-mask,
+.pane-slot.with-time-gutter .right-data-text-layer,
+.pane-slot.with-time-gutter .volume-outline-layer {
+  bottom: 30px;
 }
 
 .theme-light .sync-time-label {

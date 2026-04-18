@@ -19,6 +19,7 @@ const (
 	colExchange     = "Exchange"
 	colTime         = "DataTime"
 	colAdjustedTime = "AdjustedTime"
+	colUpdateTime   = "UpdateTime"
 	colPeriod       = "Period"
 	colOpen         = "Open"
 	colHigh         = "High"
@@ -75,6 +76,11 @@ func newKlineStore(path string) (*klineStore, error) {
 	if err != nil {
 		logger.Error("kline store open failed", "db_path", path, "error", err)
 		return nil, fmt.Errorf("open mysql failed: %w", err)
+	}
+	if err := ensureAllFutureKlineUpdateTime(db); err != nil {
+		_ = db.Close()
+		logger.Error("kline store update-time migration failed", "db_path", path, "error", err)
+		return nil, err
 	}
 	logger.Info("kline store open success", "db_path", path, "elapsed_ms", time.Since(start).Milliseconds())
 	return &klineStore{db: db, tables: make(map[string]struct{})}, nil
@@ -311,6 +317,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
+  "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   "%s" VARCHAR(8) NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
@@ -326,6 +333,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		colExchange,
 		colTime,
 		colAdjustedTime,
+		colUpdateTime,
 		colPeriod,
 		colOpen,
 		colHigh,
@@ -339,6 +347,9 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if _, err := s.db.Exec(stmt); err != nil {
 		return fmt.Errorf("create kline table failed: %w", err)
 	}
+	if err := ensureUpdateTimeColumn(s.db, tableName); err != nil {
+		return err
+	}
 	if err := ensureAdjustedTimeIndex(s.db, tableName); err != nil {
 		return err
 	}
@@ -351,22 +362,22 @@ func (s *klineStore) DeleteRange(start time.Time, end time.Time) error {
 	if s == nil || s.db == nil {
 		return nil
 	}
-	if start.IsZero() || end.IsZero() || end.Before(start) {
+	if start.IsZero() {
 		return nil
 	}
+	_ = end
 	tables, err := s.listReplayKlineTables()
 	if err != nil {
 		return err
 	}
 	startText := start.Format("2006-01-02 15:04:05")
-	endText := end.Format("2006-01-02 15:04:05")
 	for _, tableName := range tables {
-		stmt := fmt.Sprintf(`DELETE FROM "%s" WHERE ("%s" >= ? AND "%s" <= ?) OR ("%s" >= ? AND "%s" <= ?)`,
+		stmt := fmt.Sprintf(`DELETE FROM "%s" WHERE ("%s" >= ?) OR ("%s" >= ?)`,
 			tableName,
-			colTime, colTime,
-			colAdjustedTime, colAdjustedTime,
+			colTime,
+			colAdjustedTime,
 		)
-		if _, err := s.db.Exec(stmt, startText, endText, startText, endText); err != nil {
+		if _, err := s.db.Exec(stmt, startText, startText); err != nil {
 			return fmt.Errorf("delete replay kline rows failed for %s: %w", tableName, err)
 		}
 	}
@@ -423,6 +434,40 @@ func ensureAdjustedTimeIndex(db *sql.DB, tableName string) error {
 		tableName, tableName, colAdjustedTime)
 	if _, err := db.Exec(byAdjusted); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
+	}
+	return nil
+}
+
+func ensureUpdateTimeColumn(db *sql.DB, tableName string) error {
+	has, err := dbx.TableHasColumn(db, tableName, colUpdateTime)
+	if err != nil {
+		return fmt.Errorf("check update-time column failed: %w", err)
+	}
+	if !has {
+		stmt := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+			tableName, colUpdateTime)
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("add update-time column failed: %w", err)
+		}
+		return nil
+	}
+	stmt := fmt.Sprintf(`ALTER TABLE "%s" MODIFY COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+		tableName, colUpdateTime)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("modify update-time column failed: %w", err)
+	}
+	return nil
+}
+
+func ensureAllFutureKlineUpdateTime(db *sql.DB) error {
+	tables, err := dbx.ListKlineTables(db)
+	if err != nil {
+		return fmt.Errorf("list future_kline tables failed: %w", err)
+	}
+	for _, tableName := range tables {
+		if err := ensureUpdateTimeColumn(db, tableName); err != nil {
+			return fmt.Errorf("ensure update-time for table %s failed: %w", tableName, err)
+		}
 	}
 	return nil
 }

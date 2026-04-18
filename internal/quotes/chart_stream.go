@@ -43,6 +43,10 @@ type ChartQuoteSnapshot struct {
 	Type               string   `json:"type"`
 	Variety            string   `json:"variety"`
 	DataMode           string   `json:"data_mode"`
+	TradingDay         string   `json:"trading_day,omitempty"`
+	ActionDay          string   `json:"action_day,omitempty"`
+	UpdateTime         string   `json:"update_time,omitempty"`
+	UpdateMillisec     int      `json:"update_millisec,omitempty"`
 	LatestPrice        *float64 `json:"latest_price,omitempty"`
 	BidPrice1          *float64 `json:"bid_price1,omitempty"`
 	BidVolume1         *int64   `json:"bid_volume1,omitempty"`
@@ -91,6 +95,8 @@ type chartTickSnapshot struct {
 	exchange           string
 	exchangeInstID     string
 	variety            string
+	tradingDay         string
+	actionDay          string
 	minuteTime         time.Time
 	adjustedTime       time.Time
 	adjustedTick       time.Time
@@ -206,6 +212,17 @@ func (s *ChartStream) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+// ResetReplayState clears cached chart roots so a fresh replay session does not
+// inherit stale latest bars/ticks from previous runs.
+func (s *ChartStream) ResetReplayState() {
+	if s == nil {
+		return
+	}
+	s.mu.Lock()
+	s.roots = make(map[string]*chartRootState)
+	s.mu.Unlock()
 }
 
 func SetDefaultChartStream(stream *ChartStream) {
@@ -506,6 +523,8 @@ func (s *ChartStream) HandleTick(ev tickEvent, replay bool) {
 			exchange:           strings.TrimSpace(ev.ExchangeID),
 			exchangeInstID:     strings.TrimSpace(ev.ExchangeInstID),
 			variety:            variety,
+			tradingDay:         strings.TrimSpace(ev.TradingDay),
+			actionDay:          strings.TrimSpace(ev.ActionDay),
 			minuteTime:         minuteTime,
 			adjustedTime:       adjustedTime,
 			adjustedTick:       adjustedTickTime,
@@ -879,6 +898,8 @@ func (s *ChartStream) updateContractQuoteLocked(root *chartRootState, ev tickEve
 		exchange:           strings.TrimSpace(ev.ExchangeID),
 		exchangeInstID:     strings.TrimSpace(ev.ExchangeInstID),
 		variety:            root.variety,
+		tradingDay:         strings.TrimSpace(ev.TradingDay),
+		actionDay:          strings.TrimSpace(ev.ActionDay),
 		minuteTime:         minuteTime,
 		adjustedTime:       adjustedTime,
 		adjustedTick:       combineTickTimestamp(adjustedTime, ev.UpdateTime, ev.UpdateMillisec),
@@ -1122,6 +1143,10 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 			snapshot.ChangePct = floatPtr(change / referencePrice)
 		}
 		snapshot.Time = formatQuoteTickTime(tick.adjustedTick, tick.updateTime, tick.updateMillisec)
+		snapshot.TradingDay = strings.TrimSpace(tick.tradingDay)
+		snapshot.ActionDay = strings.TrimSpace(tick.actionDay)
+		snapshot.UpdateTime = strings.TrimSpace(tick.updateTime)
+		snapshot.UpdateMillisec = tick.updateMillisec
 	} else if tick, ok := latestL9Tick(root); ok {
 		snapshot.LatestPrice = floatPtr(tick.price)
 		if tick.preSettlementPrice > 0 {
@@ -1153,6 +1178,10 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 			snapshot.ChangePct = floatPtr(change / referencePrice)
 		}
 		snapshot.Time = formatQuoteTickTime(tick.adjustedTick, tick.updateTime, tick.updateMillisec)
+		snapshot.TradingDay = strings.TrimSpace(tick.tradingDay)
+		snapshot.ActionDay = strings.TrimSpace(tick.actionDay)
+		snapshot.UpdateTime = strings.TrimSpace(tick.updateTime)
+		snapshot.UpdateMillisec = tick.updateMillisec
 	} else if root.currentPartial == nil && len(root.history1m) == 0 {
 		return ChartQuoteUpdate{}, false
 	}

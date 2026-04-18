@@ -19,6 +19,7 @@ const (
 	colExchange     = "Exchange"
 	colDataTime     = "DataTime"
 	colAdjustedTime = "AdjustedTime"
+	colUpdateTime   = "UpdateTime"
 	colPeriod       = "Period"
 	colOpen         = "Open"
 	colHigh         = "High"
@@ -635,6 +636,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
+  "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   "%s" VARCHAR(8) NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
@@ -650,6 +652,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		colExchange,
 		colDataTime,
 		colAdjustedTime,
+		colUpdateTime,
 		colPeriod,
 		colOpen,
 		colHigh,
@@ -662,6 +665,30 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure mm kline table failed: %w", err)
+	}
+	if err := ensureUpdateTimeColumnMM(db, table); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureUpdateTimeColumnMM(db *sql.DB, table string) error {
+	has, err := dbx.TableHasColumn(db, table, colUpdateTime)
+	if err != nil {
+		return fmt.Errorf("check update-time column failed: %w", err)
+	}
+	if !has {
+		stmt := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+			table, colUpdateTime)
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("add update-time column failed: %w", err)
+		}
+		return nil
+	}
+	stmt := fmt.Sprintf(`ALTER TABLE "%s" MODIFY COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+		table, colUpdateTime)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("modify update-time column failed: %w", err)
 	}
 	return nil
 }

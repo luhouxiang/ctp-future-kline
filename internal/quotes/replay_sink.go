@@ -132,17 +132,17 @@ func (s *ReplaySink) PrepareReplayWindow(req replay.StartRequest) error {
 		start = req.StartTime
 		end = req.EndTime
 	}
-	if start == nil || end == nil || start.IsZero() || end.IsZero() || end.Before(*start) {
+	if start == nil || start.IsZero() {
 		logger.Info("replay window cleanup skipped", "reason", "time_range_unavailable")
 		return nil
 	}
-	if err := s.store.DeleteRange(*start, *end); err != nil {
+	if err := s.store.DeleteRange(*start, time.Time{}); err != nil {
 		return err
 	}
 	logger.Info(
 		"replay window cleanup completed",
 		"start_time", start.Format(time.RFC3339Nano),
-		"end_time", end.Format(time.RFC3339Nano),
+		"end_time", "MAX",
 	)
 	return nil
 }

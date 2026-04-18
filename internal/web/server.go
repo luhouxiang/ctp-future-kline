@@ -89,6 +89,8 @@ type Server struct {
 	// chartStream 负责把实时/replay K 线事件分发给图表 websocket。
 	chartStream *quotes.ChartStream
 	replaySink  *quotes.ReplaySink
+	// subscriptionTickets 管理 chart 订阅票据及其交易时段快照。
+	subscriptionTickets *subscriptionTicketManager
 }
 
 type wsClient struct {
@@ -132,6 +134,7 @@ func NewServer(cfg config.AppConfig) *Server {
 		currentMode:         appmode.LiveReal,
 		sessions:            make(map[string]*importer.TDXImportSession),
 		wsConns:             make(map[*websocket.Conn]*wsClient),
+		subscriptionTickets: newSubscriptionTicketManager(sharedDSN),
 	}
 	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
@@ -309,8 +312,10 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/orders/audit", s.handleOrdersAudit)
 	mux.HandleFunc("/api/trade/status", s.handleTradeStatus)
 	mux.HandleFunc("/api/trade/config", s.handleTradeConfig)
+	mux.HandleFunc("/api/trade/terminal", s.handleTradeTerminal)
 	mux.HandleFunc("/api/trade/account", s.handleTradeAccount)
 	mux.HandleFunc("/api/trade/positions", s.handleTradePositions)
+	mux.HandleFunc("/api/trade/positions/", s.handleTradePositionAction)
 	mux.HandleFunc("/api/trade/orders", s.handleTradeOrders)
 	mux.HandleFunc("/api/trade/orders/", s.handleTradeOrderAction)
 	mux.HandleFunc("/api/trade/trades", s.handleTradeTrades)
@@ -860,6 +865,20 @@ func (s *Server) handleChartSubscribe(conn *websocket.Conn, raw json.RawMessage)
 		s.chartStream.RemoveInterest(sub)
 		return
 	}
+	subPayload := map[string]any{
+		"symbol":    sub.Symbol,
+		"type":      sub.Type,
+		"variety":   sub.Variety,
+		"timeframe": sub.Timeframe,
+		"data_mode": sub.DataMode,
+	}
+	if s.subscriptionTickets != nil {
+		ack := s.subscriptionTickets.Resolve(s.currentOwner(), subPayload, sub.Variety, s.currentAppMode())
+		_ = s.writeConnJSON(conn, map[string]any{
+			"type": "chart_subscribed",
+			"data": ack,
+		})
+	}
 	if update, ok := s.chartStream.SnapshotBar(sub); ok {
 		_ = s.writeConnJSON(conn, map[string]any{
 			"type": "chart_bar_update",
@@ -1373,6 +1392,7 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.TickDir) == "" {
 		req.TickDir = filepath.Join(s.cfg.CTP.FlowPath, "ticks")
 	}
+	req.SharedMetaDSN = strings.TrimSpace(s.sharedDSN)
 	if s.tradePaperReplay != nil {
 		if err := s.tradePaperReplay.ResetPaperReplay(); err != nil {
 			http.Error(w, "reset replay paper account failed: "+err.Error(), http.StatusInternalServerError)
@@ -1384,6 +1404,9 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "prepare replay window failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+	}
+	if s.chartStream != nil {
+		s.chartStream.ResetReplayState()
 	}
 	if !req.FullReplay {
 		logger.Info("replay start requested without full replay", "tick_dir", req.TickDir)
@@ -2021,6 +2044,216 @@ func (s *Server) handleTradeConfig(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleTradeTerminal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	snap, err := s.buildTradeTerminalSnapshot(r, svc)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, snap)
+}
+
+func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service) (trade.TerminalSnapshot, error) {
+	var out trade.TerminalSnapshot
+	account, err := svc.Account()
+	if err != nil {
+		return out, err
+	}
+	positions, err := svc.Positions()
+	if err != nil {
+		return out, err
+	}
+	orders, err := svc.Orders(500)
+	if err != nil {
+		return out, err
+	}
+	trades, err := svc.Trades(200)
+	if err != nil {
+		return out, err
+	}
+
+	symbol := strings.TrimSpace(r.URL.Query().Get("symbol"))
+	quote := s.chartQuoteSnapshotForSymbol(symbol)
+	mode := appmode.Normalize(s.currentAppMode())
+	replayTime := ""
+	if mode == appmode.ReplayPaper && s.replay != nil {
+		if ts := s.replay.Status().CurrentSimTime; ts != nil && !ts.IsZero() {
+			replayTime = ts.Format(time.RFC3339)
+		}
+	}
+	working := make([]trade.TerminalWorkingOrder, 0)
+	pendingClose := make(map[string]map[string]int)
+	for _, item := range orders {
+		remaining := item.VolumeTotalOriginal - item.VolumeTraded - item.VolumeCanceled
+		if remaining < 0 {
+			remaining = 0
+		}
+		if !isFinalOrderStatus(item.OrderStatus) {
+			working = append(working, trade.TerminalWorkingOrder{
+				OrderRecord:     item,
+				RemainingVolume: remaining,
+			})
+		}
+		if remaining <= 0 || item.OffsetFlag == "open" {
+			continue
+		}
+		closeDir := "long"
+		if item.Direction == "buy" {
+			closeDir = "short"
+		}
+		if pendingClose[item.Symbol] == nil {
+			pendingClose[item.Symbol] = make(map[string]int)
+		}
+		pendingClose[item.Symbol][closeDir] += remaining
+	}
+
+	terminalPositions := make([]trade.TerminalPosition, 0, len(positions))
+	for _, item := range positions {
+		avgPrice := 0.0
+		if item.Position > 0 && item.PositionCost > 0 {
+			avgPrice = item.PositionCost / float64(item.Position)
+		}
+		mark := chartQuoteMarkPrice(item.Direction, quote, avgPrice)
+		floatPnL := 0.0
+		if item.Position > 0 {
+			if item.Direction == "short" {
+				floatPnL = (avgPrice - mark) * float64(item.Position)
+			} else {
+				floatPnL = (mark - avgPrice) * float64(item.Position)
+			}
+		}
+		frozen := pendingClose[item.Symbol][item.Direction]
+		closable := item.Position - frozen
+		if closable < 0 {
+			closable = 0
+		}
+		terminalPositions = append(terminalPositions, trade.TerminalPosition{
+			PositionSnapshot: item,
+			Closable:         closable,
+			FrozenVolume:     frozen,
+			AvgPrice:         avgPrice,
+			MarketPrice:      mark,
+			FloatPnL:         floatPnL,
+			MarketValue:      mark * float64(item.Position),
+		})
+	}
+
+	riskRatio := 0.0
+	if account.Balance > 0 {
+		riskRatio = account.Margin / account.Balance
+	}
+	out.Summary = trade.TerminalSummary{
+		AccountID:      account.AccountID,
+		Mode:           mode,
+		TradingDay:     svc.Status().TradingDay,
+		ReplayTime:     replayTime,
+		Symbol:         symbol,
+		Balance:        account.Balance,
+		Available:      account.Available,
+		Margin:         account.Margin,
+		FrozenCash:     account.FrozenCash,
+		PositionProfit: account.PositionProfit,
+		CloseProfit:    account.CloseProfit,
+		RiskRatio:      riskRatio,
+		UpdatedAt:      account.UpdatedAt,
+	}
+	out.OrderEntryDefaults = trade.TerminalOrderEntryDefaults{
+		AccountID:  account.AccountID,
+		Symbol:     symbol,
+		ExchangeID: "",
+		Volume:     1,
+		LimitPrice: chartQuoteLimitPrice(quote),
+	}
+	out.WorkingOrders = working
+	out.Positions = terminalPositions
+	out.Orders = orders
+	out.Trades = trades
+	out.Funds = trade.TerminalFunds{
+		AccountID:      account.AccountID,
+		StaticBalance:  account.Balance - account.PositionProfit,
+		DynamicBalance: account.Balance,
+		Available:      account.Available,
+		FrozenCash:     account.FrozenCash,
+		Margin:         account.Margin,
+		Commission:     account.Commission,
+		CloseProfit:    account.CloseProfit,
+		PositionProfit: account.PositionProfit,
+		RiskRatio:      riskRatio,
+		UpdatedAt:      account.UpdatedAt,
+	}
+	return out, nil
+}
+
+func chartQuoteMarkPrice(direction string, quote quotes.ChartQuoteSnapshot, fallback float64) float64 {
+	if direction == "short" {
+		if quote.AskPrice1 != nil && *quote.AskPrice1 > 0 {
+			return *quote.AskPrice1
+		}
+		if quote.BidPrice1 != nil && *quote.BidPrice1 > 0 {
+			return *quote.BidPrice1
+		}
+	} else {
+		if quote.BidPrice1 != nil && *quote.BidPrice1 > 0 {
+			return *quote.BidPrice1
+		}
+		if quote.AskPrice1 != nil && *quote.AskPrice1 > 0 {
+			return *quote.AskPrice1
+		}
+	}
+	if quote.LatestPrice != nil && *quote.LatestPrice > 0 {
+		return *quote.LatestPrice
+	}
+	return fallback
+}
+
+func chartQuoteLimitPrice(quote quotes.ChartQuoteSnapshot) float64 {
+	if quote.LatestPrice != nil && *quote.LatestPrice > 0 {
+		return *quote.LatestPrice
+	}
+	if quote.AskPrice1 != nil && *quote.AskPrice1 > 0 {
+		return *quote.AskPrice1
+	}
+	if quote.BidPrice1 != nil && *quote.BidPrice1 > 0 {
+		return *quote.BidPrice1
+	}
+	return 0
+}
+
+func isFinalOrderStatus(status string) bool {
+	switch strings.TrimSpace(strings.ToLower(status)) {
+	case "all_traded", "canceled", "rejected":
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) chartQuoteSnapshotForSymbol(symbol string) quotes.ChartQuoteSnapshot {
+	symbol = strings.TrimSpace(strings.ToLower(symbol))
+	if symbol == "" || s.chartStream == nil {
+		return quotes.ChartQuoteSnapshot{}
+	}
+	sub := quotes.ChartSubscription{
+		Symbol:    symbol,
+		Type:      "contract",
+		Variety:   "",
+		Timeframe: "1m",
+		DataMode:  s.currentChartDataMode(),
+	}
+	if update, ok := s.chartStream.SnapshotQuote(sub); ok {
+		return update.Snapshot
+	}
+	return quotes.ChartQuoteSnapshot{}
+}
+
 func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2053,6 +2286,68 @@ func (s *Server) handleTradePositions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleTradePositionAction(w http.ResponseWriter, r *http.Request) {
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	path := strings.TrimPrefix(r.URL.Path, "/api/trade/positions/")
+	parts := strings.Split(path, "/")
+	if len(parts) != 2 || strings.TrimSpace(parts[0]) == "" || parts[1] != "close" {
+		http.Error(w, "invalid path", http.StatusBadRequest)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req struct {
+		AccountID  string  `json:"account_id"`
+		ExchangeID string  `json:"exchange_id"`
+		Direction  string  `json:"direction"`
+		OffsetFlag string  `json:"offset_flag"`
+		Price      float64 `json:"price"`
+		Volume     int     `json:"volume"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	symbol := strings.TrimSpace(parts[0])
+	if symbol == "" || req.Volume <= 0 || req.Price <= 0 {
+		http.Error(w, "symbol/volume/price is invalid", http.StatusBadRequest)
+		return
+	}
+	direction := "sell"
+	if strings.EqualFold(req.Direction, "short") {
+		direction = "buy"
+	}
+	offsetFlag := strings.TrimSpace(req.OffsetFlag)
+	if offsetFlag == "" {
+		offsetFlag = "close"
+	}
+	accountID := strings.TrimSpace(req.AccountID)
+	if accountID == "" {
+		accountID = s.tradeAccountIDForMode(s.currentAppMode())
+	}
+	rec, err := svc.SubmitOrder(r.Context(), trade.SubmitOrderRequest{
+		AccountID:  accountID,
+		Symbol:     symbol,
+		ExchangeID: strings.TrimSpace(req.ExchangeID),
+		Direction:  direction,
+		OffsetFlag: offsetFlag,
+		LimitPrice: req.Price,
+		Volume:     req.Volume,
+		Reason:     "manual",
+		ClientTag:  "chart-trade-dock-close",
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, rec)
 }
 
 func (s *Server) handleTradeOrders(w http.ResponseWriter, r *http.Request) {

@@ -15,11 +15,14 @@ import (
 	"unicode"
 
 	"ctp-future-kline/internal/bus"
+	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
+	"ctp-future-kline/internal/sessiontime"
 )
 
 const (
-	tickCSVSource = "replay.tickcsv"
+	tickCSVSource                   = "replay.tickcsv"
+	invalidTickSessionGapMinutesCSV = 1
 )
 
 // tickCSVEvent 表示从 CSV 中读出并标准化后的回放事件。
@@ -55,6 +58,10 @@ type TickCSVWindow struct {
 	FileCount       int
 	InstrumentCount int
 	EventCount      int
+}
+
+type tickCSVSessionGuard struct {
+	sessionsByVariety map[string][]sessiontime.Range
 }
 
 // tickPayload 是写入 CSV 后再回放时恢复出来的 payload 结构。
@@ -206,6 +213,10 @@ func loadTickCSVEvents(req StartRequest) (tickCSVLoadResult, error) {
 	if dir == "" {
 		return tickCSVLoadResult{}, fmt.Errorf("tick_dir is required")
 	}
+	guard, err := newTickCSVSessionGuard(req)
+	if err != nil {
+		return tickCSVLoadResult{}, err
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return tickCSVLoadResult{}, fmt.Errorf("read tick_dir failed: %w", err)
@@ -225,17 +236,26 @@ func loadTickCSVEvents(req StartRequest) (tickCSVLoadResult, error) {
 
 	events := make([]tickCSVEvent, 0, len(names)*64)
 	instruments := make(map[string]struct{}, len(names))
+	droppedBySession := 0
 	for _, name := range names {
-		fileEvents, err := loadTickCSVFile(filepath.Join(dir, name), name, req)
+		fileEvents, dropped, err := loadTickCSVFile(filepath.Join(dir, name), name, req, guard)
 		if err != nil {
 			return tickCSVLoadResult{}, err
 		}
 		events = append(events, fileEvents...)
+		droppedBySession += dropped
 		for _, item := range fileEvents {
 			if item.InstrumentID != "" {
 				instruments[item.InstrumentID] = struct{}{}
 			}
 		}
+	}
+	if droppedBySession > 0 {
+		logger.Warn("replay tick csv dropped out-of-session ticks",
+			"tick_dir", dir,
+			"dropped_count", droppedBySession,
+			"distance_limit_minutes", invalidTickSessionGapMinutesCSV,
+		)
 	}
 
 	sort.SliceStable(events, func(i, j int) bool {
@@ -289,10 +309,10 @@ func InspectTickCSVWindow(req StartRequest) (TickCSVWindow, error) {
 // 1. CSV 字段 -> tickPayload
 // 2. tickPayload -> ev.Payload
 // 3. ReceivedAt -> ev.OccurredAt / ev.ProducedAt
-func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent, error) {
+func loadTickCSVFile(path string, name string, req StartRequest, guard *tickCSVSessionGuard) ([]tickCSVEvent, int, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open tick csv failed: %s: %w", name, err)
+		return nil, 0, fmt.Errorf("open tick csv failed: %s: %w", name, err)
 	}
 	defer f.Close()
 
@@ -302,26 +322,27 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 	header, err := reader.Read()
 	if err != nil {
 		if err == io.EOF {
-			return nil, nil
+			return nil, 0, nil
 		}
-		return nil, fmt.Errorf("read tick csv header failed: %s: %w", name, err)
+		return nil, 0, fmt.Errorf("read tick csv header failed: %s: %w", name, err)
 	}
 	index := buildTickCSVHeaderIndex(header)
 
 	topics := bus.BuildSet(req.Topics)
 	if len(topics) > 0 {
 		if _, ok := topics[bus.TopicTick]; !ok {
-			return nil, nil
+			return nil, 0, nil
 		}
 	}
 	sources := bus.BuildSet(req.Sources)
 	if len(sources) > 0 {
 		if _, ok := sources[tickCSVSource]; !ok {
-			return nil, nil
+			return nil, 0, nil
 		}
 	}
 
 	out := make([]tickCSVEvent, 0, 256)
+	droppedBySession := 0
 	firstReadLogged := false
 	firstParsedLogged := false
 	firstBusEventLogged := false
@@ -329,10 +350,10 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 	for {
 		record, err := reader.Read()
 		if err == io.EOF {
-			return out, nil
+			return out, droppedBySession, nil
 		}
 		if err != nil {
-			return nil, fmt.Errorf("read tick csv record failed: %s:%d: %w", name, lineNo+1, err)
+			return nil, droppedBySession, fmt.Errorf("read tick csv record failed: %s:%d: %w", name, lineNo+1, err)
 		}
 		lineNo++
 		if len(record) == 0 {
@@ -344,7 +365,11 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 
 		payload, occurredAt, err := parseTickCSVRecord(record, index)
 		if err != nil {
-			return nil, fmt.Errorf("parse tick csv record failed: %s:%d: %w", name, lineNo, err)
+			return nil, droppedBySession, fmt.Errorf("parse tick csv record failed: %s:%d: %w", name, lineNo, err)
+		}
+		if guard != nil && guard.ShouldDrop(payload, occurredAt) {
+			droppedBySession++
+			continue
 		}
 		if !firstReadLogged {
 			logger.Info(
@@ -377,7 +402,7 @@ func loadTickCSVFile(path string, name string, req StartRequest) ([]tickCSVEvent
 
 		raw, err := json.Marshal(payload)
 		if err != nil {
-			return nil, fmt.Errorf("marshal tick payload failed: %s:%d: %w", name, lineNo, err)
+			return nil, droppedBySession, fmt.Errorf("marshal tick payload failed: %s:%d: %w", name, lineNo, err)
 		}
 		if !firstBusEventLogged {
 			logger.Info(
@@ -629,6 +654,112 @@ func parseTickCSVRecord(record []string, index map[string]int) (tickPayload, tim
 		AskVolume1:         askVolume1,
 	}
 	return payload, receivedAt, nil
+}
+
+func newTickCSVSessionGuard(req StartRequest) (*tickCSVSessionGuard, error) {
+	dsn := strings.TrimSpace(req.SharedMetaDSN)
+	if dsn == "" {
+		return nil, nil
+	}
+	db, err := dbx.Open(dsn)
+	if err != nil {
+		return nil, fmt.Errorf("open shared_meta dsn for replay tick guard failed: %w", err)
+	}
+	defer db.Close()
+	rows, err := db.Query(`SELECT variety, session_json, is_completed FROM trading_sessions`)
+	if err != nil {
+		return nil, fmt.Errorf("query trading_sessions failed: %w", err)
+	}
+	defer rows.Close()
+	out := make(map[string][]sessiontime.Range, 64)
+	for rows.Next() {
+		variety := ""
+		raw := ""
+		completed := false
+		if err := rows.Scan(&variety, &raw, &completed); err != nil {
+			return nil, fmt.Errorf("scan trading_sessions failed: %w", err)
+		}
+		key := strings.ToLower(strings.TrimSpace(variety))
+		if key == "" || !completed {
+			continue
+		}
+		ranges, err := sessiontime.DecodeSessionJSON(raw)
+		if err != nil || len(ranges) == 0 {
+			continue
+		}
+		out[key] = ranges
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate trading_sessions failed: %w", err)
+	}
+	if len(out) == 0 {
+		logger.Warn("replay tick session guard fallback to defaults", "reason", "trading_sessions_empty")
+	}
+	return &tickCSVSessionGuard{sessionsByVariety: out}, nil
+}
+
+func (g *tickCSVSessionGuard) ShouldDrop(payload tickPayload, occurredAt time.Time) bool {
+	if g == nil {
+		return false
+	}
+	variety := tickCSVVariety(payload.InstrumentID)
+	if variety == "" {
+		return false
+	}
+	sessions := sessiontime.DefaultRanges()
+	if specific, ok := g.sessionsByVariety[variety]; ok && len(specific) > 0 {
+		sessions = specific
+	}
+	dist, err := tickCSVSessionDistanceMinutes(payload.UpdateTime, occurredAt, sessions)
+	if err != nil {
+		return false
+	}
+	return dist > invalidTickSessionGapMinutesCSV
+}
+
+func tickCSVSessionDistanceMinutes(updateTime string, occurredAt time.Time, sessions []sessiontime.Range) (int, error) {
+	raw := strings.TrimSpace(updateTime)
+	if raw == "" {
+		if occurredAt.IsZero() {
+			return 0, fmt.Errorf("empty update_time and occurred_at")
+		}
+		raw = occurredAt.In(time.Local).Format("15:04:05")
+	}
+	layouts := []string{"15:04:05", "15:04:05.000", "15:04"}
+	var clockTime time.Time
+	var err error
+	for _, layout := range layouts {
+		clockTime, err = time.ParseInLocation(layout, raw, time.Local)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return 0, err
+	}
+	rawMinute := clockTime.Hour()*60 + clockTime.Minute()
+	return sessiontime.DistanceToTradingWindow(rawMinute, sessions), nil
+}
+
+func tickCSVVariety(instrumentID string) string {
+	s := strings.ToLower(strings.TrimSpace(instrumentID))
+	if s == "" {
+		return ""
+	}
+	if strings.HasSuffix(s, "l9") && len(s) > 2 {
+		s = strings.TrimSuffix(s, "l9")
+	}
+	for i := 0; i < len(s); i += 1 {
+		ch := s[i]
+		if ch >= 'a' && ch <= 'z' {
+			continue
+		}
+		if i == 0 {
+			return ""
+		}
+		return s[:i]
+	}
+	return s
 }
 
 // parseTickCSVTime 兼容多种时间布局，便于同时读取历史老文件和新录制文件。

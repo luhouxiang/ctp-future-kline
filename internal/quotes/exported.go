@@ -26,6 +26,7 @@ const (
 	ColDataTime     = colTime
 	ColTime         = colTime
 	ColAdjustedTime = colAdjustedTime
+	ColUpdateTime   = colUpdateTime
 	ColPeriod       = colPeriod
 	ColOpen         = colOpen
 	ColHigh         = colHigh

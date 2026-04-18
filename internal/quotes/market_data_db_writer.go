@@ -3,6 +3,7 @@
 package quotes
 
 import (
+	dbx "ctp-future-kline/internal/db"
 	"database/sql"
 	"fmt"
 	"sort"
@@ -782,6 +783,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
+  "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   "%s" VARCHAR(8) NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
@@ -797,6 +799,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		colExchange,
 		colTime,
 		colAdjustedTime,
+		colUpdateTime,
 		colPeriod,
 		colOpen,
 		colHigh,
@@ -809,6 +812,30 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("create mm table failed: %w", err)
+	}
+	if err := ensureUpdateTimeColumnForTable(db, tableName); err != nil {
+		return err
+	}
+	return nil
+}
+
+func ensureUpdateTimeColumnForTable(db *sql.DB, tableName string) error {
+	has, err := dbx.TableHasColumn(db, tableName, colUpdateTime)
+	if err != nil {
+		return fmt.Errorf("check update-time column failed: %w", err)
+	}
+	if !has {
+		stmt := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+			tableName, colUpdateTime)
+		if _, err := db.Exec(stmt); err != nil {
+			return fmt.Errorf("add update-time column failed: %w", err)
+		}
+		return nil
+	}
+	stmt := fmt.Sprintf(`ALTER TABLE "%s" MODIFY COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
+		tableName, colUpdateTime)
+	if _, err := db.Exec(stmt); err != nil {
+		return fmt.Errorf("modify update-time column failed: %w", err)
 	}
 	return nil
 }
