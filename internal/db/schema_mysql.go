@@ -141,7 +141,7 @@ func sharedMetaSchemaStatements() []string {
   trading_day VARCHAR(16) NOT NULL DEFAULT '',
   sync_trading_day VARCHAR(16) NOT NULL,
   updated_at DATETIME NOT NULL,
-  PRIMARY KEY (instrument_id, exchange_id)
+  PRIMARY KEY (sync_trading_day, instrument_id, exchange_id)
 )`,
 		`CREATE INDEX idx_ctp_instruments_sync_day ON ctp_instruments(sync_trading_day, updated_at)`,
 		`CREATE INDEX idx_ctp_instruments_trading_day ON ctp_instruments(trading_day, updated_at)`,
@@ -162,7 +162,7 @@ func sharedMetaSchemaStatements() []string {
   close_today_ratio_by_volume DOUBLE NOT NULL DEFAULT 0,
   sync_trading_day VARCHAR(16) NOT NULL,
   updated_at DATETIME NOT NULL,
-  PRIMARY KEY (instrument_id, exchange_id)
+  PRIMARY KEY (sync_trading_day, instrument_id, exchange_id)
 )`,
 		`CREATE INDEX idx_ctp_commission_rates_sync_day ON ctp_commission_rates(sync_trading_day, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS ctp_margin_rates (
@@ -205,6 +205,12 @@ func sharedMetaSchemaStatements() []string {
 
 func ensureSharedMetaTablesEvolution(db *sql.DB) error {
 	if err := ensureColumn(db, "ctp_instruments", "trading_day", "ALTER TABLE ctp_instruments ADD COLUMN trading_day VARCHAR(16) NOT NULL DEFAULT '' AFTER combination_type"); err != nil {
+		return err
+	}
+	if err := ensurePrimaryKey(db, "ctp_instruments", []string{"sync_trading_day", "instrument_id", "exchange_id"}); err != nil {
+		return err
+	}
+	if err := ensurePrimaryKey(db, "ctp_commission_rates", []string{"sync_trading_day", "instrument_id", "exchange_id"}); err != nil {
 		return err
 	}
 	if _, err := db.Exec(`UPDATE ctp_instruments SET trading_day=sync_trading_day WHERE (trading_day IS NULL OR trading_day='') AND sync_trading_day<>''`); err != nil {

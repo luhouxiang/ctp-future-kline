@@ -752,9 +752,7 @@ func (c *AppConfig) Validate() error {
 	if c.Trade.QueryTimeoutMS <= 0 {
 		c.Trade.QueryTimeoutMS = 5000
 	}
-	if stringsTrim(c.Trade.RateProbeSymbol) == "" {
-		c.Trade.RateProbeSymbol = "ag2605"
-	}
+	c.Trade.RateProbeSymbol = stringsTrim(c.Trade.RateProbeSymbol)
 	if c.Trade.MaxOrderVolume <= 0 {
 		return errors.New("trade.max_order_volume must be > 0")
 	}

@@ -317,7 +317,7 @@ func (s *Service) buildMissingCommissionQueue(tradingDay string) ([]instrumentKe
 	if err != nil {
 		return nil, err
 	}
-	return prioritizeProbeSymbol(missing, s.cfg.RateProbeSymbol), nil
+	return missing, nil
 }
 
 func (s *Service) buildMissingMarginQueue(tradingDay string) ([]instrumentKey, error) {
@@ -332,7 +332,7 @@ func (s *Service) buildMissingMarginQueue(tradingDay string) ([]instrumentKey, e
 	if err != nil {
 		return nil, err
 	}
-	return prioritizeProbeSymbol(missing, s.cfg.RateProbeSymbol), nil
+	return missing, nil
 }
 
 func prioritizeProbeSymbol(items []instrumentKey, probe string) []instrumentKey {

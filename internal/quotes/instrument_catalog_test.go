@@ -221,7 +221,7 @@ func openInstrumentCatalogTestDB(t *testing.T) *sql.DB {
   combination_type TEXT NOT NULL,
   sync_trading_day TEXT NOT NULL,
   updated_at DATETIME NOT NULL,
-  PRIMARY KEY (instrument_id, exchange_id)
+  PRIMARY KEY (sync_trading_day, instrument_id, exchange_id)
 )`,
 		`CREATE TABLE ctp_instrument_sync_log (
   trading_day TEXT PRIMARY KEY,

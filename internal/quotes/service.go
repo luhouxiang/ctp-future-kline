@@ -238,15 +238,31 @@ func (s *Service) syncCommissionCatalog(api ctp.CThostFtdcTraderApi, spi *queryS
 	}
 	start := time.Now()
 	spi.resetCommissionRateSnapshots()
-
-	targetInstrument, targetExchange := pickCommissionProbeTarget(instruments, "ag2605")
-	if targetInstrument == "" {
-		logger.Warn("commission catalog probe skipped: no instrument available", "trading_day", tradingDay)
+	targets := buildCommissionTargets(instruments)
+	if len(targets) == 0 {
+		logger.Warn("commission catalog sync skipped: no valid instrument target", "trading_day", tradingDay)
 		return nil
 	}
-	queryMode := "single_probe"
-	if err := s.queryInstrumentCommissionRateWait(api, spi, targetInstrument, targetExchange, 12*time.Second); err != nil {
-		return err
+	queryMode := "per_instrument"
+	queried := 0
+	failures := 0
+	for idx, item := range targets {
+		if err := s.queryInstrumentCommissionRateWait(api, spi, item.ID, item.ExchangeID, 12*time.Second); err != nil {
+			failures++
+			logger.Error(
+				"commission catalog query failed",
+				"trading_day", strings.TrimSpace(tradingDay),
+				"instrument", strings.TrimSpace(item.ID),
+				"exchange", strings.TrimSpace(item.ExchangeID),
+				"error", err,
+			)
+		} else {
+			queried++
+		}
+		// Respect CTP query flow-control: at most 1 query/second.
+		if idx < len(targets)-1 {
+			time.Sleep(time.Second)
+		}
 	}
 	snapshots := spi.commissionRateSnapshots()
 	written, err := repo.SyncCommissionRates(tradingDay, snapshots, time.Now())
@@ -267,9 +283,9 @@ func (s *Service) syncCommissionCatalog(api ctp.CThostFtdcTraderApi, spi *queryS
 		"commission catalog sync summary",
 		"trading_day", tradingDay,
 		"query_mode", queryMode,
-		"probe_instrument", targetInstrument,
-		"probe_exchange", targetExchange,
-		"queried_instruments", 1,
+		"queried_instruments", queried,
+		"query_failures", failures,
+		"target_instruments", len(targets),
 		"snapshot_rows", len(snapshots),
 		"written_rows", written,
 		"exchange_distribution", exchanges,
@@ -313,20 +329,26 @@ func (s *Service) queryInstrumentCommissionRateWait(api ctp.CThostFtdcTraderApi,
 	}
 }
 
-func pickCommissionProbeTarget(instruments []instrumentInfo, preferred string) (instrumentID string, exchangeID string) {
-	preferred = strings.TrimSpace(preferred)
-	for _, item := range instruments {
-		if strings.EqualFold(strings.TrimSpace(item.ID), preferred) {
-			return strings.TrimSpace(item.ID), strings.TrimSpace(item.ExchangeID)
-		}
+func buildCommissionTargets(instruments []instrumentInfo) []instrumentInfo {
+	if len(instruments) == 0 {
+		return nil
 	}
+	seen := make(map[string]struct{}, len(instruments))
+	out := make([]instrumentInfo, 0, len(instruments))
 	for _, item := range instruments {
-		if strings.TrimSpace(item.ID) == "" {
+		id := strings.TrimSpace(item.ID)
+		exchange := strings.TrimSpace(item.ExchangeID)
+		if id == "" || exchange == "" {
 			continue
 		}
-		return strings.TrimSpace(item.ID), strings.TrimSpace(item.ExchangeID)
+		key := strings.ToLower(id) + "|" + exchange
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, instrumentInfo{ID: id, ExchangeID: exchange})
 	}
-	return "", ""
+	return out
 }
 
 func (s *Service) queryCallbacksWaitTimeout() time.Duration {

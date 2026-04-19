@@ -44,9 +44,8 @@ func (c *rateCatalog) listInstrumentsByTradingDay(tradingDay string) ([]instrume
 	rows, err := c.db.Query(
 		`SELECT instrument_id,exchange_id
 FROM ctp_instruments
-WHERE trading_day=? OR sync_trading_day=?
+WHERE sync_trading_day=?
 ORDER BY exchange_id ASC, instrument_id ASC`,
-		strings.TrimSpace(tradingDay),
 		strings.TrimSpace(tradingDay),
 	)
 	if err != nil {
@@ -60,10 +59,12 @@ ORDER BY exchange_id ASC, instrument_id ASC`,
 		if err := rows.Scan(&item.InstrumentID, &item.ExchangeID); err != nil {
 			return nil, fmt.Errorf("scan instruments by trading day failed: %w", err)
 		}
-		k := strings.ToLower(strings.TrimSpace(item.InstrumentID)) + "|" + strings.TrimSpace(item.ExchangeID)
-		if k == "|" {
+		item.InstrumentID = strings.TrimSpace(item.InstrumentID)
+		item.ExchangeID = strings.TrimSpace(item.ExchangeID)
+		if item.InstrumentID == "" || item.ExchangeID == "" {
 			continue
 		}
+		k := strings.ToLower(item.InstrumentID) + "|" + item.ExchangeID
 		if _, ok := seen[k]; ok {
 			continue
 		}
