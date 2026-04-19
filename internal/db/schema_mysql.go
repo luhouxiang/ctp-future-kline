@@ -138,17 +138,47 @@ func sharedMetaSchemaStatements() []string {
   options_type VARCHAR(8) NOT NULL,
   underlying_multiple DOUBLE NOT NULL DEFAULT 0,
   combination_type VARCHAR(8) NOT NULL,
+  trading_day VARCHAR(16) NOT NULL DEFAULT '',
   sync_trading_day VARCHAR(16) NOT NULL,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (instrument_id, exchange_id)
 )`,
 		`CREATE INDEX idx_ctp_instruments_sync_day ON ctp_instruments(sync_trading_day, updated_at)`,
+		`CREATE INDEX idx_ctp_instruments_trading_day ON ctp_instruments(trading_day, updated_at)`,
 		`CREATE INDEX idx_ctp_instruments_product ON ctp_instruments(product_id)`,
 		`CREATE TABLE IF NOT EXISTS ctp_instrument_sync_log (
   trading_day VARCHAR(16) PRIMARY KEY,
   instrument_count INT NOT NULL DEFAULT 0,
   updated_at DATETIME NOT NULL
 )`,
+		`CREATE TABLE IF NOT EXISTS ctp_commission_rates (
+  instrument_id VARCHAR(64) NOT NULL,
+  exchange_id VARCHAR(16) NOT NULL,
+  open_ratio_by_money DOUBLE NOT NULL DEFAULT 0,
+  open_ratio_by_volume DOUBLE NOT NULL DEFAULT 0,
+  close_ratio_by_money DOUBLE NOT NULL DEFAULT 0,
+  close_ratio_by_volume DOUBLE NOT NULL DEFAULT 0,
+  close_today_ratio_by_money DOUBLE NOT NULL DEFAULT 0,
+  close_today_ratio_by_volume DOUBLE NOT NULL DEFAULT 0,
+  sync_trading_day VARCHAR(16) NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (instrument_id, exchange_id)
+)`,
+		`CREATE INDEX idx_ctp_commission_rates_sync_day ON ctp_commission_rates(sync_trading_day, updated_at)`,
+		`CREATE TABLE IF NOT EXISTS ctp_margin_rates (
+  instrument_id VARCHAR(64) NOT NULL,
+  exchange_id VARCHAR(16) NOT NULL,
+  hedge_flag VARCHAR(8) NOT NULL DEFAULT '',
+  long_margin_ratio_by_money DOUBLE NOT NULL DEFAULT 0,
+  long_margin_ratio_by_volume DOUBLE NOT NULL DEFAULT 0,
+  short_margin_ratio_by_money DOUBLE NOT NULL DEFAULT 0,
+  short_margin_ratio_by_volume DOUBLE NOT NULL DEFAULT 0,
+  is_relative TINYINT NOT NULL DEFAULT 0,
+  sync_trading_day VARCHAR(16) NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (instrument_id, exchange_id, hedge_flag)
+)`,
+		`CREATE INDEX idx_ctp_margin_rates_sync_day ON ctp_margin_rates(sync_trading_day, updated_at)`,
 		`CREATE TABLE IF NOT EXISTS ctp_product_exchange (
   product_id VARCHAR(32) NOT NULL,
   product_id_norm VARCHAR(32) NOT NULL,
@@ -174,6 +204,12 @@ func sharedMetaSchemaStatements() []string {
 }
 
 func ensureSharedMetaTablesEvolution(db *sql.DB) error {
+	if err := ensureColumn(db, "ctp_instruments", "trading_day", "ALTER TABLE ctp_instruments ADD COLUMN trading_day VARCHAR(16) NOT NULL DEFAULT '' AFTER combination_type"); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE ctp_instruments SET trading_day=sync_trading_day WHERE (trading_day IS NULL OR trading_day='') AND sync_trading_day<>''`); err != nil {
+		return fmt.Errorf("backfill ctp_instruments.trading_day failed: %w", err)
+	}
 	if err := ensureColumn(db, "ctp_product_exchange", "product_id_norm", "ALTER TABLE ctp_product_exchange ADD COLUMN product_id_norm VARCHAR(32) NOT NULL DEFAULT '' AFTER product_id"); err != nil {
 		return err
 	}

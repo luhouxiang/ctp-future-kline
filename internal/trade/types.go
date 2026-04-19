@@ -327,6 +327,30 @@ type TerminalSnapshot struct {
 	Funds              TerminalFunds              `json:"funds"`
 }
 
+type CommissionRateSnapshot struct {
+	InstrumentID            string    `json:"instrument_id"`
+	ExchangeID              string    `json:"exchange_id"`
+	OpenRatioByMoney        float64   `json:"open_ratio_by_money"`
+	OpenRatioByVolume       float64   `json:"open_ratio_by_volume"`
+	CloseRatioByMoney       float64   `json:"close_ratio_by_money"`
+	CloseRatioByVolume      float64   `json:"close_ratio_by_volume"`
+	CloseTodayRatioByMoney  float64   `json:"close_today_ratio_by_money"`
+	CloseTodayRatioByVolume float64   `json:"close_today_ratio_by_volume"`
+	UpdatedAt               time.Time `json:"updated_at"`
+}
+
+type MarginRateSnapshot struct {
+	InstrumentID             string    `json:"instrument_id"`
+	ExchangeID               string    `json:"exchange_id"`
+	HedgeFlag                string    `json:"hedge_flag"`
+	LongMarginRatioByMoney   float64   `json:"long_margin_ratio_by_money"`
+	LongMarginRatioByVolume  float64   `json:"long_margin_ratio_by_volume"`
+	ShortMarginRatioByMoney  float64   `json:"short_margin_ratio_by_money"`
+	ShortMarginRatioByVolume float64   `json:"short_margin_ratio_by_volume"`
+	IsRelative               bool      `json:"is_relative"`
+	UpdatedAt                time.Time `json:"updated_at"`
+}
+
 type GatewayEvent struct {
 	// Type 是底层网关事件类型。
 	Type string

@@ -287,6 +287,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/kline/index/rebuild-one", s.handleKlineIndexRebuildOne)
 	mux.HandleFunc("/api/kline/bars", s.handleKlineBars)
 	mux.HandleFunc("/api/instruments", s.handleInstruments)
+	mux.HandleFunc("/api/commission-rates", s.handleCommissionRates)
+	mux.HandleFunc("/api/margin-rates", s.handleMarginRates)
 	mux.HandleFunc("/api/calendar/status", s.handleCalendarStatus)
 	mux.HandleFunc("/api/calendar/import", s.handleCalendarImport)
 	mux.HandleFunc("/api/calendar/import/tdx-daily", s.handleCalendarImportTDXDaily)
@@ -1171,6 +1173,88 @@ func (s *Server) handleInstruments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) handleCommissionRates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sharedDSN := strings.TrimSpace(s.sharedDSN)
+	if sharedDSN == "" {
+		http.Error(w, "shared meta dsn is empty", http.StatusInternalServerError)
+		return
+	}
+	db, err := dbx.Open(sharedDSN)
+	if err != nil {
+		http.Error(w, "open shared meta db failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+	repo := quotes.NewInstrumentCatalogRepo(db)
+	if repo == nil {
+		http.Error(w, "commission catalog unavailable", http.StatusInternalServerError)
+		return
+	}
+	tradingDay := strings.TrimSpace(r.URL.Query().Get("trading_day"))
+	if tradingDay == "" && s.status != nil {
+		tradingDay = strings.TrimSpace(s.status.TradingDay())
+	}
+	if tradingDay == "" {
+		http.Error(w, "trading_day is required", http.StatusBadRequest)
+		return
+	}
+	items, err := repo.ListCommissionRatesByTradingDay(tradingDay)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"trading_day": tradingDay,
+		"total":       len(items),
+		"items":       items,
+	})
+}
+
+func (s *Server) handleMarginRates(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	sharedDSN := strings.TrimSpace(s.sharedDSN)
+	if sharedDSN == "" {
+		http.Error(w, "shared meta dsn is empty", http.StatusInternalServerError)
+		return
+	}
+	db, err := dbx.Open(sharedDSN)
+	if err != nil {
+		http.Error(w, "open shared meta db failed: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	defer db.Close()
+	repo := quotes.NewInstrumentCatalogRepo(db)
+	if repo == nil {
+		http.Error(w, "margin catalog unavailable", http.StatusInternalServerError)
+		return
+	}
+	tradingDay := strings.TrimSpace(r.URL.Query().Get("trading_day"))
+	if tradingDay == "" && s.status != nil {
+		tradingDay = strings.TrimSpace(s.status.TradingDay())
+	}
+	if tradingDay == "" {
+		http.Error(w, "trading_day is required", http.StatusBadRequest)
+		return
+	}
+	items, err := repo.ListMarginRatesByTradingDay(tradingDay)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"trading_day": tradingDay,
+		"total":       len(items),
+		"items":       items,
+	})
 }
 
 func (s *Server) handleCalendarStatus(w http.ResponseWriter, r *http.Request) {

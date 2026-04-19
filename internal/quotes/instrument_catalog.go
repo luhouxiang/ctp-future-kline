@@ -12,6 +12,8 @@ import (
 const (
 	ctpInstrumentTableName    = "ctp_instruments"
 	ctpInstrumentSyncLogTable = "ctp_instrument_sync_log"
+	ctpCommissionRateTable    = "ctp_commission_rates"
+	ctpMarginRateTable        = "ctp_margin_rates"
 	ctpProductExchangeTable   = "ctp_product_exchange"
 )
 
@@ -53,6 +55,7 @@ type InstrumentCatalogRecord struct {
 	OptionsType            byte
 	UnderlyingMultiple     float64
 	CombinationType        byte
+	TradingDay             string
 	SyncTradingDay         string
 	UpdatedAt              time.Time
 }
@@ -78,6 +81,32 @@ type productExchangeRecord struct {
 	ProductClass   byte
 	VolumeMultiple int
 	PriceTick      float64
+}
+
+type CommissionRateRecord struct {
+	InstrumentID            string
+	ExchangeID              string
+	OpenRatioByMoney        float64
+	OpenRatioByVolume       float64
+	CloseRatioByMoney       float64
+	CloseRatioByVolume      float64
+	CloseTodayRatioByMoney  float64
+	CloseTodayRatioByVolume float64
+	SyncTradingDay          string
+	UpdatedAt               time.Time
+}
+
+type MarginRateRecord struct {
+	InstrumentID             string
+	ExchangeID               string
+	HedgeFlag                string
+	LongMarginRatioByMoney   float64
+	LongMarginRatioByVolume  float64
+	ShortMarginRatioByMoney  float64
+	ShortMarginRatioByVolume float64
+	IsRelative               int
+	SyncTradingDay           string
+	UpdatedAt                time.Time
 }
 
 func NewInstrumentCatalogRepo(db *sql.DB) *InstrumentCatalogRepo {
@@ -136,10 +165,11 @@ delivery_year,delivery_month,max_market_order_volume,min_market_order_volume,
 max_limit_order_volume,min_limit_order_volume,volume_multiple,price_tick,create_date,
 open_date,expire_date,start_deliv_date,end_deliv_date,inst_life_phase,is_trading,
 position_type,position_date_type,long_margin_ratio,short_margin_ratio,max_margin_side_algorithm,
-underlying_instr_id,strike_price,options_type,underlying_multiple,combination_type,sync_trading_day,updated_at
+underlying_instr_id,strike_price,options_type,underlying_multiple,combination_type,trading_day,sync_trading_day,updated_at
 FROM ctp_instruments
-WHERE sync_trading_day=?
+WHERE trading_day=? OR sync_trading_day=?
 ORDER BY exchange_id ASC, product_id ASC, instrument_id ASC`,
+		strings.TrimSpace(tradingDay),
 		strings.TrimSpace(tradingDay),
 	)
 	if err != nil {
@@ -189,6 +219,7 @@ ORDER BY exchange_id ASC, product_id ASC, instrument_id ASC`,
 			&optionsType,
 			&item.UnderlyingMultiple,
 			&combinationType,
+			&item.TradingDay,
 			&item.SyncTradingDay,
 			&item.UpdatedAt,
 		); err != nil {
@@ -233,7 +264,7 @@ delivery_year,delivery_month,max_market_order_volume,min_market_order_volume,
 max_limit_order_volume,min_limit_order_volume,volume_multiple,price_tick,create_date,
 open_date,expire_date,start_deliv_date,end_deliv_date,inst_life_phase,is_trading,
 position_type,position_date_type,long_margin_ratio,short_margin_ratio,max_margin_side_algorithm,
-underlying_instr_id,strike_price,options_type,underlying_multiple,combination_type,sync_trading_day,updated_at
+underlying_instr_id,strike_price,options_type,underlying_multiple,combination_type,trading_day,sync_trading_day,updated_at
 FROM ctp_instruments
 WHERE instrument_id=? AND exchange_id=?`,
 		instrumentID,
@@ -270,6 +301,7 @@ WHERE instrument_id=? AND exchange_id=?`,
 		&optionsType,
 		&item.UnderlyingMultiple,
 		&combinationType,
+		&item.TradingDay,
 		&item.SyncTradingDay,
 		&item.UpdatedAt,
 	)
@@ -312,8 +344,8 @@ max_limit_order_volume,min_limit_order_volume,volume_multiple,price_tick,create_
 open_date,expire_date,start_deliv_date,end_deliv_date,inst_life_phase,is_trading,
 position_type,position_date_type,long_margin_ratio,short_margin_ratio,max_margin_side_algorithm,
 underlying_instr_id,strike_price,options_type,underlying_multiple,combination_type,
-sync_trading_day,updated_at
-) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+trading_day,sync_trading_day,updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	)
 	if err != nil {
 		return 0, fmt.Errorf("prepare instrument catalog sync failed: %w", err)
@@ -359,6 +391,7 @@ sync_trading_day,updated_at
 			item.UnderlyingMultiple,
 			byteToDBString(item.CombinationType),
 			strings.TrimSpace(tradingDay),
+			strings.TrimSpace(tradingDay),
 			syncedAt,
 		); err != nil {
 			return 0, fmt.Errorf("upsert instrument catalog failed: %w", err)
@@ -390,6 +423,147 @@ sync_trading_day,updated_at
 		"updated_at", syncedAt.Format("2006-01-02 15:04:05"),
 	)
 	return len(productRecords), nil
+}
+
+func (r *InstrumentCatalogRepo) SyncCommissionRates(tradingDay string, items []commissionRateSnapshot, syncedAt time.Time) (int, error) {
+	if r == nil || r.db == nil || strings.TrimSpace(tradingDay) == "" || len(items) == 0 {
+		return 0, nil
+	}
+	tx, err := r.db.Begin()
+	if err != nil {
+		return 0, fmt.Errorf("begin commission rate sync failed: %w", err)
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	stmt, err := tx.Prepare(
+		`REPLACE INTO ctp_commission_rates(
+instrument_id,exchange_id,open_ratio_by_money,open_ratio_by_volume,
+close_ratio_by_money,close_ratio_by_volume,close_today_ratio_by_money,close_today_ratio_by_volume,
+sync_trading_day,updated_at
+) VALUES (?,?,?,?,?,?,?,?,?,?)`,
+	)
+	if err != nil {
+		return 0, fmt.Errorf("prepare commission rate sync failed: %w", err)
+	}
+	defer stmt.Close()
+
+	deduped := dedupeCommissionRateSnapshots(items)
+	for _, item := range deduped {
+		if strings.TrimSpace(item.InstrumentID) == "" {
+			continue
+		}
+		if _, err = stmt.Exec(
+			item.InstrumentID,
+			item.ExchangeID,
+			item.OpenRatioByMoney,
+			item.OpenRatioByVolume,
+			item.CloseRatioByMoney,
+			item.CloseRatioByVolume,
+			item.CloseTodayRatioByMoney,
+			item.CloseTodayRatioByVolume,
+			strings.TrimSpace(tradingDay),
+			syncedAt,
+		); err != nil {
+			return 0, fmt.Errorf("upsert commission rate failed: %w", err)
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit commission rate sync failed: %w", err)
+	}
+	logger.Info(
+		"commission rates synced",
+		"trading_day", strings.TrimSpace(tradingDay),
+		"row_count", len(deduped),
+		"updated_at", syncedAt.Format("2006-01-02 15:04:05"),
+	)
+	return len(deduped), nil
+}
+
+func (r *InstrumentCatalogRepo) ListCommissionRatesByTradingDay(tradingDay string) ([]CommissionRateRecord, error) {
+	if r == nil || r.db == nil || strings.TrimSpace(tradingDay) == "" {
+		return nil, nil
+	}
+	rows, err := r.db.Query(
+		`SELECT instrument_id,exchange_id,open_ratio_by_money,open_ratio_by_volume,
+close_ratio_by_money,close_ratio_by_volume,close_today_ratio_by_money,close_today_ratio_by_volume,
+sync_trading_day,updated_at
+FROM ctp_commission_rates
+WHERE sync_trading_day=?
+ORDER BY exchange_id ASC, instrument_id ASC`,
+		strings.TrimSpace(tradingDay),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query commission rates failed: %w", err)
+	}
+	defer rows.Close()
+	out := make([]CommissionRateRecord, 0, 256)
+	for rows.Next() {
+		var item CommissionRateRecord
+		if err := rows.Scan(
+			&item.InstrumentID,
+			&item.ExchangeID,
+			&item.OpenRatioByMoney,
+			&item.OpenRatioByVolume,
+			&item.CloseRatioByMoney,
+			&item.CloseRatioByVolume,
+			&item.CloseTodayRatioByMoney,
+			&item.CloseTodayRatioByVolume,
+			&item.SyncTradingDay,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan commission rates failed: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate commission rates failed: %w", err)
+	}
+	return out, nil
+}
+
+func (r *InstrumentCatalogRepo) ListMarginRatesByTradingDay(tradingDay string) ([]MarginRateRecord, error) {
+	if r == nil || r.db == nil || strings.TrimSpace(tradingDay) == "" {
+		return nil, nil
+	}
+	rows, err := r.db.Query(
+		`SELECT instrument_id,exchange_id,hedge_flag,long_margin_ratio_by_money,long_margin_ratio_by_volume,
+short_margin_ratio_by_money,short_margin_ratio_by_volume,is_relative,sync_trading_day,updated_at
+FROM ctp_margin_rates
+WHERE sync_trading_day=?
+ORDER BY exchange_id ASC, instrument_id ASC, hedge_flag ASC`,
+		strings.TrimSpace(tradingDay),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("query margin rates failed: %w", err)
+	}
+	defer rows.Close()
+	out := make([]MarginRateRecord, 0, 256)
+	for rows.Next() {
+		var item MarginRateRecord
+		if err := rows.Scan(
+			&item.InstrumentID,
+			&item.ExchangeID,
+			&item.HedgeFlag,
+			&item.LongMarginRatioByMoney,
+			&item.LongMarginRatioByVolume,
+			&item.ShortMarginRatioByMoney,
+			&item.ShortMarginRatioByVolume,
+			&item.IsRelative,
+			&item.SyncTradingDay,
+			&item.UpdatedAt,
+		); err != nil {
+			return nil, fmt.Errorf("scan margin rates failed: %w", err)
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate margin rates failed: %w", err)
+	}
+	return out, nil
 }
 
 func (r *InstrumentCatalogRepo) GetProductExchange(productID string, exchangeID string) (ProductExchangeRecord, bool, error) {
@@ -649,6 +823,25 @@ func dedupeProductExchangeRecords(items []instrumentSnapshot) []productExchangeR
 			VolumeMultiple: item.VolumeMultiple,
 			PriceTick:      item.PriceTick,
 		})
+	}
+	return out
+}
+
+func dedupeCommissionRateSnapshots(items []commissionRateSnapshot) []commissionRateSnapshot {
+	if len(items) == 0 {
+		return nil
+	}
+	latest := make(map[string]commissionRateSnapshot, len(items))
+	for _, item := range items {
+		key := strings.ToLower(strings.TrimSpace(item.InstrumentID)) + "|" + strings.TrimSpace(item.ExchangeID)
+		if key == "|" {
+			continue
+		}
+		latest[key] = item
+	}
+	out := make([]commissionRateSnapshot, 0, len(latest))
+	for _, item := range latest {
+		out = append(out, item)
 	}
 	return out
 }

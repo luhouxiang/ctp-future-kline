@@ -267,6 +267,16 @@ type TradeConfig struct {
 	QueryPollIntervalMS int `json:"query_poll_interval_ms"`
 	// PositionSyncIntervalMS 是持仓单独同步的轮询间隔。
 	PositionSyncIntervalMS int `json:"position_sync_interval_ms"`
+	// QueryBaseIntervalMS 是查询节流基础间隔。
+	QueryBaseIntervalMS int `json:"query_base_interval_ms"`
+	// QueryBackoffStepMS 是流控后每次增加的节流步长。
+	QueryBackoffStepMS int `json:"query_backoff_step_ms"`
+	// QueryMaxIntervalMS 是查询节流间隔上限。
+	QueryMaxIntervalMS int `json:"query_max_interval_ms"`
+	// QueryTimeoutMS 是单次查询等待超时时间。
+	QueryTimeoutMS int `json:"query_timeout_ms"`
+	// RateProbeSymbol 是费率补齐优先探测合约。
+	RateProbeSymbol string `json:"rate_probe_symbol"`
 }
 
 func Load(path string) (AppConfig, error) {
@@ -730,6 +740,21 @@ func (c *AppConfig) Validate() error {
 	if c.Trade.PositionSyncIntervalMS <= 0 {
 		c.Trade.PositionSyncIntervalMS = 3000
 	}
+	if c.Trade.QueryBaseIntervalMS <= 0 {
+		c.Trade.QueryBaseIntervalMS = 1000
+	}
+	if c.Trade.QueryBackoffStepMS <= 0 {
+		c.Trade.QueryBackoffStepMS = 200
+	}
+	if c.Trade.QueryMaxIntervalMS <= 0 {
+		c.Trade.QueryMaxIntervalMS = 3000
+	}
+	if c.Trade.QueryTimeoutMS <= 0 {
+		c.Trade.QueryTimeoutMS = 5000
+	}
+	if stringsTrim(c.Trade.RateProbeSymbol) == "" {
+		c.Trade.RateProbeSymbol = "ag2605"
+	}
 	if c.Trade.MaxOrderVolume <= 0 {
 		return errors.New("trade.max_order_volume must be > 0")
 	}
@@ -738,6 +763,18 @@ func (c *AppConfig) Validate() error {
 	}
 	if c.Trade.PositionSyncIntervalMS <= 0 {
 		return errors.New("trade.position_sync_interval_ms must be > 0")
+	}
+	if c.Trade.QueryBaseIntervalMS <= 0 {
+		return errors.New("trade.query_base_interval_ms must be > 0")
+	}
+	if c.Trade.QueryBackoffStepMS <= 0 {
+		return errors.New("trade.query_backoff_step_ms must be > 0")
+	}
+	if c.Trade.QueryMaxIntervalMS < c.Trade.QueryBaseIntervalMS {
+		return errors.New("trade.query_max_interval_ms must be >= trade.query_base_interval_ms")
+	}
+	if c.Trade.QueryTimeoutMS <= 0 {
+		return errors.New("trade.query_timeout_ms must be > 0")
 	}
 
 	return nil

@@ -28,7 +28,12 @@ type Service struct {
 	// store 是交易子系统的持久化存储。
 	store *Store
 	// gateway 是底层 CTP 交易网关抽象。
-	gateway Gateway
+	gateway        Gateway
+	tradeOpGateway *CTPGateway
+	autoPosGateway *CTPGateway
+	feeGateway     *CTPGateway
+	marginGateway  *CTPGateway
+	rateCatalog    *rateCatalog
 	// accountID 是系统内部统一使用的账户标识。
 	accountID string
 	// paper 表示当前服务是否为模拟交易后端。
@@ -50,18 +55,21 @@ type Service struct {
 	// subsMu 保护 subs 集合。
 	subsMu sync.Mutex
 	// busLog 用于把订单指令等事件旁路写到 bus，总线可选。
-	busLog      *bus.FileLog
-	ctx         context.Context
-	cancel      context.CancelFunc
-	startMu     sync.Mutex
-	started     bool
-	closeOnce   sync.Once
-	queueHandle *queuewatch.QueueHandle
-	queueCap    int
-	paperMu     sync.Mutex
-	pending     map[string]OrderRecord
-	replayQuotes map[string]replayQuote
-	resolver    *quotes.ProductExchangeCache
+	busLog             *bus.FileLog
+	ctx                context.Context
+	cancel             context.CancelFunc
+	startMu            sync.Mutex
+	started            bool
+	closeOnce          sync.Once
+	queueHandle        *queuewatch.QueueHandle
+	queueCap           int
+	paperMu            sync.Mutex
+	pending            map[string]OrderRecord
+	replayQuotes       map[string]replayQuote
+	resolver           *quotes.ProductExchangeCache
+	laneStateMu        sync.RWMutex
+	feeOrdersByFeeLane bool
+	tradesByMarginLane bool
 }
 
 const replayPaperInitialBalance = 100_000
@@ -98,18 +106,35 @@ func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, reg
 	if registry != nil {
 		queueCfg = registry.Config()
 	}
+	tradeOpGateway := NewCTPGateway(withTradeFlowSuffix(ctpCfg, "trade_op"), cfg, registry)
+	autoPosGateway := NewCTPGateway(withTradeFlowSuffix(ctpCfg, "auto_pos"), cfg, registry)
+	feeGateway := NewCTPGateway(withTradeFlowSuffix(ctpCfg, "fee_lane"), cfg, registry)
+	marginGateway := NewCTPGateway(withTradeFlowSuffix(ctpCfg, "margin_lane"), cfg, registry)
+
+	var catalog *rateCatalog
+	if strings.TrimSpace(ctpCfg.SharedMetaDSN) != "" {
+		catalog, err = newRateCatalog(ctpCfg.SharedMetaDSN)
+		if err != nil {
+			return nil, err
+		}
+	}
 	s := &Service{
-		cfg:       cfg,
-		ctpCfg:    ctpCfg,
-		store:     store,
-		gateway:   NewCTPGateway(ctpCfg, cfg, registry),
-		accountID: cfg.AccountID,
-		subs:      make(map[chan EventEnvelope]struct{}),
-		queueCap:  queueCfg.TradeEventCapacity,
-		status:    TradeStatus{Enabled: cfg.IsEnabled(), AccountID: cfg.AccountID, UpdatedAt: time.Now()},
-		ctx:       ctx,
-		cancel:    cancel,
-		resolver:  quotes.DefaultProductExchangeCache(),
+		cfg:            cfg,
+		ctpCfg:         ctpCfg,
+		store:          store,
+		gateway:        tradeOpGateway,
+		tradeOpGateway: tradeOpGateway,
+		autoPosGateway: autoPosGateway,
+		feeGateway:     feeGateway,
+		marginGateway:  marginGateway,
+		rateCatalog:    catalog,
+		accountID:      cfg.AccountID,
+		subs:           make(map[chan EventEnvelope]struct{}),
+		queueCap:       queueCfg.TradeEventCapacity,
+		status:         TradeStatus{Enabled: cfg.IsEnabled(), AccountID: cfg.AccountID, UpdatedAt: time.Now()},
+		ctx:            ctx,
+		cancel:         cancel,
+		resolver:       quotes.DefaultProductExchangeCache(),
 	}
 	if registry != nil {
 		s.queueHandle = registry.Register(queuewatch.QueueSpec{
@@ -161,14 +186,14 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 	cfg.Enabled = boolPtr(true)
 	cfg.AccountID = accountID
 	s := &Service{
-		cfg:         cfg,
-		store:       store,
-		accountID:   accountID,
-		paper:       true,
-		replayPaper: strings.EqualFold(accountID, "paper_replay"),
-		subs:        make(map[chan EventEnvelope]struct{}),
-		queueCap:    queueCfg.TradeEventCapacity,
-		pending:     make(map[string]OrderRecord),
+		cfg:          cfg,
+		store:        store,
+		accountID:    accountID,
+		paper:        true,
+		replayPaper:  strings.EqualFold(accountID, "paper_replay"),
+		subs:         make(map[chan EventEnvelope]struct{}),
+		queueCap:     queueCfg.TradeEventCapacity,
+		pending:      make(map[string]OrderRecord),
 		replayQuotes: make(map[string]replayQuote),
 		status: TradeStatus{
 			Enabled:             true,
@@ -224,6 +249,18 @@ func (s *Service) Close() error {
 		if s.gateway != nil {
 			_ = s.gateway.Close()
 		}
+		if s.autoPosGateway != nil {
+			_ = s.autoPosGateway.Close()
+		}
+		if s.feeGateway != nil {
+			_ = s.feeGateway.Close()
+		}
+		if s.marginGateway != nil {
+			_ = s.marginGateway.Close()
+		}
+		if s.rateCatalog != nil {
+			_ = s.rateCatalog.Close()
+		}
 		if s.store != nil {
 			err = s.store.Close()
 		}
@@ -246,6 +283,10 @@ func (s *Service) Start() error {
 	}
 	s.startMu.Unlock()
 	if err := s.gateway.Start(); err != nil {
+		s.setStatus(func(st *TradeStatus) { st.LastError = err.Error() })
+		return err
+	}
+	if err := s.startQueryGateways(); err != nil {
 		s.setStatus(func(st *TradeStatus) { st.LastError = err.Error() })
 		return err
 	}
@@ -361,7 +402,11 @@ func (s *Service) RefreshPositions() ([]PositionSnapshot, error) {
 		s.broadcast("trade_position_update", map[string]any{"items": items})
 		return items, nil
 	}
-	items, err := s.gateway.RefreshPositions()
+	gw := s.gateway
+	if s.autoPosGateway != nil {
+		gw = s.autoPosGateway
+	}
+	items, err := gw.RefreshPositions()
 	s.auditQuery("positions", err)
 	if err != nil {
 		return nil, err
@@ -386,7 +431,11 @@ func (s *Service) RefreshOrders() ([]OrderRecord, error) {
 		s.broadcast("trade_order_update", map[string]any{"items": items})
 		return items, nil
 	}
-	items, err := s.gateway.RefreshOrders()
+	gw := s.gateway
+	if s.feeGateway != nil {
+		gw = s.feeGateway
+	}
+	items, err := gw.RefreshOrders()
 	s.auditQuery("orders", err)
 	if err != nil {
 		return nil, err
@@ -413,7 +462,11 @@ func (s *Service) RefreshTrades() ([]TradeRecord, error) {
 		s.broadcast("trade_trade_update", map[string]any{"items": items})
 		return items, nil
 	}
-	items, err := s.gateway.RefreshTrades()
+	gw := s.gateway
+	if s.marginGateway != nil {
+		gw = s.marginGateway
+	}
+	items, err := gw.RefreshTrades()
 	s.auditQuery("trades", err)
 	if err != nil {
 		return nil, err
@@ -668,23 +721,19 @@ func (s *Service) pollQueries() {
 	if s.paper {
 		return
 	}
-	queryTicker := time.NewTicker(time.Duration(s.cfg.QueryPollIntervalMS) * time.Millisecond)
-	defer queryTicker.Stop()
-	positionTicker := time.NewTicker(time.Duration(s.cfg.PositionSyncIntervalMS) * time.Millisecond)
-	defer positionTicker.Stop()
+	go s.runAutoPosLane()
+	go s.runFeeLane()
+	go s.runMarginLane()
+	statusTicker := time.NewTicker(time.Duration(s.cfg.QueryPollIntervalMS) * time.Millisecond)
+	defer statusTicker.Stop()
 	for {
 		select {
 		case <-s.ctx.Done():
 			return
-		case <-queryTicker.C:
+		case <-statusTicker.C:
 			s.setStatusFromGateway()
-			_, _ = s.RefreshAccount()
-			_, _ = s.RefreshOrders()
-			_, _ = s.RefreshTrades()
 			_ = s.saveSessionState()
 			s.broadcast("trade_status_update", s.Status())
-		case <-positionTicker.C:
-			_, _ = s.RefreshPositions()
 		}
 	}
 }

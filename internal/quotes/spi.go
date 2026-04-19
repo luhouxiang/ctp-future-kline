@@ -1,6 +1,7 @@
 package quotes
 
 import (
+	"strings"
 	"sync"
 	"sync/atomic"
 
@@ -20,19 +21,32 @@ type querySpi struct {
 	snapshots     []instrumentSnapshot
 	instrumentsMu sync.Mutex
 
+	commissionRates   map[string]commissionRateSnapshot
+	commissionWaiters map[int]chan commissionQueryResult
+	commissionReqRows map[int]int
+	commissionMu      sync.Mutex
+
 	tradingDay   string
 	tradingDayMu sync.Mutex
 	status       *RuntimeStatusCenter
 }
 
 func newQuerySpi() *querySpi {
-	return &querySpi{queryFinished: make(chan struct{})}
+	return &querySpi{
+		queryFinished:     make(chan struct{}),
+		commissionRates:   make(map[string]commissionRateSnapshot),
+		commissionWaiters: make(map[int]chan commissionQueryResult),
+		commissionReqRows: make(map[int]int),
+	}
 }
 
 func newQuerySpiWithStatus(status *RuntimeStatusCenter) *querySpi {
 	return &querySpi{
-		queryFinished: make(chan struct{}),
-		status:        status,
+		queryFinished:     make(chan struct{}),
+		status:            status,
+		commissionRates:   make(map[string]commissionRateSnapshot),
+		commissionWaiters: make(map[int]chan commissionQueryResult),
+		commissionReqRows: make(map[int]int),
 	}
 }
 
@@ -165,6 +179,50 @@ func (p *querySpi) OnRspQryInstrument(
 	finishQuery()
 }
 
+func (p *querySpi) OnRspQryInstrumentCommissionRate(
+	pInstrumentCommissionRate ctp.CThostFtdcInstrumentCommissionRateField,
+	pRspInfo ctp.CThostFtdcRspInfoField,
+	nRequestID int,
+	bIsLast bool,
+) {
+	errID := safeRspErrorID(pRspInfo)
+	errMsg := safeRspErrorMsg(pRspInfo)
+	if errID == 0 {
+		if item, ok := safeCommissionRateSnapshot(pInstrumentCommissionRate); ok {
+			key := strings.ToLower(strings.TrimSpace(item.InstrumentID)) + "|" + strings.TrimSpace(item.ExchangeID)
+			if key != "|" {
+				p.commissionMu.Lock()
+				p.commissionRates[key] = item
+				p.commissionReqRows[nRequestID]++
+				p.commissionMu.Unlock()
+			}
+		}
+	}
+	if !bIsLast {
+		return
+	}
+	p.commissionMu.Lock()
+	ch, ok := p.commissionWaiters[nRequestID]
+	rows := p.commissionReqRows[nRequestID]
+	if ok {
+		delete(p.commissionWaiters, nRequestID)
+	}
+	delete(p.commissionReqRows, nRequestID)
+	p.commissionMu.Unlock()
+	if !ok {
+		return
+	}
+	ch <- commissionQueryResult{
+		ErrID:   errID,
+		ErrMsg:  errMsg,
+		ReqID:   nRequestID,
+		Rows:    rows,
+		IsLast:  bIsLast,
+		Success: errID == 0,
+	}
+	close(ch)
+}
+
 func (p *querySpi) instrumentInfos() []instrumentInfo {
 	p.instrumentsMu.Lock()
 	defer p.instrumentsMu.Unlock()
@@ -181,6 +239,31 @@ func (p *querySpi) instrumentSnapshots() []instrumentSnapshot {
 	out := make([]instrumentSnapshot, len(p.snapshots))
 	copy(out, p.snapshots)
 	return out
+}
+
+func (p *querySpi) registerCommissionWaiter(reqID int) <-chan commissionQueryResult {
+	ch := make(chan commissionQueryResult, 1)
+	p.commissionMu.Lock()
+	p.commissionWaiters[reqID] = ch
+	p.commissionReqRows[reqID] = 0
+	p.commissionMu.Unlock()
+	return ch
+}
+
+func (p *querySpi) commissionRateSnapshots() []commissionRateSnapshot {
+	p.commissionMu.Lock()
+	defer p.commissionMu.Unlock()
+	out := make([]commissionRateSnapshot, 0, len(p.commissionRates))
+	for _, item := range p.commissionRates {
+		out = append(out, item)
+	}
+	return out
+}
+
+func (p *querySpi) resetCommissionRateSnapshots() {
+	p.commissionMu.Lock()
+	p.commissionRates = make(map[string]commissionRateSnapshot)
+	p.commissionMu.Unlock()
 }
 
 func (p *querySpi) setTradingDay(day string) {
@@ -229,6 +312,26 @@ type instrumentSnapshot struct {
 	CombinationType        byte
 }
 
+type commissionRateSnapshot struct {
+	InstrumentID            string
+	ExchangeID              string
+	OpenRatioByMoney        float64
+	OpenRatioByVolume       float64
+	CloseRatioByMoney       float64
+	CloseRatioByVolume      float64
+	CloseTodayRatioByMoney  float64
+	CloseTodayRatioByVolume float64
+}
+
+type commissionQueryResult struct {
+	ErrID   int
+	ErrMsg  string
+	ReqID   int
+	Rows    int
+	IsLast  bool
+	Success bool
+}
+
 func safeRspErrorID(pRspInfo ctp.CThostFtdcRspInfoField) (errorID int) {
 	if pRspInfo == nil {
 		return 0
@@ -242,6 +345,21 @@ func safeRspErrorID(pRspInfo ctp.CThostFtdcRspInfoField) (errorID int) {
 		}
 	}()
 	return pRspInfo.GetErrorID()
+}
+
+func safeRspErrorMsg(pRspInfo ctp.CThostFtdcRspInfoField) (msg string) {
+	if pRspInfo == nil {
+		return ""
+	}
+	if pRspInfo.Swigcptr() == 0 {
+		return ""
+	}
+	defer func() {
+		if recover() != nil {
+			msg = ""
+		}
+	}()
+	return strings.TrimSpace(pRspInfo.GetErrorMsg())
 }
 
 func safeInstrumentSnapshot(pInstrument ctp.CThostFtdcInstrumentField) (out instrumentSnapshot) {
@@ -288,4 +406,28 @@ func safeInstrumentSnapshot(pInstrument ctp.CThostFtdcInstrumentField) (out inst
 	out.UnderlyingMultiple = pInstrument.GetUnderlyingMultiple()
 	out.CombinationType = pInstrument.GetCombinationType()
 	return out
+}
+
+func safeCommissionRateSnapshot(p ctp.CThostFtdcInstrumentCommissionRateField) (out commissionRateSnapshot, ok bool) {
+	if p == nil || p.Swigcptr() == 0 {
+		return commissionRateSnapshot{}, false
+	}
+	defer func() {
+		if recover() != nil {
+			out = commissionRateSnapshot{}
+			ok = false
+		}
+	}()
+	out.InstrumentID = strings.TrimSpace(p.GetInstrumentID())
+	out.ExchangeID = strings.TrimSpace(p.GetExchangeID())
+	out.OpenRatioByMoney = p.GetOpenRatioByMoney()
+	out.OpenRatioByVolume = p.GetOpenRatioByVolume()
+	out.CloseRatioByMoney = p.GetCloseRatioByMoney()
+	out.CloseRatioByVolume = p.GetCloseRatioByVolume()
+	out.CloseTodayRatioByMoney = p.GetCloseTodayRatioByMoney()
+	out.CloseTodayRatioByVolume = p.GetCloseTodayRatioByVolume()
+	if out.InstrumentID == "" {
+		return commissionRateSnapshot{}, false
+	}
+	return out, true
 }

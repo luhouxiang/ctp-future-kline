@@ -245,9 +245,55 @@ func (g *CTPGateway) RefreshTrades() ([]TradeRecord, error) {
 	return res.trades, nil
 }
 
+func (g *CTPGateway) QueryCommissionRate(instrumentID string, exchangeID string) ([]CommissionRateSnapshot, error) {
+	field := ctp.NewCThostFtdcQryInstrumentCommissionRateField()
+	defer ctp.DeleteCThostFtdcQryInstrumentCommissionRateField(field)
+	field.SetBrokerID(g.cfg.BrokerID)
+	field.SetInvestorID(g.cfg.UserID)
+	field.SetInstrumentID(strings.TrimSpace(instrumentID))
+	field.SetExchangeID(strings.TrimSpace(exchangeID))
+	reqID := g.spi.nextReqID()
+	resCh := g.spi.beginQuery(reqID)
+	if ret := g.api.ReqQryInstrumentCommissionRate(field, resCh.reqID); ret != 0 {
+		return nil, fmt.Errorf("req_id=%d ReqQryInstrumentCommissionRate failed: %d", reqID, ret)
+	}
+	res, err := g.waitQueryResult(resCh, "commission_rates")
+	if err != nil {
+		return nil, err
+	}
+	if res.err != nil {
+		return nil, fmt.Errorf("req_id=%d %w", reqID, res.err)
+	}
+	g.touchQuery()
+	return res.commissionRates, nil
+}
+
+func (g *CTPGateway) QueryMarginRate(instrumentID string, exchangeID string) ([]MarginRateSnapshot, error) {
+	field := ctp.NewCThostFtdcQryInstrumentMarginRateField()
+	defer ctp.DeleteCThostFtdcQryInstrumentMarginRateField(field)
+	field.SetBrokerID(g.cfg.BrokerID)
+	field.SetInvestorID(g.cfg.UserID)
+	field.SetInstrumentID(strings.TrimSpace(instrumentID))
+	field.SetExchangeID(strings.TrimSpace(exchangeID))
+	reqID := g.spi.nextReqID()
+	resCh := g.spi.beginQuery(reqID)
+	if ret := g.api.ReqQryInstrumentMarginRate(field, resCh.reqID); ret != 0 {
+		return nil, fmt.Errorf("req_id=%d ReqQryInstrumentMarginRate failed: %d", reqID, ret)
+	}
+	res, err := g.waitQueryResult(resCh, "margin_rates")
+	if err != nil {
+		return nil, err
+	}
+	if res.err != nil {
+		return nil, fmt.Errorf("req_id=%d %w", reqID, res.err)
+	}
+	g.touchQuery()
+	return res.marginRates, nil
+}
+
 func (g *CTPGateway) waitQueryResult(resCh *queryResult, kind string) (queryResult, error) {
-	timeout := time.Duration(g.cfg.LoginWaitSeconds) * time.Second
-	if timeout < 5*time.Second {
+	timeout := time.Duration(g.tradeCfg.QueryTimeoutMS) * time.Millisecond
+	if timeout <= 0 {
 		timeout = 5 * time.Second
 	}
 	select {
@@ -257,7 +303,7 @@ func (g *CTPGateway) waitQueryResult(resCh *queryResult, kind string) (queryResu
 		if g.spi != nil {
 			g.spi.cancelQuery(resCh.reqID)
 		}
-		return queryResult{}, fmt.Errorf("trade gateway wait %s query timeout", kind)
+		return queryResult{}, fmt.Errorf("trade gateway wait %s query timeout, req_id=%d", kind, resCh.reqID)
 	}
 }
 
@@ -416,7 +462,9 @@ type queryResult struct {
 	// orders 保存委托查询结果。
 	orders []OrderRecord
 	// trades 保存成交查询结果。
-	trades []TradeRecord
+	trades          []TradeRecord
+	commissionRates []CommissionRateSnapshot
+	marginRates     []MarginRateSnapshot
 }
 
 type ctpTradeSpi struct {
@@ -651,6 +699,52 @@ func (p *ctpTradeSpi) OnRspQryTrade(field ctp.CThostFtdcTradeField, rsp ctp.CTho
 			return
 		}
 		q.trades = append(q.trades, p.mapTrade(field))
+	})
+}
+
+func (p *ctpTradeSpi) OnRspQryInstrumentCommissionRate(field ctp.CThostFtdcInstrumentCommissionRateField, rsp ctp.CThostFtdcRspInfoField, reqID int, last bool) {
+	p.handleQuery(reqID, rspError(rsp), last, func(q *queryResult) {
+		if isNilCTPObject(field) {
+			return
+		}
+		item := CommissionRateSnapshot{
+			InstrumentID:            strings.TrimSpace(field.GetInstrumentID()),
+			ExchangeID:              strings.TrimSpace(field.GetExchangeID()),
+			OpenRatioByMoney:        field.GetOpenRatioByMoney(),
+			OpenRatioByVolume:       field.GetOpenRatioByVolume(),
+			CloseRatioByMoney:       field.GetCloseRatioByMoney(),
+			CloseRatioByVolume:      field.GetCloseRatioByVolume(),
+			CloseTodayRatioByMoney:  field.GetCloseTodayRatioByMoney(),
+			CloseTodayRatioByVolume: field.GetCloseTodayRatioByVolume(),
+			UpdatedAt:               time.Now(),
+		}
+		if item.InstrumentID == "" {
+			return
+		}
+		q.commissionRates = append(q.commissionRates, item)
+	})
+}
+
+func (p *ctpTradeSpi) OnRspQryInstrumentMarginRate(field ctp.CThostFtdcInstrumentMarginRateField, rsp ctp.CThostFtdcRspInfoField, reqID int, last bool) {
+	p.handleQuery(reqID, rspError(rsp), last, func(q *queryResult) {
+		if isNilCTPObject(field) {
+			return
+		}
+		item := MarginRateSnapshot{
+			InstrumentID:             strings.TrimSpace(field.GetInstrumentID()),
+			ExchangeID:               strings.TrimSpace(field.GetExchangeID()),
+			HedgeFlag:                mapHedgeFlag(field.GetHedgeFlag()),
+			LongMarginRatioByMoney:   field.GetLongMarginRatioByMoney(),
+			LongMarginRatioByVolume:  field.GetLongMarginRatioByVolume(),
+			ShortMarginRatioByMoney:  field.GetShortMarginRatioByMoney(),
+			ShortMarginRatioByVolume: field.GetShortMarginRatioByVolume(),
+			IsRelative:               field.GetIsRelative() != 0,
+			UpdatedAt:                time.Now(),
+		}
+		if item.InstrumentID == "" {
+			return
+		}
+		q.marginRates = append(q.marginRates, item)
 	})
 }
 

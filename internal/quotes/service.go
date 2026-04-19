@@ -165,6 +165,9 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 				"instrument_count", syncLog.InstrumentCount,
 				"updated_at", syncLog.UpdatedAt.Format("2006-01-02 15:04:05"),
 			)
+			if err := s.syncCommissionCatalog(api, spi, repo, tradingDay, instruments); err != nil {
+				logger.Error("sync commission catalog failed", "trading_day", tradingDay, "error", err)
+			}
 			return instruments, nil
 		}
 		logger.Warn(
@@ -212,6 +215,9 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 			)
 		}
 	}
+	if err := s.syncCommissionCatalog(api, spi, repo, tradingDay, instruments); err != nil {
+		logger.Error("sync commission catalog failed", "trading_day", tradingDay, "error", err)
+	}
 
 	instrumentIDs := make([]string, 0, len(instruments))
 	for _, item := range instruments {
@@ -224,6 +230,103 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 		"instruments", instrumentIDs,
 	)
 	return instruments, nil
+}
+
+func (s *Service) syncCommissionCatalog(api ctp.CThostFtdcTraderApi, spi *querySpi, repo *InstrumentCatalogRepo, tradingDay string, instruments []instrumentInfo) error {
+	if api == nil || spi == nil || repo == nil {
+		return nil
+	}
+	start := time.Now()
+	spi.resetCommissionRateSnapshots()
+
+	targetInstrument, targetExchange := pickCommissionProbeTarget(instruments, "ag2605")
+	if targetInstrument == "" {
+		logger.Warn("commission catalog probe skipped: no instrument available", "trading_day", tradingDay)
+		return nil
+	}
+	queryMode := "single_probe"
+	if err := s.queryInstrumentCommissionRateWait(api, spi, targetInstrument, targetExchange, 12*time.Second); err != nil {
+		return err
+	}
+	snapshots := spi.commissionRateSnapshots()
+	written, err := repo.SyncCommissionRates(tradingDay, snapshots, time.Now())
+	if err != nil {
+		return err
+	}
+	exchanges := make(map[string]int, 8)
+	unknownExchange := 0
+	for _, item := range snapshots {
+		ex := strings.TrimSpace(item.ExchangeID)
+		if ex == "" {
+			unknownExchange++
+			continue
+		}
+		exchanges[ex]++
+	}
+	logger.Info(
+		"commission catalog sync summary",
+		"trading_day", tradingDay,
+		"query_mode", queryMode,
+		"probe_instrument", targetInstrument,
+		"probe_exchange", targetExchange,
+		"queried_instruments", 1,
+		"snapshot_rows", len(snapshots),
+		"written_rows", written,
+		"exchange_distribution", exchanges,
+		"unknown_exchange_rows", unknownExchange,
+		"elapsed_ms", time.Since(start).Milliseconds(),
+	)
+	return nil
+}
+
+func (s *Service) queryInstrumentCommissionRateWait(api ctp.CThostFtdcTraderApi, spi *querySpi, instrumentID string, exchangeID string, timeout time.Duration) error {
+	reqID := spi.nextReqID()
+	waitCh := spi.registerCommissionWaiter(reqID)
+	if err := s.queryInstrumentCommissionRate(api, reqID, instrumentID, exchangeID); err != nil {
+		return err
+	}
+	select {
+	case result := <-waitCh:
+		if result.ErrID != 0 {
+			return fmt.Errorf(
+				"query instrument commission rate failed, req_id=%d, instrument=%s, exchange=%s, error_id=%d, error_msg=%s",
+				reqID,
+				instrumentID,
+				exchangeID,
+				result.ErrID,
+				result.ErrMsg,
+			)
+		}
+		if result.Rows == 0 {
+			logger.Warn(
+				"query instrument commission rate returned no rows",
+				"req_id", reqID,
+				"instrument", instrumentID,
+				"exchange", exchangeID,
+				"error_id", result.ErrID,
+				"error_msg", result.ErrMsg,
+			)
+		}
+		return nil
+	case <-time.After(timeout):
+		return fmt.Errorf("query instrument commission rate timeout, req_id=%d, instrument=%s, exchange=%s", reqID, instrumentID, exchangeID)
+	}
+}
+
+func pickCommissionProbeTarget(instruments []instrumentInfo, preferred string) (instrumentID string, exchangeID string) {
+	preferred = strings.TrimSpace(preferred)
+	for _, item := range instruments {
+		if strings.EqualFold(strings.TrimSpace(item.ID), preferred) {
+			return strings.TrimSpace(item.ID), strings.TrimSpace(item.ExchangeID)
+		}
+	}
+	for _, item := range instruments {
+		if strings.TrimSpace(item.ID) == "" {
+			continue
+		}
+		return strings.TrimSpace(item.ID), strings.TrimSpace(item.ExchangeID)
+	}
+	return "", ""
 }
 
 func (s *Service) queryCallbacksWaitTimeout() time.Duration {
@@ -537,6 +640,19 @@ func (s *Service) queryInstrument(api ctp.CThostFtdcTraderApi, reqID int) error 
 
 	if ret := api.ReqQryInstrument(field, reqID); ret != 0 {
 		return fmt.Errorf("ReqQryInstrument failed, code: %d", ret)
+	}
+	return nil
+}
+
+func (s *Service) queryInstrumentCommissionRate(api ctp.CThostFtdcTraderApi, reqID int, instrumentID string, exchangeID string) error {
+	field := ctp.NewCThostFtdcQryInstrumentCommissionRateField()
+	defer ctp.DeleteCThostFtdcQryInstrumentCommissionRateField(field)
+	field.SetBrokerID(s.cfg.BrokerID)
+	field.SetInvestorID(s.cfg.UserID)
+	field.SetInstrumentID(strings.TrimSpace(instrumentID))
+	field.SetExchangeID(strings.TrimSpace(exchangeID))
+	if ret := api.ReqQryInstrumentCommissionRate(field, reqID); ret != 0 {
+		return fmt.Errorf("ReqQryInstrumentCommissionRate failed, code: %d, instrument=%s", ret, instrumentID)
 	}
 	return nil
 }
