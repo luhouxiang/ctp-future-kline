@@ -40,6 +40,8 @@ type Service struct {
 	paper bool
 	// replayPaper 表示当前服务是否为回放模拟交易后端。
 	replayPaper bool
+	// livePaper 表示当前服务是否为实时模拟交易后端。
+	livePaper bool
 
 	// mu 保护 status、account、positions 这些内存快照。
 	mu sync.RWMutex
@@ -70,6 +72,12 @@ type Service struct {
 	laneStateMu        sync.RWMutex
 	feeOrdersByFeeLane bool
 	tradesByMarginLane bool
+	metaSyncMu         sync.Mutex
+	metaSyncRequested  bool
+	metaSyncRunning    bool
+	metaSyncTradingDay string
+	feeThrottle        laneThrottle
+	marginThrottle     laneThrottle
 }
 
 const replayPaperInitialBalance = 100_000
@@ -77,6 +85,10 @@ const replayPaperInitialBalance = 100_000
 type replayTick struct {
 	InstrumentID string
 	ExchangeID   string
+	TradingDay   string
+	ActionDay    string
+	UpdateTime   string
+	UpdateMS     int
 	ReceivedAt   time.Time
 	BidPrice1    float64
 	AskPrice1    float64
@@ -191,6 +203,7 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 		accountID:    accountID,
 		paper:        true,
 		replayPaper:  strings.EqualFold(accountID, "paper_replay"),
+		livePaper:    strings.EqualFold(accountID, "paper_live"),
 		subs:         make(map[chan EventEnvelope]struct{}),
 		queueCap:     queueCfg.TradeEventCapacity,
 		pending:      make(map[string]OrderRecord),
@@ -228,6 +241,33 @@ func NewPaperService(cfg config.TradeConfig, accountID string, dsn string, regis
 			return nil, err
 		}
 	}
+	return s, nil
+}
+
+func NewPaperServiceWithMeta(cfg config.TradeConfig, ctpCfg config.CTPConfig, accountID string, dsn string, registry *queuewatch.Registry) (*Service, error) {
+	s, err := NewPaperService(cfg, accountID, dsn, registry)
+	if err != nil {
+		return nil, err
+	}
+	if !s.livePaper {
+		return s, nil
+	}
+	if strings.TrimSpace(ctpCfg.TraderFrontAddr) == "" {
+		return s, nil
+	}
+	s.ctpCfg = ctpCfg
+	s.tradeOpGateway = NewCTPGateway(withTradeFlowSuffix(ctpCfg, "paper_live_meta_trade_op"), s.cfg, registry)
+	s.feeGateway = NewCTPGateway(withTradeFlowSuffix(ctpCfg, "paper_live_meta_fee_lane"), s.cfg, registry)
+	s.marginGateway = NewCTPGateway(withTradeFlowSuffix(ctpCfg, "paper_live_meta_margin_lane"), s.cfg, registry)
+	if strings.TrimSpace(ctpCfg.SharedMetaDSN) != "" {
+		catalog, catalogErr := newRateCatalog(ctpCfg.SharedMetaDSN)
+		if catalogErr != nil {
+			return nil, catalogErr
+		}
+		s.rateCatalog = catalog
+	}
+	s.feeThrottle = newLaneThrottle("fee_lane", "commission_rate", s.cfg)
+	s.marginThrottle = newLaneThrottle("margin_lane", "margin_rate", s.cfg)
 	return s, nil
 }
 
@@ -274,6 +314,12 @@ func (s *Service) Start() error {
 		s.started = true
 		s.startMu.Unlock()
 		s.broadcast("trade_status_update", s.Status())
+		if s.livePaper {
+			if err := s.startPaperMetaSync(); err != nil {
+				s.setStatus(func(st *TradeStatus) { st.LastError = err.Error() })
+				return err
+			}
+		}
 		return nil
 	}
 	s.startMu.Lock()
@@ -482,6 +528,9 @@ func (s *Service) RefreshTrades() ([]TradeRecord, error) {
 }
 
 func (s *Service) RefreshAll() error {
+	if s.livePaper {
+		s.RequestMetaSync()
+	}
 	if _, err := s.RefreshAccount(); err != nil {
 		return err
 	}
@@ -497,6 +546,15 @@ func (s *Service) RefreshAll() error {
 	return nil
 }
 
+func (s *Service) RequestMetaSync() {
+	if !s.livePaper {
+		return
+	}
+	s.metaSyncMu.Lock()
+	s.metaSyncRequested = true
+	s.metaSyncMu.Unlock()
+}
+
 func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (OrderRecord, error) {
 	req, err := s.normalizeSubmitRequest(req)
 	if err != nil {
@@ -505,7 +563,7 @@ func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (Orde
 	status := s.Status()
 	account, _ := s.Account()
 	positions, _ := s.Positions()
-	if s.replayPaper {
+	if s.replayPaper || s.livePaper {
 		if item, items, err := s.paperRiskState(); err == nil {
 			account = item
 			positions = items
@@ -927,7 +985,7 @@ func (s *Service) ensurePaperAccount() error {
 }
 
 func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (OrderRecord, error) {
-	if !s.replayPaper {
+	if !s.replayPaper && !s.livePaper {
 		return s.submitImmediatePaperOrder(commandID, req)
 	}
 	s.paperMu.Lock()
@@ -947,7 +1005,7 @@ func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (Or
 		VolumeCanceled:      0,
 		OrderStatus:         "queued",
 		SubmitStatus:        "accepted",
-		StatusMsg:           "paper replay order accepted and waiting for replay market",
+		StatusMsg:           "paper order accepted and waiting for market",
 		InsertedAt:          now,
 		UpdatedAt:           now,
 	}
@@ -1055,7 +1113,7 @@ func (s *Service) applyImmediatePaperFill(tr TradeRecord) error {
 }
 
 func (s *Service) cancelPaperOrder(req CancelOrderRequest, orderRec OrderRecord) (OrderRecord, error) {
-	if !s.replayPaper {
+	if !s.replayPaper && !s.livePaper {
 		return orderRec, fmt.Errorf("paper orders are filled immediately and cannot be canceled")
 	}
 	s.paperMu.Lock()
@@ -1076,7 +1134,7 @@ func (s *Service) cancelPaperOrder(req CancelOrderRequest, orderRec OrderRecord)
 	}
 	current.OrderStatus = "canceled"
 	current.SubmitStatus = "accepted"
-	current.StatusMsg = "paper replay order canceled"
+	current.StatusMsg = "paper order canceled"
 	current.UpdatedAt = now
 	if err := s.store.UpsertOrder(current); err != nil {
 		s.paperMu.Unlock()
@@ -1096,11 +1154,41 @@ func (s *Service) ConsumeBusEvent(_ context.Context, ev bus.BusEvent) error {
 	if !s.replayPaper || ev.Topic != bus.TopicTick {
 		return nil
 	}
-	var tick replayTick
+	var tick quotes.TickEvent
 	if err := json.Unmarshal(ev.Payload, &tick); err != nil {
 		return fmt.Errorf("decode replay tick for paper trade failed: %w", err)
 	}
-	return s.matchReplayTick(tick)
+	return s.ConsumePaperMarketTick(PaperMarketTick{
+		Symbol:         tick.InstrumentID,
+		ExchangeID:     tick.ExchangeID,
+		TradingDay:     tick.TradingDay,
+		ActionDay:      tick.ActionDay,
+		UpdateTime:     tick.UpdateTime,
+		UpdateMillisec: tick.UpdateMillisec,
+		BidPrice1:      tick.BidPrice1,
+		AskPrice1:      tick.AskPrice1,
+	})
+}
+
+func (s *Service) ConsumePaperMarketTick(tick PaperMarketTick) error {
+	if !s.paper {
+		return nil
+	}
+	marketTS := parseDateTime(strings.TrimSpace(tick.TradingDay), strings.TrimSpace(tick.UpdateTime))
+	if marketTS.IsZero() || strings.TrimSpace(tick.TradingDay) == "" || strings.TrimSpace(tick.UpdateTime) == "" {
+		marketTS = time.Now()
+	}
+	return s.matchReplayTick(replayTick{
+		InstrumentID: strings.TrimSpace(tick.Symbol),
+		ExchangeID:   strings.TrimSpace(tick.ExchangeID),
+		TradingDay:   strings.TrimSpace(tick.TradingDay),
+		ActionDay:    strings.TrimSpace(tick.ActionDay),
+		UpdateTime:   strings.TrimSpace(tick.UpdateTime),
+		UpdateMS:     tick.UpdateMillisec,
+		ReceivedAt:   marketTS,
+		BidPrice1:    tick.BidPrice1,
+		AskPrice1:    tick.AskPrice1,
+	})
 }
 
 func (s *Service) loadPendingOrders() error {
@@ -1116,7 +1204,7 @@ func (s *Service) loadPendingOrders() error {
 }
 
 func (s *Service) paperRiskState() (TradingAccountSnapshot, []PositionSnapshot, error) {
-	if !s.replayPaper {
+	if !s.replayPaper && !s.livePaper {
 		account, err := s.Account()
 		if err != nil {
 			return TradingAccountSnapshot{}, nil, err
@@ -1181,7 +1269,7 @@ func (s *Service) matchReplayTick(tick replayTick) error {
 			Price:      price,
 			Volume:     order.VolumeTraded,
 			TradeTime:  now,
-			TradingDay: now.Format("20060102"),
+			TradingDay: firstNonEmpty(strings.TrimSpace(tick.TradingDay), now.Format("20060102")),
 			ReceivedAt: now,
 		}
 		if err := s.store.UpsertOrder(order); err != nil {

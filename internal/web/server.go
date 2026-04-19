@@ -219,7 +219,7 @@ func NewServer(cfg config.AppConfig) *Server {
 			s.strategy = manager
 		}
 	}
-	if svc, err := trade.NewPaperService(cfg.Trade, "paper_live", tradePaperLiveDSN, status.QueueRegistry()); err != nil {
+	if svc, err := trade.NewPaperServiceWithMeta(cfg.Trade, cfg.CTP, "paper_live", tradePaperLiveDSN, status.QueueRegistry()); err != nil {
 		logger.Error("init paper live trade service failed", "error", err)
 	} else {
 		s.tradePaperLive = svc
@@ -2535,6 +2535,9 @@ func (s *Server) handleTradeRefresh(w http.ResponseWriter, r *http.Request) {
 	if svc == nil {
 		return
 	}
+	if s.currentAppMode() == appmode.LivePaper {
+		svc.RequestMetaSync()
+	}
 	if err := svc.RefreshAll(); err != nil {
 		http.Error(w, err.Error(), http.StatusBadGateway)
 		return
@@ -2582,8 +2585,41 @@ func (s *Server) forwardQuoteEvents() {
 	ch, cancel := s.chartStream.SubscribeQuotes()
 	defer cancel()
 	for update := range ch {
+		if s.currentAppMode() == appmode.LivePaper && s.tradePaperLive != nil {
+			s.feedLivePaperTrade(update)
+		}
 		s.broadcastQuoteUpdate(update)
 	}
+}
+
+func (s *Server) feedLivePaperTrade(update quotes.ChartQuoteUpdate) {
+	if s.tradePaperLive == nil {
+		return
+	}
+	symbol := strings.TrimSpace(update.Subscription.Symbol)
+	if symbol == "" {
+		symbol = strings.TrimSpace(update.Snapshot.Symbol)
+	}
+	if symbol == "" {
+		return
+	}
+	bid := 0.0
+	if update.Snapshot.BidPrice1 != nil {
+		bid = *update.Snapshot.BidPrice1
+	}
+	ask := 0.0
+	if update.Snapshot.AskPrice1 != nil {
+		ask = *update.Snapshot.AskPrice1
+	}
+	_ = s.tradePaperLive.ConsumePaperMarketTick(trade.PaperMarketTick{
+		Symbol:         symbol,
+		TradingDay:     strings.TrimSpace(update.Snapshot.TradingDay),
+		ActionDay:      strings.TrimSpace(update.Snapshot.ActionDay),
+		UpdateTime:     strings.TrimSpace(update.Snapshot.UpdateTime),
+		UpdateMillisec: update.Snapshot.UpdateMillisec,
+		BidPrice1:      bid,
+		AskPrice1:      ask,
+	})
 }
 
 func (s *Server) broadcastStatusTicker() {

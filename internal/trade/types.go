@@ -34,6 +34,20 @@ type TradeStatus struct {
 	LastError string `json:"last_error"`
 	// LastQueryAt 是最近一次查询账户、持仓、委托或成交成功时间。
 	LastQueryAt time.Time `json:"last_query_at"`
+	// MetaSyncTradingDay 是实时模拟元数据同步使用的当前交易日。
+	MetaSyncTradingDay string `json:"meta_sync_trading_day,omitempty"`
+	// FeeGap 是当前交易日手续费缺口数量。
+	FeeGap int `json:"fee_gap,omitempty"`
+	// MarginGap 是当前交易日保证金缺口数量。
+	MarginGap int `json:"margin_gap,omitempty"`
+	// FeeLaneRunning 表示手续费补齐 lane 是否在运行。
+	FeeLaneRunning bool `json:"fee_lane_running,omitempty"`
+	// MarginLaneRunning 表示保证金补齐 lane 是否在运行。
+	MarginLaneRunning bool `json:"margin_lane_running,omitempty"`
+	// FeeThrottleMS 是手续费补齐 lane 当前节流毫秒。
+	FeeThrottleMS int64 `json:"fee_throttle_ms,omitempty"`
+	// MarginThrottleMS 是保证金补齐 lane 当前节流毫秒。
+	MarginThrottleMS int64 `json:"margin_throttle_ms,omitempty"`
 	// UpdatedAt 是状态对象最后更新时间。
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -175,6 +189,25 @@ type SubmitOrderRequest struct {
 	ClientTag string `json:"client_tag"`
 	// Reason 记录这次下单的来源或原因。
 	Reason string `json:"reason"`
+}
+
+type PaperMarketTick struct {
+	// Symbol 是合约代码。
+	Symbol string `json:"symbol"`
+	// ExchangeID 是交易所代码。
+	ExchangeID string `json:"exchange_id"`
+	// TradingDay 是交易日（YYYYMMDD）。
+	TradingDay string `json:"trading_day"`
+	// ActionDay 是自然日（YYYYMMDD）。
+	ActionDay string `json:"action_day"`
+	// UpdateTime 是行情时间（HH:MM:SS）。
+	UpdateTime string `json:"update_time"`
+	// UpdateMillisec 是行情毫秒部分。
+	UpdateMillisec int `json:"update_millisec"`
+	// BidPrice1 是买一价。
+	BidPrice1 float64 `json:"bid_price1"`
+	// AskPrice1 是卖一价。
+	AskPrice1 float64 `json:"ask_price1"`
 }
 
 type CancelOrderRequest struct {
