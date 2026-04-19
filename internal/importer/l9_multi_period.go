@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 
+	"ctp-future-kline/internal/klinesettings"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/mmkline"
 	"ctp-future-kline/internal/quotes"
@@ -13,6 +14,14 @@ func (s *TDXImportSession) aggregateMultiPeriodsAfterImport(db *sql.DB, sharedDB
 	if !s.opts.EnableMMRebuild {
 		return nil
 	}
+	settings := klinesettings.Normalize(s.opts.GenerationSettings)
+	kind := "contract"
+	if isL9 {
+		kind = "l9"
+	}
+	if !settings.AnyHigherEnabled(kind) {
+		return nil
+	}
 	variety := quotes.NormalizeVariety(bar.Variety)
 	instrumentID := bar.InstrumentID
 
@@ -20,6 +29,7 @@ func (s *TDXImportSession) aggregateMultiPeriodsAfterImport(db *sql.DB, sharedDB
 		Variety:      variety,
 		InstrumentID: instrumentID,
 		IsL9:         isL9,
+		Periods:      enabledPeriodsForMM(settings, kind),
 	}, s.opts.AllowSessionInfer)
 	if err != nil {
 		if errors.Is(err, mmkline.ErrTradingSessionNotReady) {
@@ -56,6 +66,16 @@ func (s *TDXImportSession) aggregateMultiPeriodsAfterImport(db *sql.DB, sharedDB
 		"missing_bucket_count", missingBuckets,
 	)
 	return nil
+}
+
+func enabledPeriodsForMM(settings klinesettings.Settings, kind string) []string {
+	out := make([]string, 0, 5)
+	for _, tf := range []string{"5m", "15m", "30m", "1h", "1d"} {
+		if settings.Enabled(kind, tf) {
+			out = append(out, tf)
+		}
+	}
+	return out
 }
 
 func (s *TDXImportSession) inferTradingSessionsAfterImport(db *sql.DB, sharedDB *sql.DB, bar quotes.MinuteBar, isL9 bool) error {

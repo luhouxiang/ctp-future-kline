@@ -218,6 +218,19 @@ const searchState = reactive({
   rowBusy: {},
 })
 
+const KLINE_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d']
+
+function defaultKlineGenerationSettings() {
+  const build = () => Object.fromEntries(KLINE_TIMEFRAMES.map((tf) => [tf, true]))
+  return {
+    contract: build(),
+    l9: build(),
+  }
+}
+
+const klineGenerationSettings = reactive(defaultKlineGenerationSettings())
+const klineGenerationSaving = ref(false)
+
 const files = ref([])
 const tradingDayFile = ref(null)
 const tradingDayImportResult = ref(null)
@@ -314,6 +327,71 @@ function addLog(message) {
   if (logs.value.length > 80) {
     logs.value = logs.value.slice(0, 80)
   }
+}
+
+function applyKlineGenerationSettings(snapshot) {
+  const normalized = defaultKlineGenerationSettings()
+  const src = snapshot && typeof snapshot === 'object' ? snapshot : {}
+  for (const kind of ['contract', 'l9']) {
+    const kindValue = src[kind] && typeof src[kind] === 'object' ? src[kind] : {}
+    for (const tf of KLINE_TIMEFRAMES) {
+      if (Object.prototype.hasOwnProperty.call(kindValue, tf)) {
+        normalized[kind][tf] = !!kindValue[tf]
+      }
+    }
+  }
+  for (const kind of ['contract', 'l9']) {
+    for (const tf of KLINE_TIMEFRAMES) {
+      klineGenerationSettings[kind][tf] = normalized[kind][tf]
+    }
+  }
+}
+
+async function fetchKlineGenerationSettings() {
+  const resp = await fetch('/api/kline/generation-settings')
+  if (!resp.ok) {
+    throw new Error(`kline generation settings http ${resp.status}`)
+  }
+  const data = await resp.json()
+  applyKlineGenerationSettings(data?.settings || {})
+}
+
+async function saveKlineGenerationSettings() {
+  if (klineGenerationSaving.value) return
+  klineGenerationSaving.value = true
+  try {
+    const payload = {
+      settings: {
+        contract: { ...klineGenerationSettings.contract },
+        l9: { ...klineGenerationSettings.l9 },
+      },
+    }
+    const resp = await fetch('/api/kline/generation-settings', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    })
+    if (!resp.ok) {
+      addLog(`保存K线生成设置失败: ${await resp.text()}`)
+      return
+    }
+    const data = await resp.json()
+    applyKlineGenerationSettings(data?.settings || payload.settings)
+    addLog('K线生成设置已保存')
+  } catch (error) {
+    addLog(`保存K线生成设置失败: ${error instanceof Error ? error.message : String(error)}`)
+  } finally {
+    klineGenerationSaving.value = false
+  }
+}
+
+function onKlineGenerationToggle(kind, timeframe, event) {
+  const checked = !!event?.target?.checked
+  if (!klineGenerationSettings[kind] || !Object.prototype.hasOwnProperty.call(klineGenerationSettings[kind], timeframe)) {
+    return
+  }
+  klineGenerationSettings[kind][timeframe] = checked
+  void saveKlineGenerationSettings()
 }
 
 function applyStatusSnapshot(snapshot) {
@@ -1353,6 +1431,7 @@ onMounted(async () => {
   try {
     await fetchAppMode()
     await fetchStatus()
+    await fetchKlineGenerationSettings()
   } catch (error) {
     addLog(`状态获取失败: ${error.message}`)
   }
@@ -1402,6 +1481,42 @@ onUnmounted(() => {
         </select>
       </div>
       <p v-if="isReplayAppMode" class="error-text">回放模拟模式不需要连接实时行情服务器或真实交易前置，启动服务器按钮已禁用</p>
+    </div>
+
+    <div class="panel">
+      <h3>生成K线栏设置</h3>
+      <p>对所有K线生成路径生效：实盘生成、回放、K线导入。</p>
+      <table class="table">
+        <thead>
+          <tr>
+            <th>数据类型</th>
+            <th v-for="tf in KLINE_TIMEFRAMES" :key="`kline-head-${tf}`">{{ tf }}</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td>contract</td>
+            <td v-for="tf in KLINE_TIMEFRAMES" :key="`kline-contract-${tf}`">
+              <input
+                :checked="!!klineGenerationSettings.contract[tf]"
+                type="checkbox"
+                @change="onKlineGenerationToggle('contract', tf, $event)"
+              />
+            </td>
+          </tr>
+          <tr>
+            <td>L9</td>
+            <td v-for="tf in KLINE_TIMEFRAMES" :key="`kline-l9-${tf}`">
+              <input
+                :checked="!!klineGenerationSettings.l9[tf]"
+                type="checkbox"
+                @change="onKlineGenerationToggle('l9', tf, $event)"
+              />
+            </td>
+          </tr>
+        </tbody>
+      </table>
+      <p>{{ klineGenerationSaving ? '保存中...' : '勾选变化后自动保存到数据库' }}</p>
     </div>
 
     <div class="panel">

@@ -16,6 +16,7 @@ import (
 
 	"ctp-future-kline/internal/klineagg"
 	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/klinesettings"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/queuewatch"
 	"ctp-future-kline/internal/sessiontime"
@@ -69,6 +70,8 @@ type runtimeOptions struct {
 	onPartialBar func(minuteBar)
 	// onPersistTask 在 bar 进入落库队列时触发。
 	onPersistTask func(persistTask)
+	// generation 控制 contract/l9 各周期是否生成并落库。
+	generation klinesettings.Settings
 }
 
 type runtimeTick struct {
@@ -402,6 +405,7 @@ func newMarketDataRuntime(store *klineStore, metaDB *sql.DB, l9Async *l9AsyncCal
 	if opts.mmDeferredBatch <= 0 {
 		opts.mmDeferredBatch = defaultMMDeferredBatch
 	}
+	opts.generation = klinesettings.Normalize(opts.generation)
 
 	rt := &marketDataRuntime{
 		store:              store,
@@ -738,11 +742,22 @@ func (r *marketDataRuntime) enqueuePersistTasks(tasks []persistTask) {
 		return
 	}
 	for _, task := range tasks {
+		if !r.shouldEmitTask(task) {
+			continue
+		}
 		if r.opts.onPersistTask != nil {
 			r.opts.onPersistTask(task)
 		}
 		r.dbWriter.Enqueue(task)
 	}
+}
+
+func (r *marketDataRuntime) shouldEmitTask(task persistTask) bool {
+	kind := "contract"
+	if task.IsL9 {
+		kind = "l9"
+	}
+	return r.opts.generation.Enabled(kind, task.Bar.Period)
 }
 
 func (s *marketDataShard) run() {
@@ -866,7 +881,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 	state := s.state[instrumentID]
 	if state == nil {
 		state = &instrumentRuntimeState{
-			tracker: newTimeframeTracker(),
+			tracker: newTimeframeTrackerForKind("contract", s.runtime.opts.generation),
 		}
 		s.state[instrumentID] = state
 	}
@@ -884,7 +899,7 @@ func (s *marketDataShard) processTick(t runtimeTick) {
 		state.currentTradingDay = currentTradingDay
 	}
 	if state.tracker == nil {
-		state.tracker = newTimeframeTracker()
+		state.tracker = newTimeframeTrackerForKind("contract", s.runtime.opts.generation)
 	}
 	if s.runtime.opts.enableMultiMinute {
 		if err := s.restoreTimeframeState(state, instrumentID, variety, currentTradingDay); err != nil {
@@ -1144,7 +1159,7 @@ func (s *marketDataShard) buildPersistTasks(closedBar minuteBar, trace runtimeTr
 		}
 	}
 
-	if s.runtime.l9Async != nil {
+	if s.runtime.l9Async != nil && s.runtime.opts.generation.AnyEnabled("l9") {
 		// 第三步：把这根 1m 记入品种分钟快照，并异步触发一次 L9 计算。
 		// L9 的 1m/mm 不在当前 goroutine 里同步生成，避免拖慢主 shard。
 		s.runtime.l9Async.ObserveMinuteBar(closedBar)
@@ -1177,6 +1192,9 @@ func (s *marketDataShard) emitHigherTimeframePartials(state *instrumentRuntimeSt
 	partials := state.tracker.BuildPartials(state.bar, sessions)
 	sortTimeframeBars(partials)
 	for _, bar := range partials {
+		if !s.runtime.opts.generation.Enabled("contract", bar.Period) {
+			continue
+		}
 		onPartialBarRateProbe.Inc()
 		s.runtime.opts.onPartialBar(bar)
 	}

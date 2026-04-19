@@ -402,7 +402,8 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 	}
 	expectedByVariety := buildExpectedVarietyInstruments(queriedInstruments, subscribeTargets)
 	var l9Calc *l9AsyncCalculator
-	if s.cfg.IsL9AsyncEnabled() {
+	generation := GetKlineGenerationSettings()
+	if s.cfg.IsL9AsyncEnabled() && generation.AnyEnabled("l9") {
 		l9Calc = newL9AsyncCalculator(store, metaDB, status, true, 1, expectedByVariety)
 	}
 
@@ -463,13 +464,14 @@ func (s *Service) initMarketData(queriedInstruments []instrumentInfo, status *Ru
 		tickDedupWindow:    time.Duration(s.cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:     time.Duration(s.cfg.DriftThresholdSeconds) * time.Second,
 		driftResumeTicks:   s.cfg.DriftResumeTicks,
-		enableMultiMinute:  true,
+		enableMultiMinute:  generation.AnyHigherEnabled("contract"),
 		dbWriterCount:      s.cfg.DBWriterCount,
 		dbFlushBatch:       s.cfg.DBFlushBatch,
 		dbFlushInterval:    time.Duration(s.cfg.DBFlushIntervalMS) * time.Millisecond,
 		mmDeferredInterval: time.Duration(s.cfg.MMDeferredIntervalMS) * time.Millisecond,
 		mmDeferredBatch:    s.cfg.MMDeferredBatch,
 		flowPath:           s.cfg.FlowPath,
+		generation:         generation,
 		onTick:             sideEffects.PublishTick,
 		onBar:              sideEffects.PublishBar,
 		onPartialBar: func(bar minuteBar) {

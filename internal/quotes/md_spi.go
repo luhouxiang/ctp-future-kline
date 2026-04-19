@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/klinesettings"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/sessiontime"
 
@@ -63,6 +64,8 @@ type mdSpiOptions struct {
 	onPartialBar func(minuteBar)
 	// onPersistTask 在 bar 已进入落库任务队列时触发，供图表 final 事件使用。
 	onPersistTask func(persistTask)
+	// generation 控制 contract/l9 各周期生成开关。
+	generation klinesettings.Settings
 }
 
 type tickEvent struct {
@@ -247,6 +250,7 @@ func newMdSpiWithStatusAndOptions(store *klineStore, metaDB *sql.DB, l9Async *l9
 		onBar:             opts.onBar,
 		onPartialBar:      opts.onPartialBar,
 		onPersistTask:     opts.onPersistTask,
+		generation:        opts.generation,
 	})
 	return spi
 }

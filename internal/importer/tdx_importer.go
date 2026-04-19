@@ -19,6 +19,7 @@ import (
 
 	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/klineclock"
+	"ctp-future-kline/internal/klinesettings"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/quotes"
 
@@ -158,6 +159,7 @@ type ImportOptions struct {
 	OverwriteDuplicates bool
 	MaxDataDays         int
 	SessionOnly         bool
+	GenerationSettings  klinesettings.Settings
 }
 
 type rawTdxRow struct {
@@ -192,6 +194,7 @@ func NewTDXImportSession(id string, dbPath string, files []UploadFile, handler E
 		OverwriteDuplicates: false,
 		MaxDataDays:         0,
 		SessionOnly:         false,
+		GenerationSettings:  klinesettings.Default(),
 	}, handler)
 }
 
@@ -209,11 +212,16 @@ func NewTDXImportSessionWithOptions(id string, dbPath string, files []UploadFile
 		sharedDBPath:  sharedDBPath,
 		files:         files,
 		handler:       handler,
-		opts:          opts,
+		opts:          normalizeImportOptions(opts),
 		progress:      Progress{TotalFiles: len(files)},
 		replaceByInst: make(map[string]bool),
 		decisionCh:    make(chan DecisionRequest, 1),
 	}
+}
+
+func normalizeImportOptions(opts ImportOptions) ImportOptions {
+	opts.GenerationSettings = klinesettings.Normalize(opts.GenerationSettings)
+	return opts
 }
 
 func (s *TDXImportSession) ID() string {

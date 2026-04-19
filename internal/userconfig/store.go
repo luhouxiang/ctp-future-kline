@@ -9,6 +9,7 @@ import (
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/config"
 	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/klinesettings"
 )
 
 const (
@@ -16,9 +17,11 @@ const (
 
 	scopeTrade            = "trade"
 	scopeAppMode          = "app_mode"
+	scopeKlineGeneration  = "kline_generation"
 	keyEnabled            = "enabled"
 	keyCurrentMode        = "current_mode"
 	keyReplayResumeCursor = "replay_resume_cursor"
+	keyKlineSettings      = "settings"
 )
 
 // Store 管理用户级配置覆盖项的持久化读写。
@@ -144,6 +147,22 @@ func (s *Store) LoadReplayResumeCursor(owner string) (*bus.FileCursor, bool, err
 		return nil, false, err
 	}
 	return &cursor, true, nil
+}
+
+func (s *Store) SaveKlineGenerationSettings(owner string, settings klinesettings.Settings) error {
+	return s.saveValue(owner, scopeKlineGeneration, keyKlineSettings, klinesettings.Normalize(settings))
+}
+
+func (s *Store) LoadKlineGenerationSettings(owner string) (klinesettings.Settings, bool, error) {
+	raw, ok, err := s.LoadRawValue(owner, scopeKlineGeneration, keyKlineSettings)
+	if !ok || err != nil {
+		return klinesettings.Default(), ok, err
+	}
+	var settings klinesettings.Settings
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return klinesettings.Default(), false, err
+	}
+	return klinesettings.Normalize(settings), true, nil
 }
 
 func (s *Store) saveValue(owner, scopeName, itemKey string, value any) error {

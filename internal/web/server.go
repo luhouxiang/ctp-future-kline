@@ -27,6 +27,7 @@ import (
 	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/importer"
 	"ctp-future-kline/internal/klinequery"
+	"ctp-future-kline/internal/klinesettings"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/quotes"
 	"ctp-future-kline/internal/replay"
@@ -77,6 +78,8 @@ type Server struct {
 	userConfig *userconfig.Store
 	// currentMode 是服务端权威的全局运行模式。
 	currentMode string
+	// klineGeneration 保存当前 K 线生成设置。
+	klineGeneration klinesettings.Settings
 
 	// mu 保护导入会话和 websocket 连接集合等共享状态。
 	mu sync.Mutex
@@ -132,10 +135,12 @@ func NewServer(cfg config.AppConfig) *Server {
 		queryReplay:         klinequery.NewServiceWithSessionDB(replayDSN, sharedDSN, searchReplay),
 		calendar:            calendar.NewManager(sharedDSN),
 		currentMode:         appmode.LiveReal,
+		klineGeneration:     klinesettings.Default(),
 		sessions:            make(map[string]*importer.TDXImportSession),
 		wsConns:             make(map[*websocket.Conn]*wsClient),
 		subscriptionTickets: newSubscriptionTicketManager(sharedDSN),
 	}
+	quotes.SetKlineGenerationSettings(s.klineGeneration)
 	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
 		logger.Error("ensure mysql database failed", "error", err)
 	}
@@ -203,6 +208,12 @@ func NewServer(cfg config.AppConfig) *Server {
 			logger.Error("load app mode failed", "error", loadErr)
 		} else if ok {
 			s.currentMode = appmode.Normalize(mode)
+		}
+		if generation, ok, loadErr := store.LoadKlineGenerationSettings(userconfig.DefaultOwner); loadErr != nil {
+			logger.Error("load kline generation settings failed", "error", loadErr)
+		} else if ok {
+			s.klineGeneration = generation
+			quotes.SetKlineGenerationSettings(generation)
 		}
 	}
 	if stream, err := quotes.NewChartStream(sharedDSN, status.QueueRegistry()); err != nil {
@@ -286,6 +297,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/kline/index/rebuild-all", s.handleKlineIndexRebuildAll)
 	mux.HandleFunc("/api/kline/index/rebuild-one", s.handleKlineIndexRebuildOne)
 	mux.HandleFunc("/api/kline/bars", s.handleKlineBars)
+	mux.HandleFunc("/api/kline/generation-settings", s.handleKlineGenerationSettings)
 	mux.HandleFunc("/api/instruments", s.handleInstruments)
 	mux.HandleFunc("/api/commission-rates", s.handleCommissionRates)
 	mux.HandleFunc("/api/margin-rates", s.handleMarginRates)
@@ -391,6 +403,18 @@ func (s *Server) currentAppMode() string {
 func (s *Server) setCurrentAppMode(mode string) {
 	s.mu.Lock()
 	s.currentMode = appmode.Normalize(mode)
+	s.mu.Unlock()
+}
+
+func (s *Server) currentKlineGeneration() klinesettings.Settings {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return klinesettings.Normalize(s.klineGeneration)
+}
+
+func (s *Server) setKlineGeneration(settings klinesettings.Settings) {
+	s.mu.Lock()
+	s.klineGeneration = klinesettings.Normalize(settings)
 	s.mu.Unlock()
 }
 
@@ -558,6 +582,39 @@ func (s *Server) handleAppMode(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (s *Server) handleKlineGenerationSettings(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{
+			"settings": s.currentKlineGeneration(),
+		})
+	case http.MethodPost:
+		var req struct {
+			Settings klinesettings.Settings `json:"settings"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		next := klinesettings.Normalize(req.Settings)
+		s.setKlineGeneration(next)
+		quotes.SetKlineGenerationSettings(next)
+		if s.userConfig != nil {
+			if err := s.userConfig.SaveKlineGenerationSettings(s.currentOwner(), next); err != nil {
+				logger.Error("save kline generation settings failed", "owner", s.currentOwner(), "error", err)
+				http.Error(w, "save kline generation settings failed", http.StatusInternalServerError)
+				return
+			}
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ok":       true,
+			"settings": next,
+		})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
 func (s *Server) handleStartRuntime(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -635,6 +692,7 @@ func (s *Server) handleImportSession(w http.ResponseWriter, r *http.Request) {
 		AllowSessionInfer:   false,
 		RequireL9:           false,
 		OverwriteDuplicates: false,
+		GenerationSettings:  s.currentKlineGeneration(),
 	}, sessionHandler{
 		server:    s,
 		sessionID: sessionID,

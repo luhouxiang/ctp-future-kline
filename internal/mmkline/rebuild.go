@@ -36,6 +36,8 @@ type RebuildRequest struct {
 	Variety      string
 	InstrumentID string
 	IsL9         bool
+	// Periods 可选指定重建周期（5m/15m/30m/1h/1d）；为空表示全部。
+	Periods []string
 }
 
 // SessionRangeJSON 是交易时段配置落到 JSON 时使用的结构。
@@ -116,6 +118,19 @@ func RebuildAndUpsertWithSessionDB(db *sql.DB, sessionDB *sql.DB, req RebuildReq
 		{Label: "1h", Minutes: 60},
 		{Label: "1d", Minutes: 1440},
 	}
+	selected := selectedPeriods(req.Periods)
+	if len(selected) > 0 {
+		filtered := make([]struct {
+			Label   string
+			Minutes int
+		}, 0, len(periods))
+		for _, p := range periods {
+			if selected[p.Label] {
+				filtered = append(filtered, p)
+			}
+		}
+		periods = filtered
+	}
 
 	written := make(map[string]int, len(periods))
 	var allStats []klineagg.BucketStat
@@ -143,6 +158,24 @@ func RebuildAndUpsertWithSessionDB(db *sql.DB, sessionDB *sql.DB, req RebuildReq
 		allStats = append(allStats, stats...)
 	}
 	return written, allStats, nil
+}
+
+func selectedPeriods(items []string) map[string]bool {
+	if len(items) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(items))
+	for _, item := range items {
+		v := strings.ToLower(strings.TrimSpace(item))
+		switch v {
+		case "5m", "15m", "30m", "1h", "1d":
+			out[v] = true
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
 }
 
 func InferAndUpsertTradingSessions(sessionDB *sql.DB, sourceDB *sql.DB, req RebuildRequest) error {

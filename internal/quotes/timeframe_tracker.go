@@ -4,6 +4,7 @@ import (
 	"sort"
 
 	"ctp-future-kline/internal/klineagg"
+	"ctp-future-kline/internal/klinesettings"
 	"ctp-future-kline/internal/sessiontime"
 )
 
@@ -35,8 +36,29 @@ type timeframeAggregateState struct {
 }
 
 func newTimeframeTracker() *timeframeTracker {
-	states := make(map[string]*timeframeAggregateState, len(trackedRealtimeTimeframes))
+	return newTimeframeTrackerWithFrames(trackedRealtimeTimeframes)
+}
+
+func newTimeframeTrackerForKind(kind string, settings klinesettings.Settings) *timeframeTracker {
+	normalized := klinesettings.Normalize(settings)
+	frames := make([]struct {
+		label   string
+		minutes int
+	}, 0, len(trackedRealtimeTimeframes))
 	for _, item := range trackedRealtimeTimeframes {
+		if normalized.Enabled(kind, item.label) {
+			frames = append(frames, item)
+		}
+	}
+	return newTimeframeTrackerWithFrames(frames)
+}
+
+func newTimeframeTrackerWithFrames(frames []struct {
+	label   string
+	minutes int
+}) *timeframeTracker {
+	states := make(map[string]*timeframeAggregateState, len(frames))
+	for _, item := range frames {
 		states[item.label] = &timeframeAggregateState{
 			timeframe: item.label,
 			minutes:   item.minutes,
