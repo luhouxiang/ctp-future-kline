@@ -18,6 +18,12 @@ type rateCatalog struct {
 	db *sql.DB
 }
 
+type marginCalcParams struct {
+	VolumeMultiple int
+	RatioByMoney   float64
+	RatioByVolume  float64
+}
+
 func newRateCatalog(sharedDSN string) (*rateCatalog, error) {
 	sharedDSN = strings.TrimSpace(sharedDSN)
 	if sharedDSN == "" {
@@ -231,4 +237,88 @@ short_margin_ratio_by_money,short_margin_ratio_by_volume,is_relative,sync_tradin
 		return 0, err
 	}
 	return n, nil
+}
+
+func (c *rateCatalog) marginCalcParams(instrumentID string, exchangeID string, direction string) (marginCalcParams, error) {
+	if c == nil || c.db == nil {
+		return marginCalcParams{}, nil
+	}
+	instrumentID = strings.TrimSpace(instrumentID)
+	exchangeID = strings.TrimSpace(exchangeID)
+	direction = strings.TrimSpace(strings.ToLower(direction))
+	if instrumentID == "" || exchangeID == "" {
+		return marginCalcParams{}, nil
+	}
+	var params marginCalcParams
+	if err := c.db.QueryRow(
+		`SELECT volume_multiple
+FROM ctp_instruments
+WHERE instrument_id=? AND exchange_id=?
+ORDER BY sync_trading_day DESC, updated_at DESC
+LIMIT 1`,
+		instrumentID,
+		exchangeID,
+	).Scan(&params.VolumeMultiple); err != nil && err != sql.ErrNoRows {
+		return marginCalcParams{}, err
+	}
+	var longByMoney, longByVolume, shortByMoney, shortByVolume sql.NullFloat64
+	err := c.db.QueryRow(
+		`SELECT long_margin_ratio_by_money,long_margin_ratio_by_volume,short_margin_ratio_by_money,short_margin_ratio_by_volume
+FROM ctp_margin_rates
+WHERE instrument_id=? AND exchange_id=?
+ORDER BY CASE WHEN hedge_flag='speculation' THEN 0 ELSE 1 END, sync_trading_day DESC, updated_at DESC
+LIMIT 1`,
+		instrumentID,
+		exchangeID,
+	).Scan(&longByMoney, &longByVolume, &shortByMoney, &shortByVolume)
+	if err != nil && err != sql.ErrNoRows {
+		return marginCalcParams{}, err
+	}
+	if direction == "sell" {
+		if shortByMoney.Valid {
+			params.RatioByMoney = shortByMoney.Float64
+		}
+		if shortByVolume.Valid {
+			params.RatioByVolume = shortByVolume.Float64
+		}
+	} else {
+		if longByMoney.Valid {
+			params.RatioByMoney = longByMoney.Float64
+		}
+		if longByVolume.Valid {
+			params.RatioByVolume = longByVolume.Float64
+		}
+	}
+	return params, nil
+}
+
+func (c *rateCatalog) instrumentVolumeMultiple(instrumentID string, exchangeID string) (int, error) {
+	if c == nil || c.db == nil {
+		return 0, nil
+	}
+	instrumentID = strings.TrimSpace(instrumentID)
+	exchangeID = strings.TrimSpace(exchangeID)
+	if instrumentID == "" || exchangeID == "" {
+		return 0, nil
+	}
+	var vm sql.NullInt64
+	err := c.db.QueryRow(
+		`SELECT volume_multiple
+FROM ctp_instruments
+WHERE instrument_id=? AND exchange_id=?
+ORDER BY sync_trading_day DESC, updated_at DESC
+LIMIT 1`,
+		instrumentID,
+		exchangeID,
+	).Scan(&vm)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return 0, nil
+		}
+		return 0, err
+	}
+	if !vm.Valid || vm.Int64 <= 0 {
+		return 0, nil
+	}
+	return int(vm.Int64), nil
 }

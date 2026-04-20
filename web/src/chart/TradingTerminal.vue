@@ -531,6 +531,14 @@ function updateTradeFormField(field, value) {
   }
 }
 
+function showTradeError(prefix, err) {
+  const msg = err instanceof Error ? err.message : String(err || 'unknown error')
+  console.warn(`[trade-dock] ${prefix} failed`, err)
+  if (typeof window !== 'undefined' && typeof window.alert === 'function') {
+    window.alert(`${prefix}失败：${msg}`)
+  }
+}
+
 async function submitTradeOrder() {
   try {
     const payload = {
@@ -552,7 +560,7 @@ async function submitTradeOrder() {
     if (!resp.ok) throw new Error(await resp.text())
     await fetchTradeTerminal()
   } catch (err) {
-    console.warn('[trade-dock] submit order failed', err)
+    showTradeError('下单', err)
   }
 }
 
@@ -575,7 +583,7 @@ async function cancelTradeOrder(item) {
     if (!resp.ok) throw new Error(await resp.text())
     await fetchTradeTerminal()
   } catch (err) {
-    console.warn('[trade-dock] cancel order failed', err)
+    showTradeError('撤单', err)
   }
 }
 
@@ -602,7 +610,7 @@ async function closeTradePosition(item) {
     if (!resp.ok) throw new Error(await resp.text())
     await fetchTradeTerminal()
   } catch (err) {
-    console.warn('[trade-dock] close position failed', err)
+    showTradeError('平仓', err)
   }
 }
 

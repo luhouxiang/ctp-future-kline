@@ -2259,6 +2259,7 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 
 	terminalPositions := make([]trade.TerminalPosition, 0, len(positions))
 	for _, item := range positions {
+		volumeMultiple := s.contractVolumeMultiple(item.Symbol, item.Exchange)
 		avgPrice := 0.0
 		if item.Position > 0 && item.PositionCost > 0 {
 			avgPrice = item.PositionCost / float64(item.Position)
@@ -2267,9 +2268,9 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 		floatPnL := 0.0
 		if item.Position > 0 {
 			if item.Direction == "short" {
-				floatPnL = (avgPrice - mark) * float64(item.Position)
+				floatPnL = (avgPrice - mark) * float64(item.Position) * volumeMultiple
 			} else {
-				floatPnL = (mark - avgPrice) * float64(item.Position)
+				floatPnL = (mark - avgPrice) * float64(item.Position) * volumeMultiple
 			}
 		}
 		frozen := pendingClose[item.Symbol][item.Direction]
@@ -2284,7 +2285,7 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 			AvgPrice:         avgPrice,
 			MarketPrice:      mark,
 			FloatPnL:         floatPnL,
-			MarketValue:      mark * float64(item.Position),
+			MarketValue:      mark * float64(item.Position) * volumeMultiple,
 		})
 	}
 
@@ -2310,7 +2311,7 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 	out.OrderEntryDefaults = trade.TerminalOrderEntryDefaults{
 		AccountID:  account.AccountID,
 		Symbol:     symbol,
-		ExchangeID: "",
+		ExchangeID: s.inferExchangeIDForSymbol(symbol, positions, orders),
 		Volume:     1,
 		LimitPrice: chartQuoteLimitPrice(quote),
 	}
@@ -2394,6 +2395,50 @@ func (s *Server) chartQuoteSnapshotForSymbol(symbol string) quotes.ChartQuoteSna
 		return update.Snapshot
 	}
 	return quotes.ChartQuoteSnapshot{}
+}
+
+func (s *Server) inferExchangeIDForSymbol(symbol string, positions []trade.PositionSnapshot, orders []trade.OrderRecord) string {
+	symbol = strings.TrimSpace(symbol)
+	if symbol == "" {
+		return ""
+	}
+	for _, item := range positions {
+		if strings.EqualFold(strings.TrimSpace(item.Symbol), symbol) {
+			exchangeID := strings.TrimSpace(item.Exchange)
+			if exchangeID != "" {
+				return exchangeID
+			}
+		}
+	}
+	for _, item := range orders {
+		if strings.EqualFold(strings.TrimSpace(item.Symbol), symbol) {
+			exchangeID := strings.TrimSpace(item.ExchangeID)
+			if exchangeID != "" {
+				return exchangeID
+			}
+		}
+	}
+	cache := quotes.DefaultProductExchangeCache()
+	if cache.Count() == 0 {
+		_, _ = cache.EnsureLoadedFromDSN(strings.TrimSpace(s.cfg.CTP.SharedMetaDSN))
+	}
+	exchangeID, err := cache.InferExchangeByProduct(symbol)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(exchangeID)
+}
+
+func (s *Server) contractVolumeMultiple(symbol string, exchangeID string) float64 {
+	cache := quotes.DefaultProductExchangeCache()
+	if cache.Count() == 0 {
+		_, _ = cache.EnsureLoadedFromDSN(strings.TrimSpace(s.cfg.CTP.SharedMetaDSN))
+	}
+	resolved, err := cache.Resolve(symbol, exchangeID)
+	if err != nil || resolved.Product.VolumeMultiple <= 0 {
+		return 1
+	}
+	return float64(resolved.Product.VolumeMultiple)
 }
 
 func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
@@ -2512,7 +2557,10 @@ func (s *Server) handleTradeOrders(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if strings.TrimSpace(req.AccountID) == "" {
-			req.AccountID = s.cfg.Trade.AccountID
+			req.AccountID = s.tradeAccountIDForMode(s.currentAppMode())
+		}
+		if strings.TrimSpace(req.ExchangeID) == "" {
+			req.ExchangeID = s.inferExchangeIDForSymbol(req.Symbol, nil, nil)
 		}
 		rec, err := svc.SubmitOrder(r.Context(), req)
 		if err != nil {
@@ -2554,7 +2602,7 @@ func (s *Server) handleTradeOrderAction(w http.ResponseWriter, r *http.Request) 
 		}
 		req.CommandID = commandID
 		if strings.TrimSpace(req.AccountID) == "" {
-			req.AccountID = s.cfg.Trade.AccountID
+			req.AccountID = s.tradeAccountIDForMode(s.currentAppMode())
 		}
 		rec, err := svc.CancelOrder(r.Context(), req)
 		if err != nil {

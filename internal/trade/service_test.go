@@ -141,6 +141,22 @@ func TestResetPaperReplayClearsTradeStateAndRestoresInitialBalance(t *testing.T)
 	assertTableCount(t, svc, "trade_session_state", 1)
 }
 
+func TestLivePaperInitialBalanceIs100K(t *testing.T) {
+	dsn := testmysql.NewDatabase(t)
+	svc, err := NewPaperService(configForTradeTest(), "paper_live", dsn, nil)
+	if err != nil {
+		t.Fatalf("new live paper service failed: %v", err)
+	}
+	t.Cleanup(func() { _ = svc.Close() })
+
+	account, err := svc.Account()
+	if err != nil {
+		t.Fatalf("load live paper account failed: %v", err)
+	}
+	assertFloatEqual(t, account.Balance, replayPaperInitialBalance)
+	assertFloatEqual(t, account.Available, replayPaperInitialBalance)
+}
+
 func TestReplayPaperMatchingAndCancelLifecycle(t *testing.T) {
 	dsn := testmysql.NewDatabase(t)
 	svc := newReplayPaperServiceForTest(t, dsn)

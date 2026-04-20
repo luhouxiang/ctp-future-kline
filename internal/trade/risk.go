@@ -55,11 +55,8 @@ func ValidateSubmit(ctx context.Context, status TradeStatus, cfg config.TradeCon
 	if req.OffsetFlag != "open" && closableVolume(positions, req.Symbol, req.Direction) < req.Volume {
 		return commandID, errors.New("close volume exceeds available position")
 	}
-	if account.Available <= 0 {
+	if req.OffsetFlag == "open" && account.Available <= 0 {
 		return commandID, errors.New("account available funds <= 0")
-	}
-	if req.LimitPrice*float64(req.Volume) > account.Available*20 {
-		return commandID, errors.New("insufficient available funds")
 	}
 	return commandID, nil
 }

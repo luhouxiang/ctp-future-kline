@@ -165,9 +165,7 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 				"instrument_count", syncLog.InstrumentCount,
 				"updated_at", syncLog.UpdatedAt.Format("2006-01-02 15:04:05"),
 			)
-			if err := s.syncCommissionCatalog(api, spi, repo, tradingDay, instruments); err != nil {
-				logger.Error("sync commission catalog failed", "trading_day", tradingDay, "error", err)
-			}
+			s.startCommissionCatalogSyncAsync(tradingDay, instruments)
 			return instruments, nil
 		}
 		logger.Warn(
@@ -215,9 +213,7 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 			)
 		}
 	}
-	if err := s.syncCommissionCatalog(api, spi, repo, tradingDay, instruments); err != nil {
-		logger.Error("sync commission catalog failed", "trading_day", tradingDay, "error", err)
-	}
+	s.startCommissionCatalogSyncAsync(tradingDay, instruments)
 
 	instrumentIDs := make([]string, 0, len(instruments))
 	for _, item := range instruments {
@@ -230,6 +226,60 @@ func (s *Service) runQueryStage(status *RuntimeStatusCenter) ([]instrumentInfo, 
 		"instruments", instrumentIDs,
 	)
 	return instruments, nil
+}
+
+// startCommissionCatalogSyncAsync 在后台独立会话中补齐手续费目录，避免阻塞 MD 订阅启动。
+func (s *Service) startCommissionCatalogSyncAsync(tradingDay string, instruments []instrumentInfo) {
+	day := strings.TrimSpace(tradingDay)
+	if day == "" || len(instruments) == 0 {
+		return
+	}
+	items := append([]instrumentInfo(nil), instruments...)
+	go func() {
+		if err := s.syncCommissionCatalogStandalone(day, items); err != nil {
+			logger.Error("commission catalog async sync failed", "trading_day", day, "error", err)
+		}
+	}()
+}
+
+func (s *Service) syncCommissionCatalogStandalone(tradingDay string, instruments []instrumentInfo) error {
+	flowPath := filepath.Join(s.cfg.FlowPath, "commission_sync")
+	if err := os.MkdirAll(flowPath, 0o755); err != nil {
+		return fmt.Errorf("create commission sync flow directory failed: %w", err)
+	}
+
+	spi := newQuerySpi()
+	api := ctp.CThostFtdcTraderApiCreateFtdcTraderApi(flowPath)
+	defer api.Release()
+
+	api.RegisterSpi(ctp.NewDirectorCThostFtdcTraderSpi(spi))
+	api.RegisterFront(s.cfg.TraderFrontAddr)
+	api.SubscribePrivateTopic(ctp.THOST_TERT_RESTART)
+	api.SubscribePublicTopic(ctp.THOST_TERT_RESTART)
+	api.Init()
+
+	time.Sleep(time.Duration(s.cfg.ConnectWaitSeconds) * time.Second)
+	if err := s.authenticate(api, spi.nextReqID()); err != nil {
+		return fmt.Errorf("commission sync authenticate failed: %w", err)
+	}
+	time.Sleep(time.Duration(s.cfg.AuthenticateWaitSeconds) * time.Second)
+	if err := s.login(api, spi.nextReqID()); err != nil {
+		return fmt.Errorf("commission sync login failed: %w", err)
+	}
+	time.Sleep(time.Duration(s.cfg.LoginWaitSeconds) * time.Second)
+
+	metaDB, err := openSharedMetaDB(s.cfg)
+	if err != nil {
+		return fmt.Errorf("commission sync open shared meta db failed: %w", err)
+	}
+	defer metaDB.Close()
+
+	repo := NewInstrumentCatalogRepo(metaDB)
+	if err := s.syncCommissionCatalog(api, spi, repo, tradingDay, instruments); err != nil {
+		return fmt.Errorf("commission sync failed: %w", err)
+	}
+	logger.Info("commission catalog async sync completed", "trading_day", tradingDay, "instrument_count", len(instruments))
+	return nil
 }
 
 func (s *Service) syncCommissionCatalog(api ctp.CThostFtdcTraderApi, spi *querySpi, repo *InstrumentCatalogRepo, tradingDay string, instruments []instrumentInfo) error {

@@ -25,3 +25,20 @@
   [System.IO.File]::WriteAllText($path, $text, [System.Text.UTF8Encoding]::new($false))
   ```
 - Avoid using `>`, `>>`, `Out-File`, `Set-Content`, or `Add-Content` for repo-tracked source files unless the command explicitly sets UTF-8 encoding.
+
+## Local MySQL Test DSN
+
+- For local database-backed tests/debugging, use this MySQL config:
+  ```json
+  {
+    "db": {
+      "driver": "mysql",
+      "host": "localhost",
+      "port": 3306,
+      "user": "root",
+      "password": "ctp-future-kline-2026",
+      "database": "future_kline",
+      "params": "parseTime=true&loc=Local&multiStatements=true"
+    }
+  }
+  ```

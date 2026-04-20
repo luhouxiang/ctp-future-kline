@@ -81,6 +81,8 @@ type Service struct {
 }
 
 const replayPaperInitialBalance = 100_000
+const legacyPaperInitialBalance = 1_000_000
+const defaultPaperMarginRatio = 0.1
 
 type replayTick struct {
 	InstrumentID string
@@ -587,6 +589,17 @@ func (s *Service) SubmitOrder(ctx context.Context, req SubmitOrderRequest) (Orde
 		s.broadcast("trade_command_audit", audit)
 		return OrderRecord{AccountID: s.accountID, CommandID: commandID, Symbol: req.Symbol, UpdatedAt: time.Now()}, err
 	}
+	if req.OffsetFlag == "open" {
+		required := s.estimateOpenMargin(req)
+		if required > account.Available {
+			return OrderRecord{
+				AccountID: s.accountID,
+				CommandID: commandID,
+				Symbol:    req.Symbol,
+				UpdatedAt: time.Now(),
+			}, fmt.Errorf("insufficient available funds: required %.2f, available %.2f", required, account.Available)
+		}
+	}
 	if s.paper {
 		rec, err := s.submitPaperOrder(commandID, req)
 		if err != nil {
@@ -856,7 +869,15 @@ func (s *Service) auditQuery(kind string, err error) {
 func (s *Service) normalizeSubmitRequest(req SubmitOrderRequest) (SubmitOrderRequest, error) {
 	req.Symbol = strings.TrimSpace(req.Symbol)
 	req.ExchangeID = strings.TrimSpace(req.ExchangeID)
-	if s == nil || s.resolver == nil || s.resolver.Count() == 0 || req.Symbol == "" {
+	if s == nil || s.resolver == nil || req.Symbol == "" {
+		return req, nil
+	}
+	if s.resolver.Count() == 0 && strings.TrimSpace(s.ctpCfg.SharedMetaDSN) != "" {
+		if _, err := s.resolver.EnsureLoadedFromDSN(strings.TrimSpace(s.ctpCfg.SharedMetaDSN)); err != nil {
+			logger.Warn("load product exchange cache on submit normalize failed", "symbol", req.Symbol, "error", err)
+		}
+	}
+	if s.resolver.Count() == 0 {
 		return req, nil
 	}
 	resolved, err := s.resolver.Resolve(req.Symbol, req.ExchangeID)
@@ -949,15 +970,41 @@ func (s *Service) appendBusEvent(topic string, source string, occurredAt time.Ti
 }
 
 func (s *Service) ensurePaperAccount() error {
-	if _, err := s.store.LatestAccountSnapshot(s.accountID); err == nil {
+	item, err := s.store.LatestAccountSnapshot(s.accountID)
+	if err == nil {
+		now := time.Now()
+		if s.livePaper && shouldMigrateLegacyPaperBalance(item) {
+			item.Balance = replayPaperInitialBalance
+			item.Available = replayPaperInitialBalance
+			item.UpdatedAt = now
+			if err := s.store.SaveAccountSnapshot(item); err != nil {
+				return err
+			}
+			if err := s.store.SaveSessionState(SessionState{
+				AccountID:           s.accountID,
+				Connected:           true,
+				Authenticated:       true,
+				LoggedIn:            true,
+				SettlementConfirmed: true,
+				UpdatedAt:           now,
+			}); err != nil {
+				return err
+			}
+		}
+		s.mu.Lock()
+		s.account = item
+		s.mu.Unlock()
 		return nil
 	}
+	if err != nil && err != sql.ErrNoRows {
+		return err
+	}
 	now := time.Now()
-	initialBalance := 1_000_000.0
-	if s.replayPaper {
+	initialBalance := float64(legacyPaperInitialBalance)
+	if s.replayPaper || s.livePaper {
 		initialBalance = replayPaperInitialBalance
 	}
-	item := TradingAccountSnapshot{
+	item = TradingAccountSnapshot{
 		AccountID:      s.accountID,
 		Balance:        initialBalance,
 		Available:      initialBalance,
@@ -982,6 +1029,18 @@ func (s *Service) ensurePaperAccount() error {
 		SettlementConfirmed: true,
 		UpdatedAt:           now,
 	})
+}
+
+func shouldMigrateLegacyPaperBalance(item TradingAccountSnapshot) bool {
+	if item.Balance != legacyPaperInitialBalance {
+		return false
+	}
+	return item.Available == legacyPaperInitialBalance &&
+		item.Margin == 0 &&
+		item.FrozenCash == 0 &&
+		item.Commission == 0 &&
+		item.CloseProfit == 0 &&
+		item.PositionProfit == 0
 }
 
 func (s *Service) submitPaperOrder(commandID string, req SubmitOrderRequest) (OrderRecord, error) {
@@ -1303,7 +1362,7 @@ func (s *Service) recalculateReplayPaperState(now time.Time) error {
 }
 
 func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccountSnapshot, []PositionSnapshot, error) {
-	if !s.replayPaper {
+	if !s.replayPaper && !s.livePaper {
 		return TradingAccountSnapshot{}, nil, nil
 	}
 	if s.pending == nil {
@@ -1340,18 +1399,30 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 	}
 	positions := make([]PositionSnapshot, 0)
 	for _, tr := range trades {
-		positions, account.CloseProfit = applyFilledTradeToPositionsWithProfit(positions, tr, account.CloseProfit)
+		multiplier := s.contractVolumeMultiple(tr.Symbol, tr.ExchangeID)
+		positions, account.CloseProfit = applyFilledTradeToPositionsWithProfit(positions, tr, account.CloseProfit, multiplier)
 		commission := paperCommission(tr)
 		account.Commission += commission
 		account.Balance -= commission
 	}
+	for i := range positions {
+		avgPrice := 0.0
+		if positions[i].Position > 0 && positions[i].PositionCost > 0 {
+			avgPrice = positions[i].PositionCost / float64(positions[i].Position)
+		}
+		direction := "buy"
+		if positions[i].Direction == "short" {
+			direction = "sell"
+		}
+		positions[i].UseMargin = s.estimateMargin(positions[i].Symbol, positions[i].Exchange, direction, avgPrice, positions[i].Position)
+	}
 	for _, item := range positions {
 		account.Margin += item.UseMargin
-		account.PositionProfit += replayPositionProfit(item, s.replayQuotes[item.Symbol])
+		account.PositionProfit += s.replayPositionProfit(item, s.replayQuotes[item.Symbol])
 	}
 	for _, item := range s.pending {
 		if item.OffsetFlag == "open" {
-			account.FrozenCash += openOrderReserve(item)
+			account.FrozenCash += s.estimateMargin(item.Symbol, item.ExchangeID, item.Direction, item.LimitPrice, item.VolumeTotalOriginal-item.VolumeTraded-item.VolumeCanceled)
 		}
 	}
 	account.Available = account.Balance - account.Margin - account.FrozenCash
@@ -1416,7 +1487,7 @@ func (s *Service) markReplayPaperToMarketLocked(now time.Time) error {
 	account.PositionProfit = 0
 	account.UpdatedAt = now
 	for _, item := range s.positions {
-		account.PositionProfit += replayPositionProfit(item, s.replayQuotes[item.Symbol])
+		account.PositionProfit += s.replayPositionProfit(item, s.replayQuotes[item.Symbol])
 	}
 	s.mu.Lock()
 	s.account = account
@@ -1426,13 +1497,16 @@ func (s *Service) markReplayPaperToMarketLocked(now time.Time) error {
 }
 
 func applyFilledTradeToPositions(items []PositionSnapshot, tr TradeRecord) []PositionSnapshot {
-	out, _ := applyFilledTradeToPositionsWithProfit(items, tr, 0)
+	out, _ := applyFilledTradeToPositionsWithProfit(items, tr, 0, 1)
 	return out
 }
 
-func applyFilledTradeToPositionsWithProfit(items []PositionSnapshot, tr TradeRecord, closeProfit float64) ([]PositionSnapshot, float64) {
+func applyFilledTradeToPositionsWithProfit(items []PositionSnapshot, tr TradeRecord, closeProfit float64, volumeMultiple float64) ([]PositionSnapshot, float64) {
 	out := make([]PositionSnapshot, 0, len(items)+1)
 	now := time.Now()
+	if volumeMultiple <= 0 {
+		volumeMultiple = 1
+	}
 	wantDir := "long"
 	closeDir := "short"
 	if tr.Direction == "sell" {
@@ -1469,9 +1543,9 @@ func applyFilledTradeToPositionsWithProfit(items []PositionSnapshot, tr TradeRec
 			item.PositionCost = paperMaxFloat(item.PositionCost-avgPositionCost*float64(used), 0)
 			item.UseMargin = paperMaxFloat(item.UseMargin-avgMargin*float64(used), 0)
 			if closeDir == "long" {
-				closeProfit += (tr.Price - avgPositionCost) * float64(used)
+				closeProfit += (tr.Price - avgPositionCost) * float64(used) * volumeMultiple
 			} else {
-				closeProfit += (avgPositionCost - tr.Price) * float64(used)
+				closeProfit += (avgPositionCost - tr.Price) * float64(used) * volumeMultiple
 			}
 			item.UpdatedAt = now
 			remainingClose -= used
@@ -1567,17 +1641,18 @@ func applyPendingCloseReservations(items []PositionSnapshot, orders []OrderRecor
 	return filtered
 }
 
-func replayPositionProfit(pos PositionSnapshot, quote replayQuote) float64 {
+func (s *Service) replayPositionProfit(pos PositionSnapshot, quote replayQuote) float64 {
 	if pos.Position <= 0 || pos.PositionCost <= 0 {
 		return 0
 	}
+	volumeMultiple := s.contractVolumeMultiple(pos.Symbol, pos.Exchange)
 	cost := pos.PositionCost / float64(pos.Position)
 	mark := replayMarkPrice(pos.Direction, quote, cost)
 	switch pos.Direction {
 	case "short":
-		return (cost - mark) * float64(pos.Position)
+		return (cost - mark) * float64(pos.Position) * volumeMultiple
 	default:
-		return (mark - cost) * float64(pos.Position)
+		return (mark - cost) * float64(pos.Position) * volumeMultiple
 	}
 }
 
@@ -1623,8 +1698,68 @@ func openOrderReserve(order OrderRecord) float64 {
 	return float64(remaining) * order.LimitPrice
 }
 
+func (s *Service) estimateOpenMargin(req SubmitOrderRequest) float64 {
+	if strings.TrimSpace(req.OffsetFlag) != "open" {
+		return 0
+	}
+	return s.estimateMargin(req.Symbol, req.ExchangeID, req.Direction, req.LimitPrice, req.Volume)
+}
+
+func (s *Service) estimateMargin(symbol string, exchangeID string, direction string, price float64, volume int) float64 {
+	if price <= 0 || volume <= 0 {
+		return 0
+	}
+	volumeMultiple := 1
+	ratioByMoney := defaultPaperMarginRatio
+	ratioByVolume := 0.0
+
+	if s != nil && s.rateCatalog != nil {
+		if params, err := s.rateCatalog.marginCalcParams(symbol, exchangeID, direction); err != nil {
+			logger.Warn(
+				"load margin calc params failed",
+				"symbol", strings.TrimSpace(symbol),
+				"exchange_id", strings.TrimSpace(exchangeID),
+				"direction", strings.TrimSpace(direction),
+				"error", err,
+			)
+		} else {
+			if params.VolumeMultiple > 0 {
+				volumeMultiple = params.VolumeMultiple
+			}
+			if params.RatioByMoney > 0 {
+				ratioByMoney = params.RatioByMoney
+			}
+			if params.RatioByVolume > 0 {
+				ratioByVolume = params.RatioByVolume
+			}
+		}
+	}
+	perLot := price*float64(volumeMultiple)*ratioByMoney + ratioByVolume
+	if perLot < 0 {
+		perLot = 0
+	}
+	return perLot * float64(volume)
+}
+
 func paperCommission(tr TradeRecord) float64 {
 	return tr.Price * float64(tr.Volume) * 0.0001
+}
+
+func (s *Service) contractVolumeMultiple(symbol string, exchangeID string) float64 {
+	if s != nil && s.rateCatalog != nil {
+		if vm, err := s.rateCatalog.instrumentVolumeMultiple(symbol, exchangeID); err == nil && vm > 0 {
+			return float64(vm)
+		}
+	}
+	if s != nil && s.resolver != nil {
+		if s.resolver.Count() == 0 && strings.TrimSpace(s.ctpCfg.SharedMetaDSN) != "" {
+			_, _ = s.resolver.EnsureLoadedFromDSN(strings.TrimSpace(s.ctpCfg.SharedMetaDSN))
+		}
+		if resolved, err := s.resolver.Resolve(symbol, exchangeID); err == nil && resolved.Product.VolumeMultiple > 0 {
+			return float64(resolved.Product.VolumeMultiple)
+		}
+	}
+	return 1
 }
 
 func firstNonEmpty(values ...string) string {
