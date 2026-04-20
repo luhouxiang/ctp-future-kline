@@ -328,6 +328,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/trade/config", s.handleTradeConfig)
 	mux.HandleFunc("/api/trade/terminal", s.handleTradeTerminal)
 	mux.HandleFunc("/api/trade/account", s.handleTradeAccount)
+	mux.HandleFunc("/api/trade/account/adjust", s.handleTradeAccountAdjust)
 	mux.HandleFunc("/api/trade/positions", s.handleTradePositions)
 	mux.HandleFunc("/api/trade/positions/", s.handleTradePositionAction)
 	mux.HandleFunc("/api/trade/orders", s.handleTradeOrders)
@@ -2258,6 +2259,7 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 	}
 
 	terminalPositions := make([]trade.TerminalPosition, 0, len(positions))
+	totalPositionProfit := 0.0
 	for _, item := range positions {
 		volumeMultiple := s.contractVolumeMultiple(item.Symbol, item.Exchange)
 		avgPrice := 0.0
@@ -2287,26 +2289,66 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 			FloatPnL:         floatPnL,
 			MarketValue:      mark * float64(item.Position) * volumeMultiple,
 		})
+		totalPositionProfit += floatPnL
+	}
+
+	staticBalance := s.terminalStaticBalance(mode, account)
+	dynamicBalance := account.Balance
+	availableBalance := account.Available
+	positionProfit := account.PositionProfit
+	frozenMargin := account.FrozenMargin
+	frozenCommission := account.FrozenCommission
+	frozenPremium := account.FrozenPremium
+	frozenCash := account.FrozenCash
+	deposit := account.Deposit
+	withdraw := account.Withdraw
+	premium := account.Premium
+	otherFee := account.OtherFee
+	if mode == appmode.LivePaper || mode == appmode.ReplayPaper {
+		positionProfit = totalPositionProfit
+		dynamicBalance = staticBalance + deposit - withdraw + account.CloseProfit + positionProfit + premium - account.Commission - otherFee
+		if frozenMargin < 0 {
+			frozenMargin = 0
+		}
+		if frozenCommission < 0 {
+			frozenCommission = 0
+		}
+		if frozenPremium < 0 {
+			frozenPremium = 0
+		}
+		frozenCash = frozenMargin + frozenCommission + frozenPremium
+		availableBalance = dynamicBalance - account.Margin - frozenMargin - frozenCommission - frozenPremium
+		if availableBalance < 0 {
+			availableBalance = 0
+		}
 	}
 
 	riskRatio := 0.0
-	if account.Balance > 0 {
-		riskRatio = account.Margin / account.Balance
+	if dynamicBalance > 0 {
+		riskRatio = account.Margin / dynamicBalance
 	}
 	out.Summary = trade.TerminalSummary{
-		AccountID:      account.AccountID,
-		Mode:           mode,
-		TradingDay:     svc.Status().TradingDay,
-		ReplayTime:     replayTime,
-		Symbol:         symbol,
-		Balance:        account.Balance,
-		Available:      account.Available,
-		Margin:         account.Margin,
-		FrozenCash:     account.FrozenCash,
-		PositionProfit: account.PositionProfit,
-		CloseProfit:    account.CloseProfit,
-		RiskRatio:      riskRatio,
-		UpdatedAt:      account.UpdatedAt,
+		AccountID:        account.AccountID,
+		Mode:             mode,
+		TradingDay:       svc.Status().TradingDay,
+		ReplayTime:       replayTime,
+		Symbol:           symbol,
+		Balance:          dynamicBalance,
+		Available:        availableBalance,
+		Margin:           account.Margin,
+		FrozenMargin:     frozenMargin,
+		FrozenCommission: frozenCommission,
+		FrozenPremium:    frozenPremium,
+		FrozenCash:       frozenCash,
+		StaticBalance:    staticBalance,
+		Deposit:          deposit,
+		Withdraw:         withdraw,
+		Premium:          premium,
+		OtherFee:         otherFee,
+		PositionProfit:   positionProfit,
+		CloseProfit:      account.CloseProfit,
+		RiskRatio:        riskRatio,
+		UpdatedAt:        account.UpdatedAt,
 	}
 	out.OrderEntryDefaults = trade.TerminalOrderEntryDefaults{
 		AccountID:  account.AccountID,
@@ -2320,17 +2362,24 @@ func (s *Server) buildTradeTerminalSnapshot(r *http.Request, svc *trade.Service)
 	out.Orders = orders
 	out.Trades = trades
 	out.Funds = trade.TerminalFunds{
-		AccountID:      account.AccountID,
-		StaticBalance:  account.Balance - account.PositionProfit,
-		DynamicBalance: account.Balance,
-		Available:      account.Available,
-		FrozenCash:     account.FrozenCash,
-		Margin:         account.Margin,
-		Commission:     account.Commission,
-		CloseProfit:    account.CloseProfit,
-		PositionProfit: account.PositionProfit,
-		RiskRatio:      riskRatio,
-		UpdatedAt:      account.UpdatedAt,
+		AccountID:        account.AccountID,
+		StaticBalance:    staticBalance,
+		DynamicBalance:   dynamicBalance,
+		Available:        availableBalance,
+		FrozenMargin:     frozenMargin,
+		FrozenCommission: frozenCommission,
+		FrozenPremium:    frozenPremium,
+		FrozenCash:       frozenCash,
+		Deposit:          deposit,
+		Withdraw:         withdraw,
+		Premium:          premium,
+		OtherFee:         otherFee,
+		Margin:           account.Margin,
+		Commission:       account.Commission,
+		CloseProfit:      account.CloseProfit,
+		PositionProfit:   positionProfit,
+		RiskRatio:        riskRatio,
+		UpdatedAt:        account.UpdatedAt,
 	}
 	return out, nil
 }
@@ -2441,6 +2490,22 @@ func (s *Server) contractVolumeMultiple(symbol string, exchangeID string) float6
 	return float64(resolved.Product.VolumeMultiple)
 }
 
+func (s *Server) terminalStaticBalance(mode string, account trade.TradingAccountSnapshot) float64 {
+	mode = appmode.Normalize(mode)
+	switch mode {
+	case appmode.LivePaper, appmode.ReplayPaper:
+		if account.StaticBalance > 0 {
+			return account.StaticBalance
+		}
+		return 100000
+	default:
+		if account.StaticBalance > 0 {
+			return account.StaticBalance
+		}
+		return account.Balance - account.CloseProfit - account.PositionProfit + account.Commission
+	}
+}
+
 func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2456,6 +2521,31 @@ func (s *Server) handleTradeAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, item)
+}
+
+func (s *Server) handleTradeAccountAdjust(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	svc := s.requireTrade(w)
+	if svc == nil {
+		return
+	}
+	var req trade.AccountAdjustRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, "invalid json body", http.StatusBadRequest)
+		return
+	}
+	if strings.TrimSpace(req.AccountID) == "" {
+		req.AccountID = s.tradeAccountIDForMode(s.currentAppMode())
+	}
+	account, err := svc.AdjustAccount(req)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, http.StatusOK, account)
 }
 
 func (s *Server) handleTradePositions(w http.ResponseWriter, r *http.Request) {
@@ -2717,12 +2807,17 @@ func (s *Server) feedLivePaperTrade(update quotes.ChartQuoteUpdate) {
 	if update.Snapshot.AskPrice1 != nil {
 		ask = *update.Snapshot.AskPrice1
 	}
+	last := 0.0
+	if update.Snapshot.LatestPrice != nil {
+		last = *update.Snapshot.LatestPrice
+	}
 	_ = s.tradePaperLive.ConsumePaperMarketTick(trade.PaperMarketTick{
 		Symbol:         symbol,
 		TradingDay:     strings.TrimSpace(update.Snapshot.TradingDay),
 		ActionDay:      strings.TrimSpace(update.Snapshot.ActionDay),
 		UpdateTime:     strings.TrimSpace(update.Snapshot.UpdateTime),
 		UpdateMillisec: update.Snapshot.UpdateMillisec,
+		LastPrice:      last,
 		BidPrice1:      bid,
 		AskPrice1:      ask,
 	})

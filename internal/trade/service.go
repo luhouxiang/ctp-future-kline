@@ -92,11 +92,13 @@ type replayTick struct {
 	UpdateTime   string
 	UpdateMS     int
 	ReceivedAt   time.Time
+	LastPrice    float64
 	BidPrice1    float64
 	AskPrice1    float64
 }
 
 type replayQuote struct {
+	LastPrice  float64
 	BidPrice1  float64
 	AskPrice1  float64
 	LastTickAt time.Time
@@ -723,6 +725,56 @@ func (s *Service) CancelOrder(ctx context.Context, req CancelOrderRequest) (Orde
 	return rec, nil
 }
 
+func (s *Service) AdjustAccount(req AccountAdjustRequest) (TradingAccountSnapshot, error) {
+	if !s.paper {
+		return TradingAccountSnapshot{}, fmt.Errorf("account adjustment is only available for paper trade")
+	}
+	s.paperMu.Lock()
+	defer s.paperMu.Unlock()
+
+	item, err := s.store.LatestAccountSnapshot(s.accountID)
+	if err != nil {
+		if err != sql.ErrNoRows {
+			return TradingAccountSnapshot{}, err
+		}
+		if err := s.ensurePaperAccount(); err != nil {
+			return TradingAccountSnapshot{}, err
+		}
+		item, err = s.store.LatestAccountSnapshot(s.accountID)
+		if err != nil {
+			return TradingAccountSnapshot{}, err
+		}
+	}
+	if item.StaticBalance <= 0 {
+		item.StaticBalance = s.paperStaticBalance()
+	}
+	item.Deposit += req.DepositDelta
+	item.Withdraw += req.WithdrawDelta
+	item.Premium += req.PremiumDelta
+	item.OtherFee += req.OtherFeeDelta
+	item.FrozenCommission += req.FrozenCommissionDelta
+	item.FrozenPremium += req.FrozenPremiumDelta
+	item.FrozenMargin += req.FrozenMarginDelta
+	if item.FrozenCommission < 0 {
+		item.FrozenCommission = 0
+	}
+	if item.FrozenPremium < 0 {
+		item.FrozenPremium = 0
+	}
+	if item.FrozenMargin < 0 {
+		item.FrozenMargin = 0
+	}
+	item.UpdatedAt = time.Now()
+	if err := s.store.SaveAccountSnapshot(item); err != nil {
+		return TradingAccountSnapshot{}, err
+	}
+	account, _, err := s.recalculateReplayPaperStateLocked(item.UpdatedAt)
+	if err != nil {
+		return TradingAccountSnapshot{}, err
+	}
+	return account, nil
+}
+
 func (s *Service) Subscribe() (<-chan EventEnvelope, func()) {
 	cap := s.queueCap
 	if cap <= 0 {
@@ -1005,15 +1057,23 @@ func (s *Service) ensurePaperAccount() error {
 		initialBalance = replayPaperInitialBalance
 	}
 	item = TradingAccountSnapshot{
-		AccountID:      s.accountID,
-		Balance:        initialBalance,
-		Available:      initialBalance,
-		Margin:         0,
-		FrozenCash:     0,
-		Commission:     0,
-		CloseProfit:    0,
-		PositionProfit: 0,
-		UpdatedAt:      now,
+		AccountID:        s.accountID,
+		StaticBalance:    initialBalance,
+		Balance:          initialBalance,
+		Available:        initialBalance,
+		Margin:           0,
+		FrozenMargin:     0,
+		FrozenCommission: 0,
+		FrozenPremium:    0,
+		FrozenCash:       0,
+		Deposit:          0,
+		Withdraw:         0,
+		Premium:          0,
+		OtherFee:         0,
+		Commission:       0,
+		CloseProfit:      0,
+		PositionProfit:   0,
+		UpdatedAt:        now,
 	}
 	if err := s.store.SaveAccountSnapshot(item); err != nil {
 		return err
@@ -1143,8 +1203,6 @@ func (s *Service) applyImmediatePaperFill(tr TradeRecord) error {
 	}
 	commission := paperCommission(tr)
 	account.Commission += commission
-	account.Balance -= commission
-	account.Available -= commission
 	positions = applyFilledTradeToPositions(positions, tr)
 	margin := 0.0
 	for _, item := range positions {
@@ -1153,8 +1211,12 @@ func (s *Service) applyImmediatePaperFill(tr TradeRecord) error {
 	account.Margin = margin
 	account.UpdatedAt = time.Now()
 	account.PositionProfit = 0
-	if account.Available < 0 {
-		account.Available = 0
+	if s.paper {
+		if account.StaticBalance <= 0 {
+			account.StaticBalance = s.paperStaticBalance()
+		}
+		account.FrozenCash = account.FrozenMargin + account.FrozenCommission + account.FrozenPremium
+		s.recomputePaperAccountTotals(&account)
 	}
 	if err := s.store.ReplacePositions(s.accountID, positions); err != nil {
 		return err
@@ -1245,6 +1307,7 @@ func (s *Service) ConsumePaperMarketTick(tick PaperMarketTick) error {
 		UpdateTime:   strings.TrimSpace(tick.UpdateTime),
 		UpdateMS:     tick.UpdateMillisec,
 		ReceivedAt:   marketTS,
+		LastPrice:    tick.LastPrice,
 		BidPrice1:    tick.BidPrice1,
 		AskPrice1:    tick.AskPrice1,
 	})
@@ -1387,15 +1450,34 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 		return trades[i].TradeTime.Before(trades[j].TradeTime)
 	})
 	account := TradingAccountSnapshot{
-		AccountID:      s.accountID,
-		Balance:        replayPaperInitialBalance,
-		Available:      replayPaperInitialBalance,
-		Margin:         0,
-		FrozenCash:     0,
-		Commission:     0,
-		CloseProfit:    0,
-		PositionProfit: 0,
-		UpdatedAt:      now,
+		AccountID:        s.accountID,
+		StaticBalance:    s.paperStaticBalance(),
+		Balance:          s.paperStaticBalance(),
+		Available:        s.paperStaticBalance(),
+		Margin:           0,
+		FrozenMargin:     0,
+		FrozenCommission: 0,
+		FrozenPremium:    0,
+		FrozenCash:       0,
+		Deposit:          0,
+		Withdraw:         0,
+		Premium:          0,
+		OtherFee:         0,
+		Commission:       0,
+		CloseProfit:      0,
+		PositionProfit:   0,
+		UpdatedAt:        now,
+	}
+	if latest, err := s.store.LatestAccountSnapshot(s.accountID); err == nil {
+		if latest.StaticBalance > 0 {
+			account.StaticBalance = latest.StaticBalance
+		}
+		account.Deposit = latest.Deposit
+		account.Withdraw = latest.Withdraw
+		account.Premium = latest.Premium
+		account.OtherFee = latest.OtherFee
+		account.FrozenCommission = latest.FrozenCommission
+		account.FrozenPremium = latest.FrozenPremium
 	}
 	positions := make([]PositionSnapshot, 0)
 	for _, tr := range trades {
@@ -1403,7 +1485,6 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 		positions, account.CloseProfit = applyFilledTradeToPositionsWithProfit(positions, tr, account.CloseProfit, multiplier)
 		commission := paperCommission(tr)
 		account.Commission += commission
-		account.Balance -= commission
 	}
 	for i := range positions {
 		avgPrice := 0.0
@@ -1418,17 +1499,15 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 	}
 	for _, item := range positions {
 		account.Margin += item.UseMargin
-		account.PositionProfit += s.replayPositionProfit(item, s.replayQuotes[item.Symbol])
+		account.PositionProfit += s.replayPositionProfit(item, s.replayQuoteForSymbol(item.Symbol))
 	}
+	account.FrozenMargin = 0
 	for _, item := range s.pending {
 		if item.OffsetFlag == "open" {
-			account.FrozenCash += s.estimateMargin(item.Symbol, item.ExchangeID, item.Direction, item.LimitPrice, item.VolumeTotalOriginal-item.VolumeTraded-item.VolumeCanceled)
+			account.FrozenMargin += s.estimateMargin(item.Symbol, item.ExchangeID, item.Direction, item.LimitPrice, item.VolumeTotalOriginal-item.VolumeTraded-item.VolumeCanceled)
 		}
 	}
-	account.Available = account.Balance - account.Margin - account.FrozenCash
-	if account.Available < 0 {
-		account.Available = 0
-	}
+	s.recomputePaperAccountTotals(&account)
 	if err := s.store.ReplacePositions(s.accountID, positions); err != nil {
 		return TradingAccountSnapshot{}, nil, err
 	}
@@ -1445,7 +1524,7 @@ func (s *Service) recalculateReplayPaperStateLocked(now time.Time) (TradingAccou
 }
 
 func (s *Service) rememberReplayQuoteLocked(tick replayTick) {
-	symbol := strings.TrimSpace(tick.InstrumentID)
+	symbol := strings.ToLower(strings.TrimSpace(tick.InstrumentID))
 	if symbol == "" {
 		return
 	}
@@ -1454,6 +1533,7 @@ func (s *Service) rememberReplayQuoteLocked(tick replayTick) {
 		lastTickAt = time.Now()
 	}
 	s.replayQuotes[symbol] = replayQuote{
+		LastPrice:  tick.LastPrice,
 		BidPrice1:  tick.BidPrice1,
 		AskPrice1:  tick.AskPrice1,
 		LastTickAt: lastTickAt,
@@ -1484,11 +1564,17 @@ func (s *Service) markReplayPaperToMarketLocked(now time.Time) error {
 	if account.AccountID == "" {
 		return nil
 	}
+	staticBalance := s.paperStaticBalance()
+	if account.StaticBalance > 0 {
+		staticBalance = account.StaticBalance
+	}
 	account.PositionProfit = 0
 	account.UpdatedAt = now
 	for _, item := range s.positions {
-		account.PositionProfit += s.replayPositionProfit(item, s.replayQuotes[item.Symbol])
+		account.PositionProfit += s.replayPositionProfit(item, s.replayQuoteForSymbol(item.Symbol))
 	}
+	account.StaticBalance = staticBalance
+	s.recomputePaperAccountTotals(&account)
 	s.mu.Lock()
 	s.account = account
 	s.mu.Unlock()
@@ -1673,6 +1759,9 @@ func replayMarkPrice(direction string, quote replayQuote, fallback float64) floa
 			return quote.AskPrice1
 		}
 	}
+	if quote.LastPrice > 0 {
+		return quote.LastPrice
+	}
 	return fallback
 }
 
@@ -1745,6 +1834,30 @@ func paperCommission(tr TradeRecord) float64 {
 	return tr.Price * float64(tr.Volume) * 0.0001
 }
 
+func (s *Service) paperStaticBalance() float64 {
+	if s == nil || (!s.replayPaper && !s.livePaper) {
+		return 0
+	}
+	return replayPaperInitialBalance
+}
+
+func (s *Service) recomputePaperAccountTotals(account *TradingAccountSnapshot) {
+	if account == nil {
+		return
+	}
+	staticBalance := account.StaticBalance
+	if staticBalance <= 0 {
+		staticBalance = s.paperStaticBalance()
+		account.StaticBalance = staticBalance
+	}
+	account.FrozenCash = account.FrozenMargin + account.FrozenCommission + account.FrozenPremium
+	account.Balance = staticBalance + account.Deposit - account.Withdraw + account.CloseProfit + account.PositionProfit + account.Premium - account.Commission - account.OtherFee
+	account.Available = account.Balance - account.Margin - account.FrozenMargin - account.FrozenCommission - account.FrozenPremium
+	if account.Available < 0 {
+		account.Available = 0
+	}
+}
+
 func (s *Service) contractVolumeMultiple(symbol string, exchangeID string) float64 {
 	if s != nil && s.rateCatalog != nil {
 		if vm, err := s.rateCatalog.instrumentVolumeMultiple(symbol, exchangeID); err == nil && vm > 0 {
@@ -1760,6 +1873,13 @@ func (s *Service) contractVolumeMultiple(symbol string, exchangeID string) float
 		}
 	}
 	return 1
+}
+
+func (s *Service) replayQuoteForSymbol(symbol string) replayQuote {
+	if s == nil {
+		return replayQuote{}
+	}
+	return s.replayQuotes[strings.ToLower(strings.TrimSpace(symbol))]
 }
 
 func firstNonEmpty(values ...string) string {

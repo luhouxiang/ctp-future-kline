@@ -55,14 +55,30 @@ type TradeStatus struct {
 type TradingAccountSnapshot struct {
 	// AccountID 是账户标识。
 	AccountID string `json:"account_id"`
+	// StaticBalance 是静态权益（上日权益口径）。
+	StaticBalance float64 `json:"static_balance"`
 	// Balance 是动态权益。
 	Balance float64 `json:"balance"`
 	// Available 是可用资金。
 	Available float64 `json:"available"`
 	// Margin 是占用保证金。
 	Margin float64 `json:"margin"`
+	// FrozenMargin 是冻结保证金。
+	FrozenMargin float64 `json:"frozen_margin"`
+	// FrozenCommission 是冻结手续费。
+	FrozenCommission float64 `json:"frozen_commission"`
+	// FrozenPremium 是冻结权利金。
+	FrozenPremium float64 `json:"frozen_premium"`
 	// FrozenCash 是冻结资金。
 	FrozenCash float64 `json:"frozen_cash"`
+	// Deposit 是入金。
+	Deposit float64 `json:"deposit"`
+	// Withdraw 是出金。
+	Withdraw float64 `json:"withdraw"`
+	// Premium 是权利金。
+	Premium float64 `json:"premium"`
+	// OtherFee 是其他费用。
+	OtherFee float64 `json:"other_fee"`
 	// Commission 是累计手续费。
 	Commission float64 `json:"commission"`
 	// CloseProfit 是平仓盈亏。
@@ -204,6 +220,8 @@ type PaperMarketTick struct {
 	UpdateTime string `json:"update_time"`
 	// UpdateMillisec 是行情毫秒部分。
 	UpdateMillisec int `json:"update_millisec"`
+	// LastPrice 是最新价。
+	LastPrice float64 `json:"last_price"`
 	// BidPrice1 是买一价。
 	BidPrice1 float64 `json:"bid_price1"`
 	// AskPrice1 是卖一价。
@@ -227,6 +245,17 @@ type CancelOrderRequest struct {
 	SessionID int `json:"session_id"`
 	// Reason 记录撤单来源或原因。
 	Reason string `json:"reason"`
+}
+
+type AccountAdjustRequest struct {
+	AccountID             string  `json:"account_id"`
+	DepositDelta          float64 `json:"deposit_delta"`
+	WithdrawDelta         float64 `json:"withdraw_delta"`
+	PremiumDelta          float64 `json:"premium_delta"`
+	OtherFeeDelta         float64 `json:"other_fee_delta"`
+	FrozenCommissionDelta float64 `json:"frozen_commission_delta"`
+	FrozenPremiumDelta    float64 `json:"frozen_premium_delta"`
+	FrozenMarginDelta     float64 `json:"frozen_margin_delta"`
 }
 
 type OrderCommandAudit struct {
@@ -298,19 +327,27 @@ type EventEnvelope struct {
 }
 
 type TerminalSummary struct {
-	AccountID      string    `json:"account_id"`
-	Mode           string    `json:"mode"`
-	TradingDay     string    `json:"trading_day"`
-	ReplayTime     string    `json:"replay_time,omitempty"`
-	Symbol         string    `json:"symbol,omitempty"`
-	Balance        float64   `json:"balance"`
-	Available      float64   `json:"available"`
-	Margin         float64   `json:"margin"`
-	FrozenCash     float64   `json:"frozen_cash"`
-	PositionProfit float64   `json:"position_profit"`
-	CloseProfit    float64   `json:"close_profit"`
-	RiskRatio      float64   `json:"risk_ratio"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	AccountID        string    `json:"account_id"`
+	Mode             string    `json:"mode"`
+	TradingDay       string    `json:"trading_day"`
+	ReplayTime       string    `json:"replay_time,omitempty"`
+	Symbol           string    `json:"symbol,omitempty"`
+	Balance          float64   `json:"balance"`
+	Available        float64   `json:"available"`
+	Margin           float64   `json:"margin"`
+	FrozenMargin     float64   `json:"frozen_margin"`
+	FrozenCommission float64   `json:"frozen_commission"`
+	FrozenPremium    float64   `json:"frozen_premium"`
+	FrozenCash       float64   `json:"frozen_cash"`
+	StaticBalance    float64   `json:"static_balance"`
+	Deposit          float64   `json:"deposit"`
+	Withdraw         float64   `json:"withdraw"`
+	Premium          float64   `json:"premium"`
+	OtherFee         float64   `json:"other_fee"`
+	PositionProfit   float64   `json:"position_profit"`
+	CloseProfit      float64   `json:"close_profit"`
+	RiskRatio        float64   `json:"risk_ratio"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type TerminalOrderEntryDefaults struct {
@@ -337,17 +374,24 @@ type TerminalPosition struct {
 }
 
 type TerminalFunds struct {
-	AccountID      string    `json:"account_id"`
-	StaticBalance  float64   `json:"static_balance"`
-	DynamicBalance float64   `json:"dynamic_balance"`
-	Available      float64   `json:"available"`
-	FrozenCash     float64   `json:"frozen_cash"`
-	Margin         float64   `json:"margin"`
-	Commission     float64   `json:"commission"`
-	CloseProfit    float64   `json:"close_profit"`
-	PositionProfit float64   `json:"position_profit"`
-	RiskRatio      float64   `json:"risk_ratio"`
-	UpdatedAt      time.Time `json:"updated_at"`
+	AccountID        string    `json:"account_id"`
+	StaticBalance    float64   `json:"static_balance"`
+	DynamicBalance   float64   `json:"dynamic_balance"`
+	Available        float64   `json:"available"`
+	FrozenMargin     float64   `json:"frozen_margin"`
+	FrozenCommission float64   `json:"frozen_commission"`
+	FrozenPremium    float64   `json:"frozen_premium"`
+	FrozenCash       float64   `json:"frozen_cash"`
+	Deposit          float64   `json:"deposit"`
+	Withdraw         float64   `json:"withdraw"`
+	Premium          float64   `json:"premium"`
+	OtherFee         float64   `json:"other_fee"`
+	Margin           float64   `json:"margin"`
+	Commission       float64   `json:"commission"`
+	CloseProfit      float64   `json:"close_profit"`
+	PositionProfit   float64   `json:"position_profit"`
+	RiskRatio        float64   `json:"risk_ratio"`
+	UpdatedAt        time.Time `json:"updated_at"`
 }
 
 type TerminalSnapshot struct {

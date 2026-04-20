@@ -539,6 +539,65 @@ function showTradeError(prefix, err) {
   }
 }
 
+async function adjustPaperAccount(payload, actionLabel) {
+  try {
+    const resp = await fetch('/api/trade/account/adjust', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
+        ...payload,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchTradeTerminal()
+  } catch (err) {
+    showTradeError(actionLabel, err)
+  }
+}
+
+async function adjustCashflow() {
+  const depositRaw = window.prompt('入金金额（>=0）', '0')
+  if (depositRaw == null) return
+  const withdrawRaw = window.prompt('出金金额（>=0）', '0')
+  if (withdrawRaw == null) return
+  const premiumRaw = window.prompt('权利金调整（可正可负，默认0）', '0')
+  if (premiumRaw == null) return
+  const deposit = Number(depositRaw || 0)
+  const withdraw = Number(withdrawRaw || 0)
+  const premium = Number(premiumRaw || 0)
+  if (!Number.isFinite(deposit) || !Number.isFinite(withdraw) || !Number.isFinite(premium) || deposit < 0 || withdraw < 0) {
+    window.alert('输入无效，请输入数字；入金/出金需>=0')
+    return
+  }
+  await adjustPaperAccount({
+    deposit_delta: deposit,
+    withdraw_delta: withdraw,
+    premium_delta: premium,
+  }, '出入金调整')
+}
+
+async function adjustFee() {
+  const otherFeeRaw = window.prompt('其他费用调整（正数=增加费用，负数=减少）', '0')
+  if (otherFeeRaw == null) return
+  const frozenCommissionRaw = window.prompt('冻结手续费调整（可正可负）', '0')
+  if (frozenCommissionRaw == null) return
+  const frozenPremiumRaw = window.prompt('冻结权利金调整（可正可负）', '0')
+  if (frozenPremiumRaw == null) return
+  const otherFee = Number(otherFeeRaw || 0)
+  const frozenCommission = Number(frozenCommissionRaw || 0)
+  const frozenPremium = Number(frozenPremiumRaw || 0)
+  if (!Number.isFinite(otherFee) || !Number.isFinite(frozenCommission) || !Number.isFinite(frozenPremium)) {
+    window.alert('输入无效，请输入数字')
+    return
+  }
+  await adjustPaperAccount({
+    other_fee_delta: otherFee,
+    frozen_commission_delta: frozenCommission,
+    frozen_premium_delta: frozenPremium,
+  }, '费用调整')
+}
+
 async function submitTradeOrder() {
   try {
     const payload = {
@@ -1392,6 +1451,8 @@ onUnmounted(() => {
       @update-order-field="updateTradeFormField"
       @cancel-order="cancelTradeOrder"
       @quick-order="quickTradeOrder"
+      @adjust-cashflow="adjustCashflow"
+      @adjust-fee="adjustFee"
     />
 
     <KeyboardSprite

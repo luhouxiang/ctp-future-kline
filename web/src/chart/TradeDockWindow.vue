@@ -23,6 +23,8 @@ const emit = defineEmits([
   'update-order-field',
   'cancel-order',
   'quick-order',
+  'adjust-cashflow',
+  'adjust-fee',
 ])
 
 const symbolInputRef = ref(null)
@@ -215,7 +217,8 @@ function fundsRows() {
               <button type="button" class="linkish">止损开仓</button>
               <button type="button" class="linkish">画线下单</button>
               <button type="button" class="linkish">添加条件单</button>
-              <button type="button" class="linkish">出入金</button>
+              <button type="button" class="linkish" @click="emit('adjust-cashflow')">出入金</button>
+              <button type="button" class="linkish" @click="emit('adjust-fee')">费用调整</button>
             </div>
           </section>
 

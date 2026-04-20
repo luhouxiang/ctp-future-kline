@@ -18,6 +18,9 @@ func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
 	if err := ensureChartTablesEvolution(db); err != nil {
 		return err
 	}
+	if err := ensureTradeTablesEvolution(db); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -33,6 +36,11 @@ func EnsureDatabaseAndSchemaForRole(cfg config.DBConfig, role string, db *sql.DB
 	}
 	if role == RoleChartUserRealtime || role == RoleChartUserReplay {
 		if err := ensureChartTablesEvolution(db); err != nil {
+			return err
+		}
+	}
+	if role == RoleTradeLive || role == RoleTradePaperLive || role == RoleTradePaperReplay {
+		if err := ensureTradeTablesEvolution(db); err != nil {
 			return err
 		}
 	}
@@ -424,10 +432,18 @@ func tradeSchemaStatements() []string {
 		`CREATE TABLE IF NOT EXISTS trade_account_snapshots (
   id BIGINT NOT NULL AUTO_INCREMENT,
   account_id VARCHAR(128) NOT NULL,
+  static_balance DOUBLE NOT NULL DEFAULT 0,
   balance DOUBLE NOT NULL,
   available DOUBLE NOT NULL,
   margin_value DOUBLE NOT NULL,
+  frozen_margin DOUBLE NOT NULL DEFAULT 0,
+  frozen_commission DOUBLE NOT NULL DEFAULT 0,
+  frozen_premium DOUBLE NOT NULL DEFAULT 0,
   frozen_cash DOUBLE NOT NULL,
+  deposit DOUBLE NOT NULL DEFAULT 0,
+  withdraw DOUBLE NOT NULL DEFAULT 0,
+  premium DOUBLE NOT NULL DEFAULT 0,
+  other_fee DOUBLE NOT NULL DEFAULT 0,
   commission DOUBLE NOT NULL,
   close_profit DOUBLE NOT NULL,
   position_profit DOUBLE NOT NULL,
@@ -603,6 +619,28 @@ func ensureChartTablesEvolution(db *sql.DB) error {
 	}
 	if _, err := db.Exec(`UPDATE chart_drawings SET start_price=CAST(JSON_UNQUOTE(JSON_EXTRACT(points_json,'$[0].price')) AS DOUBLE), end_price=CAST(JSON_UNQUOTE(JSON_EXTRACT(points_json,'$[1].price')) AS DOUBLE) WHERE type='trendline' AND (start_price IS NULL OR end_price IS NULL)`); err != nil {
 		return fmt.Errorf("backfill drawing price range failed: %w", err)
+	}
+	return nil
+}
+
+func ensureTradeTablesEvolution(db *sql.DB) error {
+	changes := []struct {
+		column string
+		ddl    string
+	}{
+		{"static_balance", "ALTER TABLE trade_account_snapshots ADD COLUMN static_balance DOUBLE NOT NULL DEFAULT 0 AFTER account_id"},
+		{"frozen_margin", "ALTER TABLE trade_account_snapshots ADD COLUMN frozen_margin DOUBLE NOT NULL DEFAULT 0 AFTER margin_value"},
+		{"frozen_commission", "ALTER TABLE trade_account_snapshots ADD COLUMN frozen_commission DOUBLE NOT NULL DEFAULT 0 AFTER frozen_margin"},
+		{"frozen_premium", "ALTER TABLE trade_account_snapshots ADD COLUMN frozen_premium DOUBLE NOT NULL DEFAULT 0 AFTER frozen_commission"},
+		{"deposit", "ALTER TABLE trade_account_snapshots ADD COLUMN deposit DOUBLE NOT NULL DEFAULT 0 AFTER frozen_cash"},
+		{"withdraw", "ALTER TABLE trade_account_snapshots ADD COLUMN withdraw DOUBLE NOT NULL DEFAULT 0 AFTER deposit"},
+		{"premium", "ALTER TABLE trade_account_snapshots ADD COLUMN premium DOUBLE NOT NULL DEFAULT 0 AFTER withdraw"},
+		{"other_fee", "ALTER TABLE trade_account_snapshots ADD COLUMN other_fee DOUBLE NOT NULL DEFAULT 0 AFTER premium"},
+	}
+	for _, change := range changes {
+		if err := ensureColumn(db, "trade_account_snapshots", change.column, change.ddl); err != nil {
+			return err
+		}
 	}
 	return nil
 }

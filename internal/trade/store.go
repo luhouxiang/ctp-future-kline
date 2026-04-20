@@ -47,21 +47,37 @@ func (s *Store) SaveAccountSnapshot(item TradingAccountSnapshot) error {
 		item.UpdatedAt = time.Now()
 	}
 	_, err := s.db.Exec(`
-INSERT INTO trade_account_snapshots(account_id,balance,available,margin_value,frozen_cash,commission,close_profit,position_profit,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?)
-`, item.AccountID, item.Balance, item.Available, item.Margin, item.FrozenCash, item.Commission, item.CloseProfit, item.PositionProfit, item.UpdatedAt)
+INSERT INTO trade_account_snapshots(
+account_id,static_balance,balance,available,margin_value,
+frozen_margin,frozen_commission,frozen_premium,frozen_cash,
+deposit,withdraw,premium,other_fee,
+commission,close_profit,position_profit,updated_at
+)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+`, item.AccountID, item.StaticBalance, item.Balance, item.Available, item.Margin,
+		item.FrozenMargin, item.FrozenCommission, item.FrozenPremium, item.FrozenCash,
+		item.Deposit, item.Withdraw, item.Premium, item.OtherFee,
+		item.Commission, item.CloseProfit, item.PositionProfit, item.UpdatedAt)
 	return err
 }
 
 func (s *Store) LatestAccountSnapshot(accountID string) (TradingAccountSnapshot, error) {
 	var out TradingAccountSnapshot
 	err := s.db.QueryRow(`
-SELECT account_id,balance,available,margin_value,frozen_cash,commission,close_profit,position_profit,updated_at
+SELECT account_id,static_balance,balance,available,margin_value,
+       frozen_margin,frozen_commission,frozen_premium,frozen_cash,
+       deposit,withdraw,premium,other_fee,
+       commission,close_profit,position_profit,updated_at
 FROM trade_account_snapshots
 WHERE account_id=?
 ORDER BY updated_at DESC,id DESC
 LIMIT 1
-`, accountID).Scan(&out.AccountID, &out.Balance, &out.Available, &out.Margin, &out.FrozenCash, &out.Commission, &out.CloseProfit, &out.PositionProfit, &out.UpdatedAt)
+`, accountID).Scan(
+		&out.AccountID, &out.StaticBalance, &out.Balance, &out.Available, &out.Margin,
+		&out.FrozenMargin, &out.FrozenCommission, &out.FrozenPremium, &out.FrozenCash,
+		&out.Deposit, &out.Withdraw, &out.Premium, &out.OtherFee,
+		&out.Commission, &out.CloseProfit, &out.PositionProfit, &out.UpdatedAt,
+	)
 	return out, err
 }
 
