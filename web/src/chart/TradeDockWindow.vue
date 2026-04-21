@@ -1,5 +1,5 @@
 <script setup>
-import { computed, nextTick, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 
 const props = defineProps({
   visible: { type: Boolean, default: false },
@@ -22,22 +22,69 @@ const emit = defineEmits([
   'set-tab',
   'update-order-field',
   'cancel-order',
+  'amend-order',
   'quick-order',
+  'position-close',
+  'position-reverse',
   'adjust-cashflow',
   'adjust-fee',
 ])
 
 const symbolInputRef = ref(null)
+const priceModeMenuRef = ref(null)
+const selectedPriceMode = ref('latest')
+const priceModeMenuOpen = ref(false)
+const priceFrozen = ref(false)
+const frozenLatestPrice = ref(0)
+const selectedPositionKey = ref('')
+const selectedOrderKey = ref('')
+const selectedTradeKey = ref('')
+const selectedWorkingOrderKey = ref('')
+const positionMenuOpen = ref(false)
+const positionMenuX = ref(0)
+const positionMenuY = ref(0)
+const ordersFilterMode = ref('all')
+const ordersMenuOpen = ref(false)
+const ordersMenuX = ref(0)
+const ordersMenuY = ref(0)
+const workingOrderMenuOpen = ref(false)
+const workingOrderMenuX = ref(0)
+const workingOrderMenuY = ref(0)
+const amendDialogOpen = ref(false)
+const amendOrderTarget = ref(null)
+const amendForm = ref({ price: '', volume: 1 })
+
+const PRICE_MODE_OPTIONS = [
+  { key: 'latest', label: '最新价' },
+  { key: 'queue', label: '排队价' },
+  { key: 'opponent', label: '对手价' },
+  { key: 'market', label: '市价' },
+]
 
 watch(
   () => props.visible,
   async (visible) => {
-    if (!visible) return
+    if (!visible) {
+      priceModeMenuOpen.value = false
+      positionMenuOpen.value = false
+      ordersMenuOpen.value = false
+      workingOrderMenuOpen.value = false
+      amendDialogOpen.value = false
+      return
+    }
     await nextTick()
     symbolInputRef.value?.focus?.()
     symbolInputRef.value?.select?.()
   },
 )
+
+function pickQuoteNumber(...values) {
+  for (const item of values) {
+    const n = Number(item)
+    if (Number.isFinite(n) && n > 0) return n
+  }
+  return 0
+}
 
 const topTabs = [
   { key: 'positions', label: '持仓' },
@@ -86,6 +133,33 @@ function fmtPct(value) {
   return `${(n * 100).toFixed(2)}%`
 }
 
+function toWholeNumber(value) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return null
+  return Math.max(0, Math.floor(n))
+}
+
+function orderVolumeOriginal(item) {
+  const v = toWholeNumber(item?.volume_total_original)
+  return v == null ? 0 : v
+}
+
+function orderVolumeTraded(item) {
+  const v = toWholeNumber(item?.volume_traded)
+  return v == null ? 0 : v
+}
+
+function orderVolumeCanceled(item) {
+  const v = toWholeNumber(item?.volume_canceled)
+  return v == null ? 0 : v
+}
+
+function orderVolumeRemaining(item) {
+  const direct = toWholeNumber(item?.remaining_volume)
+  if (direct != null) return direct
+  return Math.max(0, orderVolumeOriginal(item) - orderVolumeTraded(item) - orderVolumeCanceled(item))
+}
+
 function fmtTime(value) {
   const raw = String(value || '').trim()
   if (!raw) return '--'
@@ -114,15 +188,382 @@ function onResizePointerDown(direction, evt) {
 }
 
 function quickOrder(kind) {
-  emit('quick-order', kind)
+  let limitPrice = 0
+  if (kind === 'buy_open') limitPrice = resolveSidePrice('buy')
+  if (kind === 'sell_open') limitPrice = resolveSidePrice('sell')
+  emit('quick-order', {
+    kind,
+    limit_price: limitPrice,
+    price_mode: priceFrozen.value ? 'frozen_latest' : selectedPriceMode.value,
+  })
+}
+
+function positionKey(item) {
+  return `${item?.symbol || ''}|${item?.direction || ''}|${item?.hedge_flag || ''}`
+}
+
+function orderKey(item) {
+  return String(item?.command_id || '')
+}
+
+function tradeKey(item) {
+  return `${item?.trade_id || ''}|${item?.received_at || ''}`
+}
+
+const selectedPosition = computed(() => {
+  const rows = props.terminal?.positions || []
+  return rows.find((item) => positionKey(item) === selectedPositionKey.value) || null
+})
+
+const filteredOrders = computed(() => {
+  const rows = Array.isArray(props.terminal?.orders) ? props.terminal.orders : []
+  if (ordersFilterMode.value === 'cancelable') return rows.filter((item) => isOrderCancelable(item))
+  if (ordersFilterMode.value === 'canceled') return rows.filter((item) => isOrderCanceled(item))
+  return rows
+})
+
+const hasWorkingOrders = computed(() => {
+  const rows = Array.isArray(props.terminal?.working_orders) ? props.terminal.working_orders : []
+  return rows.length > 0
+})
+
+const selectedWorkingOrder = computed(() => {
+  const rows = Array.isArray(props.terminal?.working_orders) ? props.terminal.working_orders : []
+  return rows.find((item) => orderKey(item) === selectedWorkingOrderKey.value) || null
+})
+
+const amendDirectionLabel = computed(() => {
+  const text = String(amendOrderTarget.value?.direction || '').trim().toLowerCase()
+  if (text === 'buy') return '买'
+  if (text === 'sell') return '卖'
+  return amendOrderTarget.value?.direction || '--'
+})
+
+const amendOffsetLabel = computed(() => {
+  const text = String(amendOrderTarget.value?.offset_flag || '').trim().toLowerCase()
+  if (text === 'open') return '开仓'
+  if (text === 'close') return '平仓'
+  if (text === 'close_today') return '平今'
+  if (text === 'close_yesterday') return '平昨'
+  return amendOrderTarget.value?.offset_flag || '--'
+})
+
+const selectedPositionClosable = computed(() => {
+  const n = Number(selectedPosition.value?.closable || 0)
+  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 0
+})
+
+function latestPriceNow() {
+  return pickQuoteNumber(
+    props.quoteSnapshot?.latest_price,
+    props.quoteSnapshot?.ask_price1,
+    props.quoteSnapshot?.bid_price1,
+  )
+}
+
+function resolveSidePrice(kind) {
+  if (priceFrozen.value && frozenLatestPrice.value > 0) return frozenLatestPrice.value
+  const quote = props.quoteSnapshot || {}
+  const latest = latestPriceNow()
+  const bid1 = pickQuoteNumber(quote?.bid_price1)
+  const ask1 = pickQuoteNumber(quote?.ask_price1)
+  const lowerLimit = pickQuoteNumber(quote?.lower_limit_price)
+  const upperLimit = pickQuoteNumber(quote?.upper_limit_price)
+  const side = kind === 'sell' ? 'sell' : 'buy'
+  if (selectedPriceMode.value === 'opponent') {
+    return side === 'buy'
+      ? pickQuoteNumber(ask1, latest, bid1)
+      : pickQuoteNumber(bid1, latest, ask1)
+  }
+  if (selectedPriceMode.value === 'queue') {
+    return side === 'buy'
+      ? pickQuoteNumber(bid1, latest, ask1)
+      : pickQuoteNumber(ask1, latest, bid1)
+  }
+  if (selectedPriceMode.value === 'market') {
+    return side === 'buy'
+      ? pickQuoteNumber(lowerLimit, latest, ask1, bid1)
+      : pickQuoteNumber(upperLimit, latest, bid1, ask1)
+  }
+  return pickQuoteNumber(latest, ask1, bid1)
 }
 
 function sidePrice(kind) {
-  if (kind === 'buy') {
-    return fmtNumber(props.quoteSnapshot?.ask_price1 ?? props.quoteSnapshot?.latest_price, 0)
-  }
-  return fmtNumber(props.quoteSnapshot?.bid_price1 ?? props.quoteSnapshot?.latest_price, 0)
+  return fmtNumber(resolveSidePrice(kind), 0)
 }
+
+function sideDeltaText(kind) {
+  const latest = latestPriceNow()
+  const side = resolveSidePrice(kind)
+  if (latest <= 0 || side <= 0) return 'Δ --'
+  const delta = side - latest
+  if (Math.abs(delta) < 1e-9) return 'Δ 0'
+  return `Δ ${delta > 0 ? '+' : ''}${fmtNumber(delta, 0)}`
+}
+
+const selectedPriceModeLabel = computed(() => (
+  PRICE_MODE_OPTIONS.find((item) => item.key === selectedPriceMode.value)?.label || '最新价'
+))
+
+const priceAnchorDisplay = computed(() => {
+  if (priceFrozen.value) {
+    const latest = pickQuoteNumber(frozenLatestPrice.value, latestPriceNow())
+    return latest > 0 ? fmtNumber(latest, 0) : '--'
+  }
+  return selectedPriceModeLabel.value
+})
+
+const upperLimitDisplay = computed(() => {
+  const v = pickQuoteNumber(props.quoteSnapshot?.upper_limit_price)
+  return v > 0 ? fmtNumber(v, 0) : '--'
+})
+
+const lowerLimitDisplay = computed(() => {
+  const v = pickQuoteNumber(props.quoteSnapshot?.lower_limit_price)
+  return v > 0 ? fmtNumber(v, 0) : '--'
+})
+
+function togglePriceModeMenu() {
+  priceModeMenuOpen.value = !priceModeMenuOpen.value
+}
+
+function selectPriceMode(mode) {
+  selectedPriceMode.value = mode
+  priceFrozen.value = false
+  priceModeMenuOpen.value = false
+}
+
+function freezeAtLatestPrice() {
+  const latest = latestPriceNow()
+  if (latest <= 0) return
+  frozenLatestPrice.value = latest
+  priceFrozen.value = true
+  priceModeMenuOpen.value = false
+}
+
+function closePriceModeMenuOnOutside(evt) {
+  if (!priceModeMenuOpen.value) return
+  const target = evt.target
+  if (!(target instanceof Node)) return
+  if (priceModeMenuRef.value?.contains?.(target)) return
+  priceModeMenuOpen.value = false
+}
+
+function closePositionMenuOnOutside(evt) {
+  if (!positionMenuOpen.value) return
+  const target = evt.target
+  if (!(target instanceof HTMLElement)) return
+  if (target.closest('.trade-classic-position-menu')) return
+  positionMenuOpen.value = false
+}
+
+function closeOrdersMenuOnOutside(evt) {
+  if (!ordersMenuOpen.value) return
+  const target = evt.target
+  if (!(target instanceof HTMLElement)) return
+  if (target.closest('.trade-classic-orders-menu')) return
+  ordersMenuOpen.value = false
+}
+
+function closeWorkingOrderMenuOnOutside(evt) {
+  if (!workingOrderMenuOpen.value) return
+  const target = evt.target
+  if (!(target instanceof HTMLElement)) return
+  if (target.closest('.trade-classic-working-menu')) return
+  workingOrderMenuOpen.value = false
+}
+
+function closeSideByPosition(item) {
+  const direction = String(item?.direction || '').trim().toLowerCase()
+  return direction === 'short' ? 'buy' : 'sell'
+}
+
+function reverseOpenDirectionByPosition(item) {
+  const direction = String(item?.direction || '').trim().toLowerCase()
+  return direction === 'short' ? 'buy' : 'sell'
+}
+
+function resolveSidePriceByMode(mode, side) {
+  const quote = props.quoteSnapshot || {}
+  const latest = latestPriceNow()
+  const bid1 = pickQuoteNumber(quote?.bid_price1)
+  const ask1 = pickQuoteNumber(quote?.ask_price1)
+  const lowerLimit = pickQuoteNumber(quote?.lower_limit_price)
+  const upperLimit = pickQuoteNumber(quote?.upper_limit_price)
+  if (mode === 'opponent') {
+    return side === 'buy'
+      ? pickQuoteNumber(ask1, latest, bid1)
+      : pickQuoteNumber(bid1, latest, ask1)
+  }
+  if (mode === 'queue') {
+    return side === 'buy'
+      ? pickQuoteNumber(bid1, latest, ask1)
+      : pickQuoteNumber(ask1, latest, bid1)
+  }
+  if (mode === 'market') {
+    return side === 'buy'
+      ? pickQuoteNumber(lowerLimit, latest, ask1, bid1)
+      : pickQuoteNumber(upperLimit, latest, bid1, ask1)
+  }
+  return pickQuoteNumber(latest, ask1, bid1)
+}
+
+function resolveClosePrice(item, mode = 'active') {
+  const side = closeSideByPosition(item)
+  if (mode === 'active') return resolveSidePrice(side)
+  return resolveSidePriceByMode(mode, side)
+}
+
+function resolveReverseOpenPrice(item) {
+  const side = reverseOpenDirectionByPosition(item)
+  return resolveSidePriceByMode('opponent', side)
+}
+
+function selectPositionRow(item) {
+  selectedPositionKey.value = positionKey(item)
+}
+
+function onPositionRowClick(item) {
+  selectPositionRow(item)
+  positionMenuOpen.value = false
+}
+
+function onPositionRowContextMenu(item, evt) {
+  evt.preventDefault()
+  selectPositionRow(item)
+  positionMenuX.value = evt.clientX
+  positionMenuY.value = evt.clientY
+  positionMenuOpen.value = true
+}
+
+function onOrderRowClick(item) {
+  selectedOrderKey.value = orderKey(item)
+  ordersMenuOpen.value = false
+}
+
+function onOrderRowContextMenu(item, evt) {
+  evt.preventDefault()
+  onOrderRowClick(item)
+  ordersMenuX.value = evt.clientX
+  ordersMenuY.value = evt.clientY
+  ordersMenuOpen.value = true
+}
+
+function onOrdersTableContextMenu(evt) {
+  evt.preventDefault()
+  ordersMenuX.value = evt.clientX
+  ordersMenuY.value = evt.clientY
+  ordersMenuOpen.value = true
+}
+
+function onTradeRowClick(item) {
+  selectedTradeKey.value = tradeKey(item)
+}
+
+function onTradeRowContextMenu(item, evt) {
+  evt.preventDefault()
+  onTradeRowClick(item)
+}
+
+function onWorkingOrderRowClick(item) {
+  selectedWorkingOrderKey.value = orderKey(item)
+  workingOrderMenuOpen.value = false
+}
+
+function onWorkingOrderRowContextMenu(item, evt) {
+  evt.preventDefault()
+  onWorkingOrderRowClick(item)
+  workingOrderMenuX.value = evt.clientX
+  workingOrderMenuY.value = evt.clientY
+  workingOrderMenuOpen.value = true
+}
+
+function isOrderCancelable(item) {
+  return orderVolumeRemaining(item) > 0
+}
+
+function isOrderCanceled(item) {
+  if (orderVolumeCanceled(item) > 0) return true
+  const status = String(item?.order_status || '').toLowerCase()
+  const msg = String(item?.status_msg || '').toLowerCase()
+  return status.includes('cancel') || status.includes('撤') || msg.includes('cancel') || msg.includes('撤')
+}
+
+function setOrdersFilterMode(mode) {
+  ordersFilterMode.value = mode
+  ordersMenuOpen.value = false
+}
+
+function cancelSelectedWorkingOrder() {
+  if (!selectedWorkingOrder.value) return
+  emit('cancel-order', selectedWorkingOrder.value)
+  workingOrderMenuOpen.value = false
+}
+
+function openAmendDialogForSelectedWorkingOrder() {
+  if (!selectedWorkingOrder.value) return
+  amendOrderTarget.value = selectedWorkingOrder.value
+  amendForm.value = {
+    price: String(Number(selectedWorkingOrder.value.limit_price || 0)),
+    volume: Math.max(1, orderVolumeRemaining(selectedWorkingOrder.value) || orderVolumeOriginal(selectedWorkingOrder.value) || 1),
+  }
+  amendDialogOpen.value = true
+  workingOrderMenuOpen.value = false
+}
+
+function closeAmendDialog() {
+  amendDialogOpen.value = false
+}
+
+function submitAmendOrder() {
+  if (!amendOrderTarget.value) return
+  const price = Number(amendForm.value.price)
+  const volume = Number(amendForm.value.volume)
+  if (!Number.isFinite(price) || price <= 0) return
+  if (!Number.isFinite(volume) || volume <= 0) return
+  emit('amend-order', {
+    order: amendOrderTarget.value,
+    limit_price: price,
+    volume: Math.max(1, Math.floor(volume)),
+  })
+  amendDialogOpen.value = false
+}
+
+function emitCloseSelectedPosition(ratio = 1, mode = 'active') {
+  if (!selectedPosition.value || selectedPositionClosable.value <= 0) return
+  emit('position-close', {
+    position: selectedPosition.value,
+    ratio,
+    limit_price: resolveClosePrice(selectedPosition.value, mode),
+  })
+  positionMenuOpen.value = false
+}
+
+function emitReverseSelectedPosition() {
+  if (!selectedPosition.value || selectedPositionClosable.value <= 0) return
+  emit('position-reverse', {
+    position: selectedPosition.value,
+    volume: selectedPositionClosable.value,
+    close_limit_price: resolveClosePrice(selectedPosition.value, 'market'),
+    open_limit_price: resolveReverseOpenPrice(selectedPosition.value),
+    open_direction: reverseOpenDirectionByPosition(selectedPosition.value),
+  })
+  positionMenuOpen.value = false
+}
+
+onMounted(() => {
+  document.addEventListener('pointerdown', closePriceModeMenuOnOutside)
+  document.addEventListener('pointerdown', closePositionMenuOnOutside)
+  document.addEventListener('pointerdown', closeOrdersMenuOnOutside)
+  document.addEventListener('pointerdown', closeWorkingOrderMenuOnOutside)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('pointerdown', closePriceModeMenuOnOutside)
+  document.removeEventListener('pointerdown', closePositionMenuOnOutside)
+  document.removeEventListener('pointerdown', closeOrdersMenuOnOutside)
+  document.removeEventListener('pointerdown', closeWorkingOrderMenuOnOutside)
+})
 
 function fundsRows() {
   const funds = props.terminal?.funds || {}
@@ -176,13 +617,43 @@ function fundsRows() {
               </label>
 
               <label class="trade-classic-field trade-classic-field-price">
-                <span>价格 ...</span>
-                <div class="trade-classic-price-box">
-                  <input type="number" step="0.01" :value="orderForm.limit_price" @input="updateField('limit_price', $event)" />
-                  <select :value="orderForm.exchange_id" @change="updateField('exchange_id', $event)">
-                    <option value="">最新价</option>
-                    <option :value="orderForm.exchange_id || ''">{{ orderForm.exchange_id || '交易所' }}</option>
-                  </select>
+                <div ref="priceModeMenuRef" class="trade-classic-price-control">
+                  <button
+                    type="button"
+                    class="trade-classic-price-trigger"
+                    :class="{ open: priceModeMenuOpen }"
+                    @click.stop="togglePriceModeMenu"
+                    title="选择价格类型"
+                  >
+                    价格 ...
+                  </button>
+                  <div class="trade-classic-price-box">
+                    <button
+                      type="button"
+                      class="trade-classic-price-anchor"
+                      title="点击后冻结为当前最新价"
+                      @click="freezeAtLatestPrice"
+                      :class="{ readonly: !priceFrozen, frozen: priceFrozen }"
+                    >
+                      <span class="trade-classic-price-anchor-value">{{ priceAnchorDisplay }}</span>
+                    </button>
+                    <div class="trade-classic-limit-box">
+                      <span class="trade-classic-limit-up">{{ upperLimitDisplay }}</span>
+                      <span class="trade-classic-limit-down">{{ lowerLimitDisplay }}</span>
+                    </div>
+                  </div>
+                  <div v-if="priceModeMenuOpen" class="trade-classic-price-menu">
+                    <button
+                      v-for="mode in PRICE_MODE_OPTIONS"
+                      :key="mode.key"
+                      type="button"
+                      class="trade-classic-price-menu-item"
+                      :class="{ active: !priceFrozen && selectedPriceMode === mode.key }"
+                      @click="selectPriceMode(mode.key)"
+                    >
+                      {{ mode.label }}
+                    </button>
+                  </div>
                 </div>
               </label>
             </div>
@@ -191,12 +662,12 @@ function fundsRows() {
               <button type="button" class="trade-classic-action trade-classic-buy" @click="quickOrder('buy_open')">
                 <span class="trade-classic-action-price">{{ sidePrice('buy') }}</span>
                 <span class="trade-classic-action-text">买多</span>
-                <span class="trade-classic-action-foot">&lt;= {{ fmtInt(orderForm.volume) }}</span>
+                <span class="trade-classic-action-foot">{{ sideDeltaText('buy') }}</span>
               </button>
               <button type="button" class="trade-classic-action trade-classic-sell" @click="quickOrder('sell_open')">
                 <span class="trade-classic-action-price">{{ sidePrice('sell') }}</span>
                 <span class="trade-classic-action-text">卖空</span>
-                <span class="trade-classic-action-foot">&lt;= {{ fmtInt(orderForm.volume) }}</span>
+                <span class="trade-classic-action-foot">{{ sideDeltaText('sell') }}</span>
               </button>
               <button type="button" class="trade-classic-action trade-classic-closeall" @click="quickOrder('close')">
                 <span class="trade-classic-action-text trade-classic-action-text-only">平仓</span>
@@ -256,7 +727,14 @@ function fundsRows() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="item in terminal?.positions || []" :key="`${item.symbol}-${item.direction}-${item.hedge_flag}`">
+                  <tr
+                    v-for="item in terminal?.positions || []"
+                    :key="`${item.symbol}-${item.direction}-${item.hedge_flag}`"
+                    class="trade-classic-row-selectable"
+                    :class="{ selected: selectedPositionKey === positionKey(item) }"
+                    @click="onPositionRowClick(item)"
+                    @contextmenu="onPositionRowContextMenu(item, $event)"
+                  >
                     <td>{{ item.symbol?.replace(/[0-9]/g, '') || '--' }}</td>
                     <td>{{ item.symbol }}</td>
                     <td>{{ item.direction }}</td>
@@ -277,7 +755,7 @@ function fundsRows() {
                 </tbody>
               </table>
 
-              <table v-else-if="activeTab === 'orders'" class="trade-classic-table">
+              <table v-else-if="activeTab === 'orders'" class="trade-classic-table" @contextmenu="onOrdersTableContextMenu($event)">
                 <thead>
                   <tr>
                     <th>时间 ▲</th>
@@ -295,7 +773,14 @@ function fundsRows() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="item in terminal?.orders || []" :key="item.command_id">
+                  <tr
+                    v-for="item in filteredOrders"
+                    :key="item.command_id"
+                    class="trade-classic-row-selectable"
+                    :class="{ selected: selectedOrderKey === orderKey(item) }"
+                    @click="onOrderRowClick(item)"
+                    @contextmenu="onOrderRowContextMenu(item, $event)"
+                  >
                     <td>{{ fmtTime(item.updated_at || item.inserted_at) }}</td>
                     <td>{{ item.symbol?.replace(/[0-9]/g, '') || '--' }}</td>
                     <td>{{ item.symbol }}</td>
@@ -303,13 +788,13 @@ function fundsRows() {
                     <td>{{ item.direction }}</td>
                     <td>{{ item.offset_flag }}</td>
                     <td>{{ fmtNumber(item.limit_price, 0) }}</td>
-                    <td>{{ fmtInt(item.volume_total_original) }}</td>
-                    <td>{{ fmtInt(item.remaining_volume) }}</td>
-                    <td>{{ fmtInt(item.volume_traded) }}</td>
-                    <td>{{ fmtInt(item.volume_canceled) }}</td>
+                    <td>{{ fmtInt(orderVolumeOriginal(item)) }}</td>
+                    <td>{{ fmtInt(orderVolumeRemaining(item)) }}</td>
+                    <td>{{ fmtInt(orderVolumeTraded(item)) }}</td>
+                    <td>{{ fmtInt(orderVolumeCanceled(item)) }}</td>
                     <td>{{ item.status_msg || '--' }}</td>
                   </tr>
-                  <tr v-if="!(terminal?.orders || []).length">
+                  <tr v-if="!filteredOrders.length">
                     <td colspan="12">无委托</td>
                   </tr>
                 </tbody>
@@ -333,7 +818,14 @@ function fundsRows() {
                   </tr>
                 </thead>
                 <tbody>
-                  <tr v-for="item in terminal?.trades || []" :key="`${item.trade_id}-${item.received_at}`">
+                  <tr
+                    v-for="item in terminal?.trades || []"
+                    :key="`${item.trade_id}-${item.received_at}`"
+                    class="trade-classic-row-selectable"
+                    :class="{ selected: selectedTradeKey === tradeKey(item) }"
+                    @click="onTradeRowClick(item)"
+                    @contextmenu="onTradeRowContextMenu(item, $event)"
+                  >
                     <td>{{ fmtTime(item.trade_time) }}</td>
                     <td>{{ item.symbol?.replace(/[0-9]/g, '') || '--' }}</td>
                     <td>{{ item.symbol }}</td>
@@ -367,14 +859,14 @@ function fundsRows() {
 
             <template v-if="activeTab === 'positions'">
               <div class="trade-classic-bottom-actions">
-                <button type="button" disabled>平33%</button>
-                <button type="button" disabled>平50%</button>
-                <button type="button" disabled>平100%</button>
-                <button type="button" disabled>反手</button>
+                <button type="button" :disabled="selectedPositionClosable <= 0" @click="emitCloseSelectedPosition(0.33, 'active')">平33%</button>
+                <button type="button" :disabled="selectedPositionClosable <= 0" @click="emitCloseSelectedPosition(0.5, 'active')">平50%</button>
+                <button type="button" :disabled="selectedPositionClosable <= 0" @click="emitCloseSelectedPosition(1, 'active')">平100%</button>
+                <button type="button" :disabled="selectedPositionClosable <= 0" @click="emitReverseSelectedPosition">反手</button>
                 <button type="button" disabled>损盈</button>
               </div>
 
-              <div class="trade-classic-gridbox trade-classic-gridbox-bottom">
+              <div v-if="hasWorkingOrders" class="trade-classic-gridbox trade-classic-gridbox-bottom">
                 <table class="trade-classic-table">
                   <thead>
                     <tr>
@@ -393,7 +885,14 @@ function fundsRows() {
                     </tr>
                   </thead>
                   <tbody>
-                    <tr v-for="item in terminal?.working_orders || []" :key="item.command_id">
+                    <tr
+                      v-for="item in terminal?.working_orders || []"
+                      :key="item.command_id"
+                      class="trade-classic-row-selectable"
+                      :class="{ selected: selectedWorkingOrderKey === orderKey(item) }"
+                      @click="onWorkingOrderRowClick(item)"
+                      @contextmenu="onWorkingOrderRowContextMenu(item, $event)"
+                    >
                       <td>{{ fmtTime(item.updated_at || item.inserted_at) }}</td>
                       <td>{{ item.symbol?.replace(/[0-9]/g, '') || '--' }}</td>
                       <td>{{ item.symbol }}</td>
@@ -401,18 +900,15 @@ function fundsRows() {
                       <td>{{ item.direction }}</td>
                       <td>{{ item.offset_flag }}</td>
                       <td>{{ fmtNumber(item.limit_price, 0) }}</td>
-                      <td>{{ fmtInt(item.volume_total_original) }}</td>
+                      <td>{{ fmtInt(orderVolumeOriginal(item)) }}</td>
                       <td>
                         <button type="button" class="linkish-inline" @click="emit('cancel-order', item)">
-                          {{ fmtInt(item.remaining_volume) }}
+                          {{ fmtInt(orderVolumeRemaining(item)) }}
                         </button>
                       </td>
-                      <td>{{ fmtInt(item.volume_traded) }}</td>
-                      <td>{{ fmtNumber(item.limit_price * Math.max(0, Number(item.remaining_volume || 0)), 0) }}</td>
+                      <td>{{ fmtInt(orderVolumeTraded(item)) }}</td>
+                      <td>{{ fmtNumber(item.limit_price * Math.max(0, orderVolumeRemaining(item)), 0) }}</td>
                       <td>--</td>
-                    </tr>
-                    <tr v-if="!(terminal?.working_orders || []).length">
-                      <td colspan="12">无待成交单</td>
                     </tr>
                   </tbody>
                 </table>
@@ -422,6 +918,56 @@ function fundsRows() {
         </div>
       </div>
     </section>
+    <div
+      v-if="positionMenuOpen && selectedPosition"
+      class="trade-classic-position-menu"
+      :style="{ left: `${positionMenuX}px`, top: `${positionMenuY}px` }"
+    >
+      <button type="button" @click="emitCloseSelectedPosition(1, 'opponent')">对手价平仓</button>
+      <button type="button" @click="emitCloseSelectedPosition(1, 'latest')">最新价平仓</button>
+      <button type="button" @click="emitCloseSelectedPosition(1, 'market')">市价平仓</button>
+    </div>
+    <div
+      v-if="ordersMenuOpen && activeTab === 'orders'"
+      class="trade-classic-orders-menu"
+      :style="{ left: `${ordersMenuX}px`, top: `${ordersMenuY}px` }"
+    >
+      <button type="button" :class="{ active: ordersFilterMode === 'all' }" @click="setOrdersFilterMode('all')">显示全部</button>
+      <button type="button" :class="{ active: ordersFilterMode === 'cancelable' }" @click="setOrdersFilterMode('cancelable')">显示可撤</button>
+      <button type="button" :class="{ active: ordersFilterMode === 'canceled' }" @click="setOrdersFilterMode('canceled')">显示已撤</button>
+    </div>
+    <div
+      v-if="workingOrderMenuOpen && activeTab === 'positions' && selectedWorkingOrder"
+      class="trade-classic-working-menu"
+      :style="{ left: `${workingOrderMenuX}px`, top: `${workingOrderMenuY}px` }"
+    >
+      <button type="button" @click="cancelSelectedWorkingOrder">撤单</button>
+      <button type="button" @click="openAmendDialogForSelectedWorkingOrder">改价</button>
+    </div>
+    <div v-if="amendDialogOpen" class="trade-classic-amend-mask" @click.self="closeAmendDialog">
+      <section class="trade-classic-amend-dialog" role="dialog" aria-modal="true" aria-label="改价">
+        <header class="trade-classic-amend-title">
+          <span>改价</span>
+          <button type="button" @click="closeAmendDialog">×</button>
+        </header>
+        <div class="trade-classic-amend-body">
+          <div class="trade-classic-amend-row">
+            <span class="trade-classic-amend-symbol">{{ amendOrderTarget?.symbol || '--' }}</span>
+            <span>{{ amendDirectionLabel }}，{{ amendOffsetLabel }}</span>
+          </div>
+          <div class="trade-classic-amend-row">
+            <label>手</label>
+            <input v-model.number="amendForm.volume" type="number" min="1" step="1" />
+            <label>价格</label>
+            <input v-model="amendForm.price" type="number" min="0" step="0.01" />
+          </div>
+        </div>
+        <footer class="trade-classic-amend-actions">
+          <button type="button" class="confirm" @click="submitAmendOrder">确定</button>
+          <button type="button" @click="closeAmendDialog">取消</button>
+        </footer>
+      </section>
+    </div>
   </div>
 </template>
 
@@ -651,8 +1197,35 @@ function fundsRows() {
   gap: 4px;
 }
 
+.trade-classic-price-control {
+  position: relative;
+  display: grid;
+  gap: 4px;
+}
+
 .trade-classic-price-box {
-  grid-template-columns: 1fr 82px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 40px;
+  gap: 4px;
+  align-items: stretch;
+}
+
+.trade-classic-price-trigger {
+  min-height: 20px;
+  width: max-content;
+  padding: 0 8px;
+  border: 1px solid #b6c5d5;
+  border-radius: 0;
+  background: #efefef;
+  color: #253f59;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.trade-classic-price-trigger:hover,
+.trade-classic-price-trigger.open {
+  border-color: #7fa3c9;
+  background: #e8f0fa;
 }
 
 .trade-classic-window input,
@@ -676,6 +1249,108 @@ function fundsRows() {
   font-size: 11px;
   cursor: pointer;
   color: #111;
+}
+
+.trade-classic-price-anchor {
+  min-height: 26px;
+  border: 1px solid #b6c5d5;
+  border-radius: 0;
+  background: #f9fbfd;
+  color: #111;
+  cursor: pointer;
+}
+
+.trade-classic-price-anchor {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  padding: 0 6px;
+  text-align: left;
+}
+
+.trade-classic-price-anchor:hover,
+.trade-classic-price-trigger:hover {
+  border-color: #7fa3c9;
+  background: #eef5fc;
+}
+
+.trade-classic-price-anchor-label {
+  font-size: 11px;
+  color: #2c4864;
+}
+
+.trade-classic-price-anchor-value {
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.trade-classic-price-anchor.readonly {
+  background: #f1f4f8;
+  color: #3a5067;
+}
+
+.trade-classic-price-anchor.frozen {
+  background: #fff;
+  color: #111;
+  border-color: #8da6c1;
+}
+
+.trade-classic-limit-box {
+  display: flex;
+  flex-direction: column;
+  justify-content: space-between;
+  align-items: flex-end;
+  padding: 1px 0;
+  font-size: 12px;
+  line-height: 1.1;
+  user-select: none;
+}
+
+.trade-classic-limit-up {
+  color: #d71c1c;
+  font-weight: 700;
+}
+
+.trade-classic-limit-down {
+  color: #10980e;
+  font-weight: 700;
+}
+
+.trade-classic-price-menu {
+  position: absolute;
+  left: calc(100% + 6px);
+  top: 0;
+  z-index: 4;
+  display: flex;
+  gap: 4px;
+  min-width: 0;
+  padding: 4px;
+  border: 1px solid #9bb2c9;
+  background: #f3f6fa;
+  box-shadow: 0 4px 9px rgba(0, 0, 0, 0.16);
+}
+
+.trade-classic-price-menu-item {
+  min-height: 24px;
+  min-width: 62px;
+  padding: 0 10px;
+  border: 1px solid #b6c5d5;
+  background: #fff;
+  font-size: 12px;
+  color: #1e2f40;
+  text-align: center;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.trade-classic-price-menu-item:hover {
+  background: #edf4fb;
+}
+
+.trade-classic-price-menu-item.active {
+  border-color: #6f93b9;
+  background: #e8f0fa;
+  font-weight: 700;
 }
 
 .trade-classic-actions {
@@ -763,7 +1438,8 @@ function fundsRows() {
 .trade-classic-sub-actions button:disabled,
 .trade-classic-bottom-actions button:disabled {
   color: #111;
-  opacity: 1;
+  opacity: 0.55;
+  cursor: not-allowed;
 }
 
 .trade-classic-instrument {
@@ -870,6 +1546,167 @@ function fundsRows() {
   position: sticky;
   top: 0;
   z-index: 1;
+}
+
+.trade-classic-row-selectable {
+  cursor: default;
+}
+
+.trade-classic-row-selectable:hover td {
+  background: #f2f7fd;
+}
+
+.trade-classic-row-selectable.selected td {
+  background: #dcecff;
+}
+
+.trade-classic-position-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 132px;
+  display: grid;
+  gap: 1px;
+  border: 1px solid #8ea5be;
+  background: #e8edf3;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+  pointer-events: auto;
+}
+
+.trade-classic-position-menu button {
+  min-height: 26px;
+  border: none;
+  background: #fff;
+  padding: 0 10px;
+  text-align: left;
+  font-size: 12px;
+  color: #1e2f40;
+  cursor: pointer;
+}
+
+.trade-classic-position-menu button:hover {
+  background: #eaf3fd;
+}
+
+.trade-classic-orders-menu,
+.trade-classic-working-menu {
+  position: fixed;
+  z-index: 70;
+  min-width: 132px;
+  display: grid;
+  gap: 1px;
+  border: 1px solid #8ea5be;
+  background: #e8edf3;
+  box-shadow: 0 6px 16px rgba(0, 0, 0, 0.22);
+  pointer-events: auto;
+}
+
+.trade-classic-orders-menu button,
+.trade-classic-working-menu button {
+  min-height: 26px;
+  border: none;
+  background: #fff;
+  padding: 0 10px;
+  text-align: left;
+  font-size: 12px;
+  color: #1e2f40;
+  cursor: pointer;
+}
+
+.trade-classic-orders-menu button:hover,
+.trade-classic-working-menu button:hover {
+  background: #eaf3fd;
+}
+
+.trade-classic-orders-menu button.active {
+  background: #dcecff;
+  font-weight: 700;
+}
+
+.trade-classic-amend-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.08);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 72;
+  pointer-events: auto;
+}
+
+.trade-classic-amend-dialog {
+  width: 400px;
+  border: 1px solid #9db2c7;
+  background: #f4f5f7;
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.25);
+}
+
+.trade-classic-amend-title {
+  min-height: 26px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 10px;
+  border-bottom: 1px solid #c3cfdb;
+  background: #e8edf3;
+  font-size: 12px;
+}
+
+.trade-classic-amend-title button {
+  border: none;
+  background: transparent;
+  font-size: 18px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.trade-classic-amend-body {
+  padding: 16px 16px 10px;
+  display: grid;
+  gap: 10px;
+}
+
+.trade-classic-amend-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.trade-classic-amend-symbol {
+  min-width: 70px;
+  font-weight: 700;
+}
+
+.trade-classic-amend-row label {
+  color: #44596d;
+}
+
+.trade-classic-amend-row input {
+  width: 92px;
+  min-height: 24px;
+  padding: 0 5px;
+  border: 1px solid #aebfd0;
+  background: #fff;
+}
+
+.trade-classic-amend-actions {
+  display: flex;
+  justify-content: center;
+  gap: 12px;
+  padding: 4px 0 12px;
+}
+
+.trade-classic-amend-actions button {
+  min-width: 74px;
+  min-height: 24px;
+  border: 1px solid #aebfd0;
+  background: #f5f7f9;
+  cursor: pointer;
+}
+
+.trade-classic-amend-actions .confirm {
+  border-color: #4d84c8;
+  background: #f2f8ff;
 }
 
 .trade-classic-funds-table th {

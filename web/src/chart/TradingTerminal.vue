@@ -623,7 +623,7 @@ async function submitTradeOrder() {
   }
 }
 
-async function cancelTradeOrder(item) {
+async function cancelTradeOrderRequest(item, options = {}) {
   try {
     const payload = {
       account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
@@ -640,20 +640,36 @@ async function cancelTradeOrder(item) {
       body: JSON.stringify(payload),
     })
     if (!resp.ok) throw new Error(await resp.text())
-    await fetchTradeTerminal()
+    if (!options.skipRefresh) await fetchTradeTerminal()
+    return true
   } catch (err) {
-    showTradeError('撤单', err)
+    if (!options.silentError) showTradeError('撤单', err)
+    return false
   }
 }
 
-async function closeTradePosition(item) {
+async function cancelTradeOrder(item) {
+  await cancelTradeOrderRequest(item)
+}
+
+function closeVolumeByRatio(closableRaw, ratioRaw = 1) {
+  const closable = Math.max(0, Math.floor(Number(closableRaw || 0)))
+  if (closable <= 0) return 0
+  const ratio = Number(ratioRaw)
+  if (!Number.isFinite(ratio) || ratio >= 1) return closable
+  if (ratio <= 0) return 0
+  return Math.max(1, Math.min(closable, Math.floor(closable * ratio)))
+}
+
+async function closeTradePosition(item, options = {}) {
   try {
     const direction = String(item?.direction || '').trim().toLowerCase()
-    const volume = Number(item?.closable || 0)
+    const volume = closeVolumeByRatio(item?.closable, options.ratio ?? 1)
     if (!item?.symbol || volume <= 0) return
-    const price = direction === 'short'
+    const defaultPrice = direction === 'short'
       ? pickQuoteNumber(quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
       : pickQuoteNumber(quoteSnapshot.value?.bid_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
+    const price = pickQuoteNumber(options.limitPrice, defaultPrice)
     const resp = await fetch(`/api/trade/positions/${encodeURIComponent(item.symbol)}/close`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -667,14 +683,99 @@ async function closeTradePosition(item) {
       }),
     })
     if (!resp.ok) throw new Error(await resp.text())
-    await fetchTradeTerminal()
+    if (!options.skipRefresh) await fetchTradeTerminal()
+    return true
   } catch (err) {
     showTradeError('平仓', err)
+    return false
   }
 }
 
-async function quickTradeOrder(kind) {
+async function submitOpenOrder(payload) {
+  const resp = await fetch('/api/trade/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  })
+  if (!resp.ok) throw new Error(await resp.text())
+}
+
+async function onPositionClose(payload) {
+  const item = payload?.position
+  const ratio = Number(payload?.ratio ?? 1)
+  const limitPrice = Number(payload?.limit_price)
+  await closeTradePosition(item, { ratio, limitPrice })
+}
+
+async function onPositionReverse(payload) {
+  const item = payload?.position
+  if (!item?.symbol) return
+  const volume = Math.max(1, closeVolumeByRatio(payload?.volume ?? item?.closable, 1))
+  const closeLimitPrice = Number(payload?.close_limit_price)
+  const openLimitPrice = Number(payload?.open_limit_price)
+  const openDirection = String(payload?.open_direction || '').trim().toLowerCase()
+  if (!openDirection || volume <= 0) return
+  try {
+    const closed = await closeTradePosition(item, { ratio: 1, limitPrice: closeLimitPrice, skipRefresh: true })
+    if (!closed) return
+    await submitOpenOrder({
+      account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
+      symbol: String(item.symbol || '').trim(),
+      exchange_id: String(item.exchange || tradeForm.exchange_id || tradeTerminal.order_entry_defaults?.exchange_id || '').trim(),
+      direction: openDirection,
+      offset_flag: 'open',
+      limit_price: pickQuoteNumber(openLimitPrice, quoteSnapshot.value?.latest_price, tradeTerminal.order_entry_defaults?.limit_price),
+      volume,
+      client_tag: tradeForm.client_tag,
+      reason: 'manual',
+    })
+    await fetchTradeTerminal()
+  } catch (err) {
+    showTradeError('反手', err)
+  }
+}
+
+async function onAmendOrder(payload) {
+  const oldOrder = payload?.order
+  const limitPrice = Number(payload?.limit_price)
+  const volume = Number(payload?.volume)
+  if (!oldOrder?.command_id) return
+  if (!Number.isFinite(limitPrice) || limitPrice <= 0) return
+  if (!Number.isFinite(volume) || volume <= 0) return
+  try {
+    const canceled = await cancelTradeOrderRequest(oldOrder, { skipRefresh: true, silentError: false })
+    if (!canceled) return
+    await submitOpenOrder({
+      account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || '',
+      symbol: String(oldOrder.symbol || '').trim(),
+      exchange_id: String(oldOrder.exchange_id || tradeForm.exchange_id || tradeTerminal.order_entry_defaults?.exchange_id || '').trim(),
+      direction: String(oldOrder.direction || '').trim(),
+      offset_flag: String(oldOrder.offset_flag || '').trim(),
+      limit_price: limitPrice,
+      volume: Math.max(1, Math.floor(volume)),
+      client_tag: tradeForm.client_tag,
+      reason: 'manual',
+    })
+    await fetchTradeTerminal()
+  } catch (err) {
+    showTradeError('改价', err)
+  }
+}
+
+function normalizeQuickOrderPayload(raw) {
+  if (typeof raw === 'string') return { kind: raw, limitPrice: 0 }
+  const kind = String(raw?.kind || '').trim()
+  const price = Number(raw?.limit_price ?? raw?.limitPrice)
+  return {
+    kind,
+    limitPrice: Number.isFinite(price) && price > 0 ? price : 0,
+  }
+}
+
+async function quickTradeOrder(raw) {
+  const { kind, limitPrice } = normalizeQuickOrderPayload(raw)
   const lastPrice = pickQuoteNumber(
+    limitPrice,
     quoteSnapshot.value?.latest_price,
     quoteSnapshot.value?.ask_price1,
     quoteSnapshot.value?.bid_price1,
@@ -683,14 +784,14 @@ async function quickTradeOrder(kind) {
   if (kind === 'buy_open') {
     tradeForm.direction = 'buy'
     tradeForm.offset_flag = 'open'
-    if (!String(tradeForm.limit_price || '').trim() && lastPrice > 0) tradeForm.limit_price = String(lastPrice)
+    if (lastPrice > 0) tradeForm.limit_price = String(lastPrice)
     await submitTradeOrder()
     return
   }
   if (kind === 'sell_open') {
     tradeForm.direction = 'sell'
     tradeForm.offset_flag = 'open'
-    if (!String(tradeForm.limit_price || '').trim() && lastPrice > 0) tradeForm.limit_price = String(lastPrice)
+    if (lastPrice > 0) tradeForm.limit_price = String(lastPrice)
     await submitTradeOrder()
     return
   }
@@ -701,7 +802,7 @@ async function quickTradeOrder(kind) {
       return
     }
     tradeForm.offset_flag = 'close'
-    if (!String(tradeForm.limit_price || '').trim() && lastPrice > 0) tradeForm.limit_price = String(lastPrice)
+    if (lastPrice > 0) tradeForm.limit_price = String(lastPrice)
     await submitTradeOrder()
   }
 }
@@ -1450,7 +1551,10 @@ onUnmounted(() => {
       @set-tab="tradeWindow.activeTab = $event"
       @update-order-field="updateTradeFormField"
       @cancel-order="cancelTradeOrder"
+      @amend-order="onAmendOrder"
       @quick-order="quickTradeOrder"
+      @position-close="onPositionClose"
+      @position-reverse="onPositionReverse"
       @adjust-cashflow="adjustCashflow"
       @adjust-fee="adjustFee"
     />
