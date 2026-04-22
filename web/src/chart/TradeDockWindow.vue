@@ -36,6 +36,7 @@ const selectedPriceMode = ref('latest')
 const priceModeMenuOpen = ref(false)
 const priceFrozen = ref(false)
 const frozenLatestPrice = ref(0)
+const manualPriceInput = ref('')
 const selectedPositionKey = ref('')
 const selectedOrderKey = ref('')
 const selectedTradeKey = ref('')
@@ -262,7 +263,7 @@ function latestPriceNow() {
 }
 
 function resolveSidePrice(kind) {
-  if (priceFrozen.value && frozenLatestPrice.value > 0) return frozenLatestPrice.value
+  if (priceFrozen.value) return pickQuoteNumber(frozenLatestPrice.value)
   const quote = props.quoteSnapshot || {}
   const latest = latestPriceNow()
   const bid1 = pickQuoteNumber(quote?.bid_price1)
@@ -282,14 +283,15 @@ function resolveSidePrice(kind) {
   }
   if (selectedPriceMode.value === 'market') {
     return side === 'buy'
-      ? pickQuoteNumber(lowerLimit, latest, ask1, bid1)
-      : pickQuoteNumber(upperLimit, latest, bid1, ask1)
+      ? pickQuoteNumber(upperLimit, latest, ask1, bid1)
+      : pickQuoteNumber(lowerLimit, latest, bid1, ask1)
   }
   return pickQuoteNumber(latest, ask1, bid1)
 }
 
 function sidePrice(kind) {
-  return fmtNumber(resolveSidePrice(kind), 0)
+  const v = resolveSidePrice(kind)
+  return v > 0 ? fmtNumber(v, tickDigits()) : '--'
 }
 
 function sideDeltaText(kind) {
@@ -305,10 +307,29 @@ const selectedPriceModeLabel = computed(() => (
   PRICE_MODE_OPTIONS.find((item) => item.key === selectedPriceMode.value)?.label || '最新价'
 ))
 
+function priceStepTick() {
+  const quote = props.quoteSnapshot || {}
+  return pickQuoteNumber(quote?.price_tick)
+}
+
+function tickDigits() {
+  const tick = priceStepTick()
+  if (!(tick > 0)) return 0
+  const text = String(tick)
+  if (!text.includes('.')) return 0
+  return Math.min(6, text.length - text.indexOf('.') - 1)
+}
+
+function formatPriceForInput(value) {
+  const v = Number(value)
+  if (!Number.isFinite(v) || v <= 0) return ''
+  return fmtNumber(v, tickDigits())
+}
+
 const priceAnchorDisplay = computed(() => {
   if (priceFrozen.value) {
-    const latest = pickQuoteNumber(frozenLatestPrice.value, latestPriceNow())
-    return latest > 0 ? fmtNumber(latest, 0) : '--'
+    if (String(manualPriceInput.value || '').trim()) return String(manualPriceInput.value)
+    return formatPriceForInput(frozenLatestPrice.value)
   }
   return selectedPriceModeLabel.value
 })
@@ -330,15 +351,39 @@ function togglePriceModeMenu() {
 function selectPriceMode(mode) {
   selectedPriceMode.value = mode
   priceFrozen.value = false
+  manualPriceInput.value = ''
   priceModeMenuOpen.value = false
 }
 
-function freezeAtLatestPrice() {
+function freezeManualFromLatest(stepDirection = 0) {
+  const tick = priceStepTick()
+  if (tick <= 0) return
   const latest = latestPriceNow()
-  if (latest <= 0) return
-  frozenLatestPrice.value = latest
+  const base = priceFrozen.value
+    ? pickQuoteNumber(frozenLatestPrice.value)
+    : pickQuoteNumber(latest)
+  if (base <= 0) return
+  const offset = stepDirection > 0 ? 1 : stepDirection < 0 ? -1 : 0
+  frozenLatestPrice.value = Math.max(0, base + tick * offset)
+  manualPriceInput.value = formatPriceForInput(frozenLatestPrice.value)
   priceFrozen.value = true
-  priceModeMenuOpen.value = false
+}
+
+function onPriceAnchorClick() {
+  if (priceFrozen.value) return
+  freezeManualFromLatest(0)
+}
+
+function bumpFrozenPrice(stepDirection) {
+  freezeManualFromLatest(stepDirection)
+}
+
+function onPriceAnchorInput(evt) {
+  if (!priceFrozen.value) return
+  const raw = String(evt?.target?.value || '').trim()
+  manualPriceInput.value = raw
+  const n = Number(raw)
+  if (Number.isFinite(n) && n > 0) frozenLatestPrice.value = n
 }
 
 function closePriceModeMenuOnOutside(evt) {
@@ -402,8 +447,8 @@ function resolveSidePriceByMode(mode, side) {
   }
   if (mode === 'market') {
     return side === 'buy'
-      ? pickQuoteNumber(lowerLimit, latest, ask1, bid1)
-      : pickQuoteNumber(upperLimit, latest, bid1, ask1)
+      ? pickQuoteNumber(upperLimit, latest, ask1, bid1)
+      : pickQuoteNumber(lowerLimit, latest, bid1, ask1)
   }
   return pickQuoteNumber(latest, ask1, bid1)
 }
@@ -628,15 +673,20 @@ function fundsRows() {
                     价格 ...
                   </button>
                   <div class="trade-classic-price-box">
-                    <button
-                      type="button"
+                    <input
+                      type="text"
                       class="trade-classic-price-anchor"
-                      title="点击后冻结为当前最新价"
-                      @click="freezeAtLatestPrice"
+                      :value="priceAnchorDisplay"
+                      :readonly="!priceFrozen"
+                      title="点击后按最新价转为手动价"
+                      @click.stop="onPriceAnchorClick"
+                      @input="onPriceAnchorInput"
                       :class="{ readonly: !priceFrozen, frozen: priceFrozen }"
-                    >
-                      <span class="trade-classic-price-anchor-value">{{ priceAnchorDisplay }}</span>
-                    </button>
+                    />
+                    <div class="trade-classic-price-stepper">
+                      <button type="button" class="trade-classic-price-step" title="加一跳" @click.stop="bumpFrozenPrice(1)">▲</button>
+                      <button type="button" class="trade-classic-price-step" title="减一跳" @click.stop="bumpFrozenPrice(-1)">▼</button>
+                    </div>
                     <div class="trade-classic-limit-box">
                       <span class="trade-classic-limit-up">{{ upperLimitDisplay }}</span>
                       <span class="trade-classic-limit-down">{{ lowerLimitDisplay }}</span>
@@ -1205,14 +1255,14 @@ function fundsRows() {
 
 .trade-classic-price-box {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 40px;
+  grid-template-columns: minmax(0, 82px) 16px 40px;
   gap: 4px;
   align-items: stretch;
 }
 
 .trade-classic-price-trigger {
   min-height: 20px;
-  width: max-content;
+  width: 56px;
   padding: 0 8px;
   border: 1px solid #b6c5d5;
   border-radius: 0;
@@ -1258,14 +1308,11 @@ function fundsRows() {
   background: #f9fbfd;
   color: #111;
   cursor: pointer;
-}
-
-.trade-classic-price-anchor {
-  display: flex;
-  align-items: center;
-  justify-content: flex-start;
-  padding: 0 6px;
-  text-align: left;
+  text-align: right;
+  padding: 0 5px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.2px;
 }
 
 .trade-classic-price-anchor:hover,
@@ -1279,20 +1326,17 @@ function fundsRows() {
   color: #2c4864;
 }
 
-.trade-classic-price-anchor-value {
-  font-size: 12px;
-  font-weight: 600;
-}
-
 .trade-classic-price-anchor.readonly {
   background: #f1f4f8;
   color: #3a5067;
+  cursor: default;
 }
 
 .trade-classic-price-anchor.frozen {
   background: #fff;
   color: #111;
   border-color: #8da6c1;
+  cursor: text;
 }
 
 .trade-classic-limit-box {
@@ -1304,6 +1348,29 @@ function fundsRows() {
   font-size: 12px;
   line-height: 1.1;
   user-select: none;
+}
+
+.trade-classic-price-stepper {
+  display: grid;
+  grid-template-rows: 1fr 1fr;
+  gap: 2px;
+}
+
+.trade-classic-price-step {
+  min-height: 12px;
+  padding: 0;
+  border: 1px solid #b6c5d5;
+  border-radius: 0;
+  background: #f4f7fb;
+  color: #253f59;
+  font-size: 9px;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.trade-classic-price-step:hover {
+  border-color: #7fa3c9;
+  background: #e8f0fa;
 }
 
 .trade-classic-limit-up {
@@ -1318,7 +1385,7 @@ function fundsRows() {
 
 .trade-classic-price-menu {
   position: absolute;
-  left: calc(100% + 6px);
+  left: 60px;
   top: 0;
   z-index: 4;
   display: flex;

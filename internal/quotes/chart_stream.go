@@ -42,6 +42,7 @@ type ChartQuoteSnapshot struct {
 	Symbol             string   `json:"symbol"`
 	Type               string   `json:"type"`
 	Variety            string   `json:"variety"`
+	ExchangeID         string   `json:"exchange_id,omitempty"`
 	DataMode           string   `json:"data_mode"`
 	TradingDay         string   `json:"trading_day,omitempty"`
 	ActionDay          string   `json:"action_day,omitempty"`
@@ -71,6 +72,7 @@ type ChartQuoteSnapshot struct {
 	UpperLimitPrice    *float64 `json:"upper_limit_price,omitempty"`
 	LowerLimitPrice    *float64 `json:"lower_limit_price,omitempty"`
 	AveragePrice       *float64 `json:"average_price,omitempty"`
+	PriceTick          *float64 `json:"price_tick,omitempty"`
 	Time               string   `json:"time,omitempty"`
 }
 
@@ -1092,6 +1094,7 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 		if !ok {
 			return ChartQuoteUpdate{}, false
 		}
+		snapshot.ExchangeID = strings.TrimSpace(tick.exchange)
 		snapshot.LatestPrice = floatPtr(tick.price)
 		if tick.bidPrice1 > 0 {
 			snapshot.BidPrice1 = floatPtr(tick.bidPrice1)
@@ -1148,6 +1151,7 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 		snapshot.UpdateTime = strings.TrimSpace(tick.updateTime)
 		snapshot.UpdateMillisec = tick.updateMillisec
 	} else if tick, ok := latestL9Tick(root); ok {
+		snapshot.ExchangeID = strings.TrimSpace(tick.exchange)
 		snapshot.LatestPrice = floatPtr(tick.price)
 		if tick.preSettlementPrice > 0 {
 			snapshot.PreSettlementPrice = floatPtr(tick.preSettlementPrice)
@@ -1184,6 +1188,16 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 		snapshot.UpdateMillisec = tick.updateMillisec
 	} else if root.currentPartial == nil && len(root.history1m) == 0 {
 		return ChartQuoteUpdate{}, false
+	}
+	if snapshot.ExchangeID == "" {
+		snapshot.ExchangeID = strings.TrimSpace(root.exchange)
+	}
+	priceTickSymbol := root.symbol
+	if root.kind == "l9" && strings.TrimSpace(root.variety) != "" {
+		priceTickSymbol = root.variety
+	}
+	if priceTick := resolveQuotePriceTick(priceTickSymbol, snapshot.ExchangeID); priceTick > 0 {
+		snapshot.PriceTick = floatPtr(priceTick)
 	}
 	bar := latestQuoteBar(root)
 	if bar != nil {
@@ -1244,6 +1258,21 @@ func (s *ChartStream) buildQuoteUpdateLocked(root *chartRootState, sub ChartSubs
 		Snapshot:     snapshot,
 		Ticks:        ticks,
 	}, true
+}
+
+func resolveQuotePriceTick(symbol string, exchangeID string) float64 {
+	cache := DefaultProductExchangeCache()
+	if cache == nil || cache.Count() == 0 {
+		return 0
+	}
+	resolved, err := cache.Resolve(strings.TrimSpace(symbol), strings.TrimSpace(exchangeID))
+	if err != nil {
+		return 0
+	}
+	if resolved.Product.PriceTick <= 0 {
+		return 0
+	}
+	return resolved.Product.PriceTick
 }
 
 func latestQuoteBar(root *chartRootState) *minuteBar {
