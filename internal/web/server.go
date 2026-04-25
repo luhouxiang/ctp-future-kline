@@ -94,6 +94,8 @@ type Server struct {
 	replaySink  *quotes.ReplaySink
 	// subscriptionTickets 管理 chart 订阅票据及其交易时段快照。
 	subscriptionTickets *subscriptionTicketManager
+	// lineOrders 管理当前进程内的画线模拟下单规则。
+	lineOrders *lineOrderEngine
 }
 
 type wsClient struct {
@@ -139,6 +141,7 @@ func NewServer(cfg config.AppConfig) *Server {
 		sessions:            make(map[string]*importer.TDXImportSession),
 		wsConns:             make(map[*websocket.Conn]*wsClient),
 		subscriptionTickets: newSubscriptionTicketManager(sharedDSN),
+		lineOrders:          newLineOrderEngine(),
 	}
 	quotes.SetKlineGenerationSettings(s.klineGeneration)
 	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
@@ -333,6 +336,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/trade/positions/", s.handleTradePositionAction)
 	mux.HandleFunc("/api/trade/orders", s.handleTradeOrders)
 	mux.HandleFunc("/api/trade/orders/", s.handleTradeOrderAction)
+	mux.HandleFunc("/api/trade/line-orders", s.handleTradeLineOrders)
+	mux.HandleFunc("/api/trade/line-orders/", s.handleTradeLineOrderAction)
 	mux.HandleFunc("/api/trade/trades", s.handleTradeTrades)
 	mux.HandleFunc("/api/trade/query/refresh", s.handleTradeRefresh)
 	mux.HandleFunc("/api/client-log", s.handleClientLog)
@@ -2705,6 +2710,87 @@ func (s *Server) handleTradeOrderAction(w http.ResponseWriter, r *http.Request) 
 	http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 }
 
+func (s *Server) handleTradeLineOrders(w http.ResponseWriter, r *http.Request) {
+	if s.lineOrders == nil {
+		http.Error(w, "line order engine unavailable", http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		writeJSON(w, http.StatusOK, map[string]any{"items": s.lineOrders.list()})
+	case http.MethodPost, http.MethodPut:
+		if appmode.Normalize(s.currentAppMode()) == appmode.LiveReal {
+			http.Error(w, "line orders are only available in paper trading modes", http.StatusBadRequest)
+			return
+		}
+		var req LineOrderRule
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if strings.TrimSpace(req.Owner) == "" {
+			req.Owner = s.currentOwner()
+		}
+		if strings.TrimSpace(req.DataMode) == "" {
+			req.DataMode = s.currentChartDataMode()
+		}
+		if strings.TrimSpace(req.Type) == "" {
+			req.Type = inferKlineTypeBySymbol(req.Symbol)
+		}
+		if strings.TrimSpace(req.Variety) == "" {
+			req.Variety = inferVarietyBySymbol(req.Symbol, req.Type)
+		}
+		if strings.TrimSpace(req.Timeframe) == "" {
+			req.Timeframe = "1m"
+		}
+		out, err := s.lineOrders.upsert(req)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		s.broadcastEvent("line_order_update", map[string]any{"items": s.lineOrders.list(), "rule": out})
+		writeJSON(w, http.StatusOK, out)
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func (s *Server) handleTradeLineOrderAction(w http.ResponseWriter, r *http.Request) {
+	if s.lineOrders == nil {
+		http.Error(w, "line order engine unavailable", http.StatusInternalServerError)
+		return
+	}
+	id := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/trade/line-orders/"))
+	if id == "" {
+		http.Error(w, "line order id is required", http.StatusBadRequest)
+		return
+	}
+	if id == "stop-all" {
+		if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		items := s.lineOrders.disableAll()
+		s.broadcastEvent("line_order_update", map[string]any{"items": items})
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+		return
+	}
+	if strings.HasSuffix(id, "/disable") {
+		id = strings.TrimSuffix(id, "/disable")
+	}
+	if r.Method != http.MethodPost && r.Method != http.MethodDelete {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	out, ok := s.lineOrders.disable(id)
+	if !ok {
+		http.Error(w, "line order not found", http.StatusNotFound)
+		return
+	}
+	s.broadcastEvent("line_order_update", map[string]any{"items": s.lineOrders.list(), "rule": out})
+	writeJSON(w, http.StatusOK, out)
+}
+
 func (s *Server) handleTradeTrades(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2783,6 +2869,12 @@ func (s *Server) forwardQuoteEvents() {
 	for update := range ch {
 		if s.currentAppMode() == appmode.LivePaper && s.tradePaperLive != nil {
 			s.feedLivePaperTrade(update)
+		}
+		if s.lineOrders != nil {
+			changed := s.lineOrders.evaluate(update, s.currentAppMode(), s.getTradeService())
+			if len(changed) > 0 {
+				s.broadcastEvent("line_order_update", map[string]any{"items": s.lineOrders.list(), "changed": changed})
+			}
 		}
 		s.broadcastQuoteUpdate(update)
 	}
@@ -3088,4 +3180,32 @@ func inferKlineTypeBySymbol(symbol string) string {
 		return "l9"
 	}
 	return "contract"
+}
+
+func inferVarietyBySymbol(symbol string, kind string) string {
+	s := strings.ToLower(strings.TrimSpace(symbol))
+	if s == "" {
+		return ""
+	}
+	if strings.EqualFold(kind, "l9") {
+		if s == "l9" {
+			return ""
+		}
+		if strings.HasSuffix(s, "l9") {
+			return strings.TrimSuffix(s, "l9")
+		}
+		return s
+	}
+	end := 0
+	for _, ch := range s {
+		if ch >= 'a' && ch <= 'z' {
+			end++
+			continue
+		}
+		break
+	}
+	if end <= 0 {
+		return ""
+	}
+	return s[:end]
 }

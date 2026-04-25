@@ -9,6 +9,7 @@ const props = defineProps({
   quoteSnapshot: { type: Object, default: () => ({}) },
   quoteTicks: { type: Array, default: () => [] },
   drawings: { type: Array, default: () => [] },
+  lineOrders: { type: Array, default: () => [] },
   selectedDrawingId: { type: String, default: '' },
   activeTab: { type: String, default: 'quote' },
   channels: { type: Object, default: () => ({ rows: [], selected_id: '', settings: {}, detail: null }) },
@@ -23,6 +24,9 @@ const emit = defineEmits([
   'select-drawing',
   'toggle-drawing-visible',
   'delete-drawing',
+  'arm-line-order',
+  'disable-line-order',
+  'stop-line-orders',
   'channel-action',
   'channel-settings',
   'reversal-action',
@@ -87,6 +91,17 @@ function iconType(row) {
   return 'default'
 }
 
+function lineOrderForDrawing(row) {
+  const id = String(row?.id || '')
+  if (!id) return null
+  return (props.lineOrders || []).find((item) => String(item?.drawing_id || '') === id && String(item?.status || '') === 'armed') || null
+}
+
+function canLineOrder(row) {
+  const t = String(row?.type || '').toLowerCase()
+  return t === 'hline' || t === 'trendline'
+}
+
 const filteredChannels = computed(() => {
   let rows = Array.isArray(props.channels?.rows) ? props.channels.rows.slice() : []
   if (filterStatus.value !== 'all') rows = rows.filter((x) => String(x.status || '') === filterStatus.value)
@@ -124,6 +139,10 @@ const reversalDiagnostics = computed(() => {
   debug.forEach((x) => rows.push(String(x || '')))
   return rows
 })
+
+const armedLineOrderCount = computed(() => (
+  (props.lineOrders || []).filter((item) => String(item?.status || '') === 'armed').length
+))
 
 function emitSettingsUpdate(force = false) {
   emit('channel-settings', { settings: cloneSettings(draftSettings), force })
@@ -361,6 +380,10 @@ const quoteTicks = computed(() => {
     </div>
 
     <div v-else-if="props.open && props.activeTab === 'object_tree'" class="tv-watchlist-body tv-object-tree">
+      <div v-if="armedLineOrderCount > 0" class="tv-object-toolbar">
+        <span>画线下单 {{ armedLineOrderCount }}</span>
+        <button type="button" @click="emit('stop-line-orders')">全部停止</button>
+      </div>
       <div
         v-for="row in props.drawings"
         :key="row.id"
@@ -386,6 +409,22 @@ const quoteTicks = computed(() => {
           <span class="tv-object-sub">已修改 {{ row.updatedAtLabel }}</span>
         </div>
         <div v-if="hoverRowId === row.id" class="tv-object-actions">
+          <button
+            v-if="canLineOrder(row) && !lineOrderForDrawing(row)"
+            class="tv-icon-btn"
+            title="画线下单"
+            @click.stop="emit('arm-line-order', row.id)"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 16h16" /><path d="M8 8h8" /><path d="M12 4v16" /></svg>
+          </button>
+          <button
+            v-else-if="canLineOrder(row)"
+            class="tv-icon-btn active"
+            title="停止画线下单"
+            @click.stop="emit('disable-line-order', lineOrderForDrawing(row)?.id)"
+          >
+            <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 5l14 14" /><path d="M4 16h16" /></svg>
+          </button>
           <button class="tv-icon-btn" :title="row.visible === false ? '显示' : '隐藏'" @click.stop="emit('toggle-drawing-visible', row.id)">
             <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.5 12s3.5-6 9.5-6 9.5 6 9.5 6-3.5 6-9.5 6-9.5-6-9.5-6Z" /><circle cx="12" cy="12" r="3.1" /><line v-if="row.visible === false" x1="4" y1="20" x2="20" y2="4" /></svg>
           </button>
@@ -577,5 +616,24 @@ const quoteTicks = computed(() => {
 
 .is-neutral {
   color: inherit;
+}
+
+.tv-object-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 8px;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.26);
+  font-size: 12px;
+}
+
+.tv-object-toolbar button {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(130, 156, 188, 0.45);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
 }
 </style>

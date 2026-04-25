@@ -40,6 +40,7 @@ const watchlist = ref([])
 const activeRightTab = ref('quote')
 const quoteSnapshot = ref({})
 const quoteTicks = ref([])
+const lineOrders = ref([])
 const selectedDrawingId = ref('')
 const saveStatus = ref('idle')
 const activeTool = ref('cursor')
@@ -315,6 +316,7 @@ const objectTreeRows = computed(() => {
         createdAtLabel: formatHms(displayTs),
         updatedAtLabel: formatHms(updatedTs),
         visible: d.visible !== false,
+        armedLineOrder: lineOrders.value.some((item) => String(item?.drawing_id || '') === String(d.id || '') && String(item?.status || '') === 'armed'),
         _sortTs: parseDrawingSortTs(d, idx),
         _idx: idx,
       }
@@ -518,6 +520,17 @@ async function fetchTradeTerminal() {
   }
 }
 
+async function fetchLineOrders() {
+  try {
+    const resp = await fetch('/api/trade/line-orders')
+    if (!resp.ok) return
+    const data = await resp.json()
+    lineOrders.value = Array.isArray(data.items) ? data.items : []
+  } catch {
+    // ignore
+  }
+}
+
 function updateTradeFormField(field, value) {
   if (!(field in tradeForm)) return
   if (field === 'volume') {
@@ -536,6 +549,91 @@ function showTradeError(prefix, err) {
   console.warn(`[trade-dock] ${prefix} failed`, err)
   if (typeof window !== 'undefined' && typeof window.alert === 'function') {
     window.alert(`${prefix}失败：${msg}`)
+  }
+}
+
+function selectedDrawingById(id) {
+  return (drawings.value || []).find((d) => String(d?.id || '') === String(id || '')) || null
+}
+
+function normalizeLineOrderTrigger(input, fallback) {
+  const text = String(input || fallback || '').trim().toLowerCase()
+  if (['up', 'cross_up', '上穿'].includes(text)) return 'cross_up'
+  if (['down', 'cross_down', '下破'].includes(text)) return 'cross_down'
+  return 'touch'
+}
+
+async function armLineOrder(drawingId) {
+  const drawing = selectedDrawingById(drawingId)
+  if (!drawing) return
+  const triggerDefault = drawing.type === 'hline' ? 'touch' : 'cross_up'
+  const triggerRaw = window.prompt('触发方式：touch / cross_up / cross_down', triggerDefault)
+  if (triggerRaw == null) return
+  const directionRaw = window.prompt('下单方向：buy / sell', 'buy')
+  if (directionRaw == null) return
+  const direction = String(directionRaw || '').trim().toLowerCase()
+  if (direction !== 'buy' && direction !== 'sell') {
+    window.alert('下单方向必须是 buy 或 sell')
+    return
+  }
+  const offsetRaw = window.prompt('开平：open / close / close_today / close_yesterday', 'open')
+  if (offsetRaw == null) return
+  const volumeRaw = window.prompt('手数', String(tradeForm.volume || 1))
+  if (volumeRaw == null) return
+  const volume = Math.max(1, Math.floor(Number(volumeRaw || 1)))
+  const priceOffsetRaw = window.prompt('触发后限价偏移跳数（买单加，卖单减）', '1')
+  if (priceOffsetRaw == null) return
+  const priceOffsetTick = Math.max(0, Math.floor(Number(priceOffsetRaw || 0)))
+  try {
+    const resp = await fetch('/api/trade/line-orders', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        drawing_id: drawing.id,
+        owner: owner.value || 'admin',
+        symbol: scope.symbol,
+        type: scope.type,
+        variety: scope.variety || '',
+        timeframe: scope.timeframe || '1m',
+        data_mode: dataMode.value,
+        trigger: normalizeLineOrderTrigger(triggerRaw, triggerDefault),
+        direction,
+        offset_flag: String(offsetRaw || 'open').trim().toLowerCase(),
+        volume,
+        price_offset_tick: priceOffsetTick,
+        max_price_ticks: 10,
+        drawing,
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchLineOrders()
+  } catch (err) {
+    showTradeError('画线下单启用', err)
+  }
+}
+
+async function disableLineOrder(id) {
+  if (!id) return
+  try {
+    const resp = await fetch(`/api/trade/line-orders/${encodeURIComponent(id)}/disable`, {
+      method: 'POST',
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchLineOrders()
+  } catch (err) {
+    showTradeError('画线下单停止', err)
+  }
+}
+
+async function stopLineOrders() {
+  try {
+    const resp = await fetch('/api/trade/line-orders/stop-all', {
+      method: 'POST',
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchLineOrders()
+  } catch (err) {
+    showTradeError('画线下单急停', err)
   }
 }
 
@@ -1176,6 +1274,11 @@ function connectChartWS() {
       applyAppModeSnapshot(msg.data)
       return
     }
+    if (msg?.type === 'line_order_update' && msg.data) {
+      lineOrders.value = Array.isArray(msg.data?.items) ? msg.data.items : lineOrders.value
+      if (msg.data?.changed) void fetchTradeTerminal().catch(() => {})
+      return
+    }
     if (
       tradeWindow.visible &&
       ['trade_status_update', 'trade_account_update', 'trade_position_update', 'trade_order_update', 'trade_trade_update'].includes(msg?.type)
@@ -1417,6 +1520,7 @@ onMounted(async () => {
     dataMode.value = 'realtime'
   }
   await fetchWatchlist()
+  await fetchLineOrders()
   await loadLayout()
   connectChartWS()
   spriteKeyHandler = (evt) => onKeyboardSpriteKeydown(evt)
@@ -1512,6 +1616,7 @@ onUnmounted(() => {
           :quote-snapshot="quoteSnapshot"
           :quote-ticks="quoteTicks"
           :drawings="objectTreeRows"
+          :line-orders="lineOrders"
           :channels="channelState"
           :reversal="{
             settings: reversalState.settings,
@@ -1526,6 +1631,9 @@ onUnmounted(() => {
           @select-drawing="onSelectDrawing"
           @toggle-drawing-visible="onToggleDrawingVisible"
           @delete-drawing="onDeleteDrawingById"
+          @arm-line-order="armLineOrder"
+          @disable-line-order="disableLineOrder"
+          @stop-line-orders="stopLineOrders"
           @channel-action="onChannelAction"
           @channel-settings="onChannelSettings"
           @reversal-action="onReversalAction"

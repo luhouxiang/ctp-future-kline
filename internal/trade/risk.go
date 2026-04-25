@@ -23,8 +23,10 @@ func ValidateSubmit(ctx context.Context, status TradeStatus, cfg config.TradeCon
 	if !status.TraderFront || !status.TraderLogin || !status.SettlementConfirmed {
 		return commandID, ErrTradeServiceOffline
 	}
-	if strings.TrimSpace(req.Reason) != "manual" {
-		return commandID, errors.New("only manual orders are allowed")
+	switch strings.TrimSpace(req.Reason) {
+	case "manual", "line_order":
+	default:
+		return commandID, errors.New("only manual or line_order orders are allowed")
 	}
 	if !symbolAllowed(cfg.AllowedSymbols, req.Symbol) {
 		return commandID, fmt.Errorf("symbol %s not allowed", req.Symbol)
