@@ -74,6 +74,8 @@ type DecisionRequest struct {
 }
 
 type SignalDecision struct {
+	// NoSignal 表示本次事件没有产生交易意图，Go 侧不持久化 signal，也不执行模拟仓位变更。
+	NoSignal bool `json:"no_signal,omitempty"`
 	// InstanceID 是发出信号的实例 ID。
 	InstanceID string `json:"instance_id"`
 	// Symbol 是目标合约。

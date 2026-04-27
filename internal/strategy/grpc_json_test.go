@@ -32,11 +32,11 @@ func (testService) StopInstance(context.Context, StopInstanceRequest) (HealthRes
 }
 
 func (testService) OnTick(context.Context, DecisionRequest) (SignalDecision, error) {
-	return SignalDecision{TargetPosition: 1}, nil
+	return SignalDecision{NoSignal: true, TargetPosition: 0, Metrics: map[string]any{"state": "WAIT_BREAK_BELOW_MA20"}}, nil
 }
 
 func (testService) OnBar(context.Context, DecisionRequest) (SignalDecision, error) {
-	return SignalDecision{TargetPosition: 1}, nil
+	return SignalDecision{TargetPosition: -1, Metrics: map[string]any{"signal": "SHORT", "touch_open": 99.5}}, nil
 }
 
 func (testService) OnReplayBar(context.Context, DecisionRequest) (SignalDecision, error) {
@@ -89,5 +89,19 @@ func TestJSONStrategyServiceRoundTrip(t *testing.T) {
 	}
 	if len(defs.Strategies) != 1 || defs.Strategies[0].StrategyID != "demo" {
 		t.Fatalf("ListStrategies() = %+v, want demo strategy", defs)
+	}
+	barDecision, err := client.OnBar(ctx, DecisionRequest{})
+	if err != nil {
+		t.Fatalf("OnBar() error = %v", err)
+	}
+	if barDecision.TargetPosition != -1 || barDecision.Metrics["signal"] != "SHORT" {
+		t.Fatalf("OnBar() = %+v, want SHORT target -1", barDecision)
+	}
+	tickDecision, err := client.OnTick(ctx, DecisionRequest{})
+	if err != nil {
+		t.Fatalf("OnTick() error = %v", err)
+	}
+	if !tickDecision.NoSignal || tickDecision.Metrics["state"] != "WAIT_BREAK_BELOW_MA20" {
+		t.Fatalf("OnTick() = %+v, want no_signal waiting state", tickDecision)
 	}
 }

@@ -559,6 +559,9 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		m.setInstanceError(inst.InstanceID, err)
 		return
 	}
+	if decision.NoSignal {
+		return
+	}
 	m.persistDecision(inst, symbol, mode, eventTime, decision)
 }
 
