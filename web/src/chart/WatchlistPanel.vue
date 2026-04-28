@@ -10,6 +10,7 @@ const props = defineProps({
   quoteTicks: { type: Array, default: () => [] },
   drawings: { type: Array, default: () => [] },
   lineOrders: { type: Array, default: () => [] },
+  strategy: { type: Object, default: () => ({ status: {}, instances: [], traces: [] }) },
   selectedDrawingId: { type: String, default: '' },
   activeTab: { type: String, default: 'quote' },
   channels: { type: Object, default: () => ({ rows: [], selected_id: '', settings: {}, detail: null }) },
@@ -27,6 +28,8 @@ const emit = defineEmits([
   'arm-line-order',
   'disable-line-order',
   'stop-line-orders',
+  'strategy-trace-focus',
+  'strategy-instance-stop',
   'channel-action',
   'channel-settings',
   'reversal-action',
@@ -275,6 +278,110 @@ const quoteTicks = computed(() => {
     tone: quoteNatureTone(row?.nature, row?.oi_delta),
   }))
 })
+
+const runningStrategyInstances = computed(() => (
+  (Array.isArray(props.strategy?.instances) ? props.strategy.instances : [])
+    .filter((item) => String(item?.status || '') === 'running')
+))
+
+const strategyInstances = computed(() => (
+  (Array.isArray(props.strategy?.instances) ? props.strategy.instances : [])
+    .slice()
+    .sort((a, b) => Date.parse(String(b?.updated_at || b?.created_at || '')) - Date.parse(String(a?.updated_at || a?.created_at || '')))
+))
+
+const latestStrategyTrace = computed(() => {
+  const rows = Array.isArray(props.strategy?.traces) ? props.strategy.traces : []
+  return rows[0] || null
+})
+
+const latestStrategyTimeText = computed(() => formatTraceTime(latestStrategyTrace.value?.event_time))
+
+const ma20Steps = [
+  { key: 'WAIT_MA_READY', label: '等待 MA20 数据足够', index: 1 },
+  { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 2 },
+  { key: 'BROKEN_BELOW_MA20', label: '已跌破，等待反抽触碰 MA20', index: 3 },
+  { key: 'WAIT_BREAK_TOUCH_OPEN', label: '等待跌破触碰K开盘价', index: 4 },
+  { key: 'DONE', label: '已触发/已完成', index: 5 },
+]
+
+const strategyStepRows = computed(() => {
+  const trace = latestStrategyTrace.value || {}
+  const currentIndex = Number(trace.step_index || 0)
+  const currentKey = String(trace.step_key || '')
+  const strategyID = String(trace.strategy_id || runningStrategyInstances.value[0]?.strategy_id || '')
+  const base = strategyID === 'ma20.pullback_short' || !strategyID
+    ? ma20Steps
+    : [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
+  return base.map((step) => {
+    let state = 'waiting'
+    if (currentIndex > step.index || String(trace.status || '') === 'done') state = 'done'
+    else if (currentIndex === step.index || currentKey === step.key) state = String(trace.status || 'waiting')
+    return { ...step, state, active: currentIndex === step.index || currentKey === step.key }
+  })
+})
+
+const strategyTraceRows = computed(() => (
+  (Array.isArray(props.strategy?.traces) ? props.strategy.traces : []).map((row) => ({
+    ...row,
+    timeText: formatTraceTime(row?.event_time),
+    eventLabel: traceEventLabel(row?.event_type),
+    statusLabel: traceStatusLabel(row?.status),
+    checks: Array.isArray(row?.checks) ? row.checks : [],
+  }))
+))
+
+function formatTraceTime(value) {
+  const ts = Date.parse(String(value || ''))
+  if (!Number.isFinite(ts)) return '--'
+  return formatHms(ts)
+}
+
+function formatHms(ts) {
+  const d = new Date(ts)
+  const p = (v) => String(v).padStart(2, '0')
+  return `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
+function formatInstanceAnchor(item) {
+  const params = item?.params && typeof item.params === 'object' ? item.params : {}
+  return String(params.chart_start_time || params.chart_anchor?.data_time || params.chart_anchor?.plot_time || '--')
+}
+
+function instanceStatusLabel(value) {
+  const v = String(value || '')
+  if (v === 'running') return '运行中'
+  if (v === 'stopped') return '已停止'
+  if (v === 'error') return '错误'
+  return v || '--'
+}
+
+function traceEventLabel(value) {
+  const v = String(value || '')
+  if (v === 'bar') return 'K线'
+  if (v === 'key_tick') return '关键Tick'
+  if (v === 'signal') return '信号'
+  if (v === 'order_plan') return '计划'
+  if (v === 'order_result') return '订单'
+  return v || '--'
+}
+
+function traceStatusLabel(value) {
+  const v = String(value || '')
+  if (v === 'passed' || v === 'allowed' || v === 'simulated_submitted') return '满足'
+  if (v === 'failed' || v === 'blocked') return '阻断'
+  if (v === 'done') return '完成'
+  if (v === 'waiting') return '等待'
+  return v || '--'
+}
+
+function stepStateLabel(value) {
+  const v = String(value || '')
+  if (v === 'done') return '完成'
+  if (v === 'passed' || v === 'allowed' || v === 'simulated_submitted') return '满足'
+  if (v === 'failed' || v === 'blocked') return '阻断'
+  return '等待'
+}
 </script>
 
 <template>
@@ -377,6 +484,98 @@ const quoteTicks = computed(() => {
         <span>{{ item.symbol }}</span>
         <small>{{ item.exchange }}</small>
       </button>
+    </div>
+
+    <div v-else-if="props.open && props.activeTab === 'strategy'" class="tv-watchlist-body tv-strategy-tab">
+      <div class="tv-quote-card">
+        <div class="tv-channel-settings-head">策略运行</div>
+        <div class="tv-quote-strip">
+          <span class="tv-quote-strip-label">连接</span>
+          <span class="tv-quote-strip-value">{{ props.strategy?.status?.connected ? '已连接' : '未连接' }}</span>
+          <span class="tv-quote-strip-label">运行</span>
+          <span class="tv-quote-strip-value">{{ runningStrategyInstances.length }}</span>
+          <span class="tv-quote-strip-label">最近</span>
+          <span class="tv-quote-strip-value">{{ latestStrategyTimeText }}</span>
+        </div>
+        <div v-if="latestStrategyTrace" class="tv-strategy-current">
+          <div class="tv-strategy-step-head">
+            <span>{{ latestStrategyTrace.step_label || '--' }}</span>
+            <span>{{ latestStrategyTrace.step_index || 0 }}/{{ latestStrategyTrace.step_total || 0 }}</span>
+          </div>
+          <div class="tv-strategy-progress">
+            <div
+              class="tv-strategy-progress-fill"
+              :style="{ width: `${Math.max(0, Math.min(100, Number(latestStrategyTrace.step_index || 0) / Math.max(1, Number(latestStrategyTrace.step_total || 1)) * 100))}%` }"
+            ></div>
+          </div>
+          <div class="mono">{{ latestStrategyTrace.event_type }} · {{ latestStrategyTrace.reason || '--' }}</div>
+          <div class="tv-strategy-checks">
+            <div v-for="(check, idx) in latestStrategyTrace.checks || []" :key="`latest-check-${idx}`" class="tv-strategy-check" :class="{ passed: check.passed }">
+              <span>{{ check.passed ? '✓' : '○' }}</span>
+              <span>{{ check.name }}</span>
+              <small>{{ check.current ?? '-' }} / {{ check.target ?? '-' }} <template v-if="check.delta !== undefined">差 {{ check.delta }}</template></small>
+              <em v-if="check.description">{{ check.description }}</em>
+            </div>
+          </div>
+        </div>
+        <div v-else class="tv-object-empty">暂无策略过程事件</div>
+      </div>
+
+      <div class="tv-quote-card">
+        <div class="tv-channel-settings-head">策略步骤</div>
+        <div class="tv-strategy-step-list">
+          <div
+            v-for="step in strategyStepRows"
+            :key="step.key"
+            class="tv-strategy-step-row"
+            :class="{ active: step.active, done: step.state === 'done' }"
+          >
+            <span class="tv-strategy-step-index">{{ step.index }}</span>
+            <span class="tv-strategy-step-name">{{ step.label }}</span>
+            <span class="tv-strategy-step-state">{{ stepStateLabel(step.state) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="tv-quote-card">
+        <div class="tv-channel-settings-head">运行实例</div>
+        <div class="tv-strategy-instance-list">
+          <div v-for="item in strategyInstances" :key="item.instance_id" class="tv-strategy-instance-row">
+            <div class="tv-strategy-instance-main">
+              <strong>{{ item.display_name || item.instance_id }}</strong>
+              <small>{{ item.strategy_id }} · {{ (item.symbols || []).join(',') || '--' }} · {{ formatInstanceAnchor(item) }}</small>
+            </div>
+            <span class="tv-strategy-instance-status">{{ instanceStatusLabel(item.status) }}</span>
+            <button
+              v-if="String(item.status || '') === 'running'"
+              type="button"
+              class="tv-strategy-stop-btn"
+              @click="emit('strategy-instance-stop', item.instance_id)"
+            >
+              停止
+            </button>
+          </div>
+        </div>
+        <div v-if="!strategyInstances.length" class="tv-object-empty">暂无策略实例</div>
+      </div>
+
+      <div class="tv-quote-card">
+        <div class="tv-channel-settings-head">审计流</div>
+        <div class="tv-strategy-trace-list">
+          <button
+            v-for="row in strategyTraceRows"
+            :key="row.trace_id || `${row.instance_id}-${row.event_time}-${row.event_type}`"
+            class="tv-strategy-trace-row"
+            @click="emit('strategy-trace-focus', row)"
+          >
+            <span class="tv-strategy-trace-time">{{ row.timeText }}</span>
+            <span class="tv-strategy-trace-event">{{ row.eventLabel }}</span>
+            <span class="tv-strategy-trace-status">{{ row.statusLabel }}</span>
+            <span class="tv-strategy-trace-step">{{ row.step_label || row.step_key || '--' }}</span>
+          </button>
+        </div>
+        <div v-if="!strategyTraceRows.length" class="tv-object-empty">暂无审计记录</div>
+      </div>
     </div>
 
     <div v-else-if="props.open && props.activeTab === 'object_tree'" class="tv-watchlist-body tv-object-tree">
@@ -635,5 +834,178 @@ const quoteTicks = computed(() => {
   background: transparent;
   color: inherit;
   cursor: pointer;
+}
+
+.tv-strategy-tab {
+  gap: 8px;
+}
+
+.tv-strategy-current {
+  display: grid;
+  gap: 8px;
+  padding-top: 6px;
+}
+
+.tv-strategy-step-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.tv-strategy-progress {
+  height: 6px;
+  overflow: hidden;
+  background: rgba(130, 156, 188, 0.24);
+}
+
+.tv-strategy-progress-fill {
+  height: 100%;
+  background: #4ea1ff;
+}
+
+.tv-strategy-checks {
+  display: grid;
+  gap: 4px;
+}
+
+.tv-strategy-check {
+  display: grid;
+  grid-template-columns: 16px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  font-size: 12px;
+  color: rgba(210, 223, 238, 0.72);
+}
+
+.tv-strategy-check em {
+  grid-column: 2 / 4;
+  font-style: normal;
+  color: rgba(210, 223, 238, 0.56);
+}
+
+.tv-strategy-check.passed {
+  color: #70d38b;
+}
+
+.tv-strategy-step-list,
+.tv-strategy-instance-list {
+  display: grid;
+  gap: 4px;
+}
+
+.tv-strategy-step-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) 42px;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 4px;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.14);
+  font-size: 12px;
+  color: rgba(210, 223, 238, 0.72);
+}
+
+.tv-strategy-step-row.active {
+  background: rgba(78, 161, 255, 0.12);
+  color: #d8e6f7;
+}
+
+.tv-strategy-step-row.done {
+  color: #70d38b;
+}
+
+.tv-strategy-step-index {
+  display: inline-grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(130, 156, 188, 0.36);
+  font-size: 11px;
+}
+
+.tv-strategy-step-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-strategy-step-state {
+  text-align: right;
+}
+
+.tv-strategy-instance-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 4px;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.14);
+  font-size: 12px;
+}
+
+.tv-strategy-instance-main {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tv-strategy-instance-main strong,
+.tv-strategy-instance-main small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-strategy-instance-main small,
+.tv-strategy-instance-status {
+  color: rgba(210, 223, 238, 0.62);
+}
+
+.tv-strategy-stop-btn {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(216, 75, 69, 0.55);
+  background: transparent;
+  color: #ff7a73;
+  cursor: pointer;
+}
+
+.tv-strategy-trace-list {
+  display: grid;
+  gap: 4px;
+}
+
+.tv-strategy-trace-row {
+  display: grid;
+  grid-template-columns: 48px 58px 42px minmax(0, 1fr);
+  gap: 6px;
+  align-items: center;
+  width: 100%;
+  padding: 6px 4px;
+  border: 0;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.16);
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.tv-strategy-trace-row:hover {
+  background: rgba(78, 161, 255, 0.08);
+}
+
+.tv-strategy-trace-time,
+.tv-strategy-trace-event,
+.tv-strategy-trace-status {
+  white-space: nowrap;
+  color: rgba(210, 223, 238, 0.72);
+}
+
+.tv-strategy-trace-step {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 </style>

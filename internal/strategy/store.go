@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	dbx "ctp-future-kline/internal/db"
@@ -188,6 +189,75 @@ func (s *Store) ListSignals(limit int) ([]SignalRecord, error) {
 		}
 		_ = json.Unmarshal([]byte(raw), &sig.Metrics)
 		out = append(out, sig)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) AppendTrace(rec StrategyTraceRecord) (int64, error) {
+	checks, err := json.Marshal(rec.Checks)
+	if err != nil {
+		return 0, err
+	}
+	metrics, err := json.Marshal(rec.Metrics)
+	if err != nil {
+		return 0, err
+	}
+	preview, err := json.Marshal(rec.SignalPreview)
+	if err != nil {
+		return 0, err
+	}
+	if rec.CreatedAt.IsZero() {
+		rec.CreatedAt = time.Now()
+	}
+	res, err := s.db.Exec(`
+INSERT INTO strategy_traces(instance_id,strategy_id,symbol,timeframe,mode,event_type,event_time,step_key,step_label,step_index,step_total,status,reason,checks_json,metrics_json,signal_preview_json,created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+`, rec.InstanceID, rec.StrategyID, rec.Symbol, rec.Timeframe, rec.Mode, rec.EventType, rec.EventTime, rec.StepKey, rec.StepLabel, rec.StepIndex, rec.StepTotal, rec.Status, rec.Reason, string(checks), string(metrics), string(preview), rec.CreatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) ListTraces(instanceID string, symbol string, limit int) ([]StrategyTraceRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 500 {
+		limit = 500
+	}
+	where := []string{"1=1"}
+	args := make([]any, 0, 4)
+	if instanceID != "" {
+		where = append(where, "instance_id=?")
+		args = append(args, instanceID)
+	}
+	if symbol != "" {
+		where = append(where, "symbol=?")
+		args = append(args, symbol)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(`
+SELECT trace_id,instance_id,strategy_id,symbol,timeframe,mode,event_type,event_time,step_key,step_label,step_index,step_total,status,reason,checks_json,metrics_json,signal_preview_json,created_at
+FROM strategy_traces
+WHERE `+strings.Join(where, " AND ")+`
+ORDER BY event_time DESC, trace_id DESC
+LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []StrategyTraceRecord
+	for rows.Next() {
+		var rec StrategyTraceRecord
+		var checksRaw, metricsRaw, previewRaw string
+		if err := rows.Scan(&rec.TraceID, &rec.InstanceID, &rec.StrategyID, &rec.Symbol, &rec.Timeframe, &rec.Mode, &rec.EventType, &rec.EventTime, &rec.StepKey, &rec.StepLabel, &rec.StepIndex, &rec.StepTotal, &rec.Status, &rec.Reason, &checksRaw, &metricsRaw, &previewRaw, &rec.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(checksRaw), &rec.Checks)
+		_ = json.Unmarshal([]byte(metricsRaw), &rec.Metrics)
+		_ = json.Unmarshal([]byte(previewRaw), &rec.SignalPreview)
+		out = append(out, rec)
 	}
 	return out, rows.Err()
 }

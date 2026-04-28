@@ -59,23 +59,29 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         return self.strategy.states[("inst-1", "rb2601")]
 
     def test_not_enough_bars_keeps_waiting(self):
-        self.warmup(19)
+        self.warmup(18)
 
         out = self.strategy.on_bar(bar_req(close=100, idx=20))
 
         self.assertTrue(out["no_signal"])
         self.assertEqual(self.state().state, WAIT_BREAK_BELOW_MA20)
+        self.assertEqual(out["trace"]["step_key"], "WAIT_MA_READY")
+        self.assertEqual(out["trace"]["step_index"], 1)
+        self.assertEqual(out["trace"]["event_type"], "bar")
 
     def test_break_below_ma20_then_touch_records_touch_bar(self):
         self.warmup()
 
-        self.strategy.on_bar(bar_req(open_=100, high=100, low=99, close=99, idx=21))
+        break_out = self.strategy.on_bar(bar_req(open_=100, high=100, low=99, close=99, idx=21))
         self.assertEqual(self.state().state, BROKEN_BELOW_MA20)
+        self.assertEqual(break_out["trace"]["step_key"], BROKEN_BELOW_MA20)
 
-        self.strategy.on_bar(bar_req(open_=99.5, high=100.2, low=99.4, close=99.6, idx=22))
+        touch_out = self.strategy.on_bar(bar_req(open_=99.5, high=100.2, low=99.4, close=99.6, idx=22))
         state = self.state()
 
         self.assertEqual(state.state, WAIT_BREAK_TOUCH_OPEN)
+        self.assertEqual(touch_out["trace"]["step_key"], WAIT_BREAK_TOUCH_OPEN)
+        self.assertTrue(any(check["name"] == "最高价触碰MA20" and check["passed"] for check in touch_out["trace"]["checks"]))
         self.assertEqual(state.touch_open, 99.5)
         self.assertEqual(state.touch_high, 100.2)
         self.assertEqual(state.wait_bars, 1)
@@ -91,6 +97,9 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
 
         self.assertFalse(out.get("no_signal", False))
         self.assertEqual(out["target_position"], -1)
+        self.assertEqual(out["trace"]["event_type"], "key_tick")
+        self.assertEqual(out["trace"]["step_key"], DONE)
+        self.assertEqual(out["trace"]["signal_preview"]["signal"], "SHORT")
         self.assertEqual(out["metrics"]["signal"], "SHORT")
         self.assertEqual(out["metrics"]["touch_open"], 99.5)
         self.assertEqual(out["metrics"]["touch_high"], 100.2)

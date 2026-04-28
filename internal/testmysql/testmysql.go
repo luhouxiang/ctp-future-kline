@@ -20,6 +20,7 @@ const dbNamePrefix = "codex_test_"
 
 var dbSeq atomic.Uint64
 var cleanupOnce sync.Once
+var processLockDB *sql.DB
 
 func NewDatabase(t *testing.T) string {
 	t.Helper()
@@ -36,6 +37,11 @@ func newDatabaseTB(tb testing.TB) string {
 
 	cfg := baseConfig()
 	cleanupOnce.Do(func() {
+		lockDB, err := acquireProcessLock(cfg)
+		if err != nil {
+			tb.Fatalf("acquire mysql test lock failed: %v", err)
+		}
+		processLockDB = lockDB
 		if err := purgeStaleDatabases(cfg); err != nil {
 			tb.Fatalf("purge stale test databases failed: %v", err)
 		}
@@ -174,6 +180,23 @@ func purgeStaleDatabases(cfg config.DBConfig) error {
 		}
 	}
 	return nil
+}
+
+func acquireProcessLock(cfg config.DBConfig) (*sql.DB, error) {
+	admin, err := openAdminDB(cfg)
+	if err != nil {
+		return nil, err
+	}
+	var locked int
+	if err := admin.QueryRow(`SELECT GET_LOCK('ctp_future_kline_testmysql', 120)`).Scan(&locked); err != nil {
+		_ = admin.Close()
+		return nil, err
+	}
+	if locked != 1 {
+		_ = admin.Close()
+		return nil, fmt.Errorf("timeout waiting for mysql test lock")
+	}
+	return admin, nil
 }
 
 func openAdminDB(cfg config.DBConfig) (*sql.DB, error) {

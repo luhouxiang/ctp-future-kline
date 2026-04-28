@@ -92,12 +92,17 @@ func (m *Manager) Start() error {
 		return nil
 	}
 	if m.cfg.IsAutoStart() {
-		if err := m.startProcessLocked(); err != nil {
-			m.setError(err)
-			return err
+		if err := m.connect(); err != nil {
+			if err := m.startProcessLocked(); err != nil {
+				m.setError(err)
+				return err
+			}
+			if err := m.connectWithRetry(5 * time.Second); err != nil {
+				m.setError(err)
+				return err
+			}
 		}
-	}
-	if err := m.connect(); err != nil {
+	} else if err := m.connectWithRetry(0); err != nil {
 		m.setError(err)
 		return err
 	}
@@ -106,6 +111,22 @@ func (m *Manager) Start() error {
 		logger.Warn("strategy definition sync failed", "error", err)
 	}
 	return nil
+}
+
+func (m *Manager) connectWithRetry(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastErr error
+	for {
+		if err := m.connect(); err != nil {
+			lastErr = err
+		} else {
+			return nil
+		}
+		if timeout <= 0 || time.Now().After(deadline) {
+			return lastErr
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func (m *Manager) healthLoop() {
@@ -381,6 +402,10 @@ func (m *Manager) ListOrderAudits(limit int) ([]OrderAuditRecord, error) {
 	return m.store.ListOrderAudits(limit)
 }
 
+func (m *Manager) ListTraces(instanceID string, symbol string, limit int) ([]StrategyTraceRecord, error) {
+	return m.store.ListTraces(strings.TrimSpace(instanceID), strings.TrimSpace(symbol), limit)
+}
+
 func (m *Manager) OrdersStatus() OrdersStatus {
 	return m.exec.Status()
 }
@@ -559,10 +584,46 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		m.setInstanceError(inst.InstanceID, err)
 		return
 	}
+	if decision.Trace != nil {
+		m.persistTrace(inst, symbol, mode, eventTime, *decision.Trace)
+	}
 	if decision.NoSignal {
 		return
 	}
 	m.persistDecision(inst, symbol, mode, eventTime, decision)
+}
+
+func (m *Manager) persistTrace(inst StrategyInstance, symbol string, mode string, eventTime time.Time, trace StrategyTraceRecord) {
+	if strings.TrimSpace(trace.EventType) == "" {
+		trace.EventType = "bar"
+	}
+	if trace.EventType != "bar" && trace.EventType != "key_tick" && trace.EventType != "signal" && trace.EventType != "order_plan" && trace.EventType != "order_result" {
+		return
+	}
+	trace.InstanceID = firstNonEmpty(trace.InstanceID, inst.InstanceID)
+	trace.StrategyID = firstNonEmpty(trace.StrategyID, inst.StrategyID)
+	trace.Symbol = firstNonEmpty(trace.Symbol, symbol)
+	trace.Timeframe = firstNonEmpty(trace.Timeframe, inst.Timeframe)
+	trace.Mode = firstNonEmpty(trace.Mode, mode)
+	if trace.EventTime.IsZero() {
+		trace.EventTime = eventTime
+	}
+	if trace.CreatedAt.IsZero() {
+		trace.CreatedAt = time.Now()
+	}
+	if trace.Metrics == nil {
+		trace.Metrics = map[string]any{}
+	}
+	if trace.SignalPreview == nil {
+		trace.SignalPreview = map[string]any{}
+	}
+	id, err := m.store.AppendTrace(trace)
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	trace.TraceID = id
+	m.broadcast("strategy_trace_update", trace)
 }
 
 func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode string, eventTime time.Time, decision SignalDecision) {
@@ -585,7 +646,37 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		return
 	}
 	sig.ID = id
+	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
+		EventType: "signal",
+		StepKey:   "signal",
+		StepLabel: "发出策略信号",
+		StepIndex: 5,
+		StepTotal: 5,
+		Status:    "passed",
+		Reason:    decision.Reason,
+		Metrics:   decision.Metrics,
+		SignalPreview: map[string]any{
+			"target_position": decision.TargetPosition,
+			"confidence":      decision.Confidence,
+			"signal_id":       id,
+		},
+	})
 	plan := m.exec.Plan(inst, symbol, decision.TargetPosition, mode)
+	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
+		EventType: "order_plan",
+		StepKey:   "order_plan",
+		StepLabel: "生成订单计划",
+		StepIndex: 5,
+		StepTotal: 5,
+		Status:    plan.RiskStatus,
+		Reason:    plan.RiskReason,
+		Metrics: map[string]any{
+			"current_position": plan.CurrentPosition,
+			"target_position":  plan.TargetPosition,
+			"planned_delta":    plan.PlannedDelta,
+			"order_status":     plan.OrderStatus,
+		},
+	})
 	m.exec.Apply(symbol, plan)
 	audit := OrderAuditRecord{
 		InstanceID:      inst.InstanceID,
@@ -607,6 +698,23 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		CreatedAt: time.Now(),
 	}
 	_, _ = m.store.AppendOrderAudit(audit)
+	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
+		EventType: "order_result",
+		StepKey:   "order_result",
+		StepLabel: "订单执行结果",
+		StepIndex: 5,
+		StepTotal: 5,
+		Status:    plan.OrderStatus,
+		Reason:    plan.RiskReason,
+		Metrics: map[string]any{
+			"risk_status":      plan.RiskStatus,
+			"risk_reason":      plan.RiskReason,
+			"order_status":     plan.OrderStatus,
+			"current_position": plan.CurrentPosition,
+			"target_position":  plan.TargetPosition,
+			"planned_delta":    plan.PlannedDelta,
+		},
+	})
 	now := time.Now()
 	inst.LastSignalAt = &now
 	inst.LastTargetPosition = decision.TargetPosition
@@ -617,6 +725,15 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 	m.mu.Unlock()
 	m.broadcast("strategy_signal", sig)
 	m.broadcast("order_audit_update", audit)
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return strings.TrimSpace(value)
+		}
+	}
+	return ""
 }
 
 func (m *Manager) Subscribe() (<-chan EventEnvelope, func()) {

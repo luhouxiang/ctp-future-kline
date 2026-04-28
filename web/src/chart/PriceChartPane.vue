@@ -55,7 +55,13 @@ const props = defineProps({
   },
 });
 
-const emit = defineEmits(["set-drawings", "select-drawing", "channel-view-change", "reversal-view-change"]);
+const emit = defineEmits([
+  "set-drawings",
+  "select-drawing",
+  "channel-view-change",
+  "reversal-view-change",
+  "chart-context-menu",
+]);
 
 const state = reactive({
   loading: false,
@@ -2184,6 +2190,60 @@ function getChannelPanelState() {
   };
 }
 
+function buildBarAnchor(idx) {
+  const bar = idx >= 0 && idx < state.bars.length ? state.bars[idx] : null;
+  if (!bar || idx < 0) return null;
+  return {
+    index: idx,
+    symbol:
+      state.resolvedSymbol ||
+      String(props.scope?.symbol || "")
+        .trim()
+        .toLowerCase(),
+    type: String(props.scope?.type || "").trim().toLowerCase(),
+    variety: String(props.scope?.variety || "").trim().toLowerCase(),
+    timeframe: String(props.scope?.timeframe || "1m").trim().toLowerCase(),
+    data_time: getActualDataTime(bar),
+    adjusted_time: getAdjustedTime(bar),
+    plot_time: getDisplayTime(bar),
+    open: Number(bar.open),
+    high: Number(bar.high),
+    low: Number(bar.low),
+    close: Number(bar.close),
+    volume: Number(bar.volume),
+    open_interest: Number(bar.open_interest),
+  };
+}
+
+function getSelectedBarAnchor() {
+  return buildBarAnchor(selectedBarIndex.value);
+}
+
+function getBarAnchorAtClientPoint(clientX) {
+  const rect = mainWrapRef.value?.getBoundingClientRect?.();
+  if (!rect) return null;
+  const x = Number(clientX) - rect.left;
+  if (!Number.isFinite(x)) return null;
+  const logical = chartRefs.candle?.timeScale?.()?.coordinateToLogical?.(x);
+  if (Number.isFinite(Number(logical))) {
+    const idx = Math.max(0, Math.min(state.bars.length - 1, Math.round(Number(logical))));
+    return buildBarAnchor(idx);
+  }
+  const ts = mapXToTimeWithFallback(x);
+  const idx = findBarIndexByTime(Number(ts));
+  return buildBarAnchor(idx);
+}
+
+function onCandleContextMenu(evt) {
+  const anchor = getBarAnchorAtClientPoint(evt.clientX);
+  if (!anchor) return;
+  emit("chart-context-menu", {
+    x: evt.clientX,
+    y: evt.clientY,
+    anchor,
+  });
+}
+
 defineExpose({
   onDeleteSelected,
   reload: loadInitialChunk,
@@ -2195,11 +2255,13 @@ defineExpose({
   setSelectedDrawing,
   getChannelSegments,
   getChannelPanelState,
+  getSelectedBarAnchor,
   applyChannelAction,
   applyChannelSettings,
   applyReversalSettings,
   applyReversalAction,
   recalcReversalNow,
+  focusTimeOnCandle,
 });
 
 const channelOverlayShapes = computed(() => {
@@ -3187,6 +3249,7 @@ onUnmounted(() => {
         @pointerdown="onCandlePointerDown"
         @pointermove="onCandlePointerMove"
         @pointerleave="onCandlePointerLeave"
+        @contextmenu.prevent="onCandleContextMenu"
       >
         <div ref="candleRef" class="chart-box main"></div>
         <div class="right-data-mask" :style="dataZoneMaskStyle"></div>

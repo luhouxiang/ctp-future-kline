@@ -90,6 +90,8 @@ type SignalDecision struct {
 	Reason string `json:"reason"`
 	// Metrics 是附带的策略指标。
 	Metrics map[string]any `json:"metrics"`
+	// Trace 是本次策略判断过程快照。无信号时也可返回，用于策略执行可视化。
+	Trace *StrategyTraceRecord `json:"trace,omitempty"`
 }
 
 type BacktestRequest struct {

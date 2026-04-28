@@ -322,6 +322,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/strategy/instances", s.handleStrategyInstances)
 	mux.HandleFunc("/api/strategy/instances/", s.handleStrategyInstanceAction)
 	mux.HandleFunc("/api/strategy/signals", s.handleStrategySignals)
+	mux.HandleFunc("/api/strategy/traces", s.handleStrategyTraces)
 	mux.HandleFunc("/api/strategy/backtests", s.handleStrategyBacktests)
 	mux.HandleFunc("/api/strategy/backtests/", s.handleStrategyBacktestByID)
 	mux.HandleFunc("/api/strategy/optimize", s.handleStrategyOptimize)
@@ -1936,6 +1937,24 @@ func (s *Server) handleStrategySignals(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	items, err := manager.ListSignals(parseLimitArg(r.URL.Query().Get("limit"), 100, 200))
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleStrategyTraces(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	q := r.URL.Query()
+	items, err := manager.ListTraces(q.Get("instance_id"), q.Get("symbol"), parseLimitArg(q.Get("limit"), 100, 500))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

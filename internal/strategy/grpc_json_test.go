@@ -32,11 +32,35 @@ func (testService) StopInstance(context.Context, StopInstanceRequest) (HealthRes
 }
 
 func (testService) OnTick(context.Context, DecisionRequest) (SignalDecision, error) {
-	return SignalDecision{NoSignal: true, TargetPosition: 0, Metrics: map[string]any{"state": "WAIT_BREAK_BELOW_MA20"}}, nil
+	return SignalDecision{
+		NoSignal:       true,
+		TargetPosition: 0,
+		Metrics:        map[string]any{"state": "WAIT_BREAK_BELOW_MA20"},
+		Trace: &StrategyTraceRecord{
+			EventType: "key_tick",
+			StepKey:   "WAIT_BREAK_TOUCH_OPEN",
+			StepLabel: "等待跌破触碰K开盘价",
+			StepIndex: 4,
+			StepTotal: 5,
+			Status:    "waiting",
+			Checks:    []TraceCheck{{Name: "最新价跌破触碰K开盘价", Passed: false, Current: 100.0, Target: 99.5}},
+		},
+	}, nil
 }
 
 func (testService) OnBar(context.Context, DecisionRequest) (SignalDecision, error) {
-	return SignalDecision{TargetPosition: -1, Metrics: map[string]any{"signal": "SHORT", "touch_open": 99.5}}, nil
+	return SignalDecision{
+		TargetPosition: -1,
+		Metrics:        map[string]any{"signal": "SHORT", "touch_open": 99.5},
+		Trace: &StrategyTraceRecord{
+			EventType: "bar",
+			StepKey:   "BROKEN_BELOW_MA20",
+			StepLabel: "已跌破，等待反抽触碰 MA20",
+			StepIndex: 3,
+			StepTotal: 5,
+			Status:    "passed",
+		},
+	}, nil
 }
 
 func (testService) OnReplayBar(context.Context, DecisionRequest) (SignalDecision, error) {
@@ -97,11 +121,17 @@ func TestJSONStrategyServiceRoundTrip(t *testing.T) {
 	if barDecision.TargetPosition != -1 || barDecision.Metrics["signal"] != "SHORT" {
 		t.Fatalf("OnBar() = %+v, want SHORT target -1", barDecision)
 	}
+	if barDecision.Trace == nil || barDecision.Trace.EventType != "bar" || barDecision.Trace.StepIndex != 3 {
+		t.Fatalf("OnBar() trace = %+v, want bar step 3", barDecision.Trace)
+	}
 	tickDecision, err := client.OnTick(ctx, DecisionRequest{})
 	if err != nil {
 		t.Fatalf("OnTick() error = %v", err)
 	}
 	if !tickDecision.NoSignal || tickDecision.Metrics["state"] != "WAIT_BREAK_BELOW_MA20" {
 		t.Fatalf("OnTick() = %+v, want no_signal waiting state", tickDecision)
+	}
+	if tickDecision.Trace == nil || tickDecision.Trace.EventType != "key_tick" || len(tickDecision.Trace.Checks) != 1 {
+		t.Fatalf("OnTick() trace = %+v, want key_tick with checks", tickDecision.Trace)
 	}
 }

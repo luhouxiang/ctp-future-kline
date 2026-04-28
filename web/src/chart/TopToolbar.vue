@@ -108,6 +108,7 @@ function applyReversalSettings(force = false) {
     <div class="tv-group tv-right-panel-actions">
       <button class="tv-btn" :class="{ active: props.activeRightTab === 'quote' }" @click="emit('set-active-right-tab', 'quote')">盘口</button>
       <button class="tv-btn" :class="{ active: props.activeRightTab === 'watchlist' }" @click="emit('set-active-right-tab', 'watchlist')">观察列表</button>
+      <button class="tv-btn" :class="{ active: props.activeRightTab === 'strategy' }" @click="emit('set-active-right-tab', 'strategy')">策略</button>
       <button class="tv-btn" :class="{ active: props.activeRightTab === 'object_tree' }" @click="emit('set-active-right-tab', 'object_tree')">对象树</button>
       <button class="tv-btn" @click="emit('toggle-right-sidebar')">{{ props.rightPanelOpen ? '收起' : '展开' }}</button>
     </div>

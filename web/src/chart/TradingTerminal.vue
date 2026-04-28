@@ -41,6 +41,18 @@ const activeRightTab = ref('quote')
 const quoteSnapshot = ref({})
 const quoteTicks = ref([])
 const lineOrders = ref([])
+const strategyDefinitions = ref([])
+const strategyInstances = ref([])
+const strategyStatus = ref({})
+const strategyTraces = ref([])
+const strategyStarting = ref(false)
+const strategyContextMenu = reactive({
+  open: false,
+  x: 0,
+  y: 0,
+  anchor: null,
+  loading: false,
+})
 const selectedDrawingId = ref('')
 const saveStatus = ref('idle')
 const activeTool = ref('cursor')
@@ -65,6 +77,8 @@ const maxWatchlistWidth = 520
 let resizeMeta = null
 let saveTimer = null
 let beforeUnloadHandler = null
+let globalClickHandler = null
+let globalKeyHandler = null
 let spriteQueryTimer = null
 let spriteKeyHandler = null
 let chartWS = null
@@ -160,7 +174,7 @@ function applyLightweightDefaults(layoutData = {}) {
   reversalState.persistVersion = 0
   reversalState.selected_id = ''
   activeRightTab.value = String(layoutData.panes?.right_active_tab || 'quote')
-  if (!['quote', 'watchlist', 'object_tree', 'channel', 'reversal'].includes(activeRightTab.value)) {
+  if (!['quote', 'watchlist', 'strategy', 'object_tree', 'channel', 'reversal'].includes(activeRightTab.value)) {
     activeRightTab.value = 'quote'
   }
   drawings.value = (layoutData.drawings || []).map((d) => normalizeDrawingForSave(d))
@@ -531,6 +545,50 @@ async function fetchLineOrders() {
   }
 }
 
+async function fetchStrategyDefinitions() {
+  try {
+    const resp = await fetch('/api/strategy/definitions')
+    if (!resp.ok) return
+    const data = await resp.json()
+    strategyDefinitions.value = Array.isArray(data.items) ? data.items : []
+  } catch {
+    // strategy subsystem may be disabled
+  }
+}
+
+async function fetchStrategyRuntime() {
+  try {
+    const [statusResp, instancesResp, tracesResp] = await Promise.all([
+      fetch('/api/strategy/status'),
+      fetch('/api/strategy/instances'),
+      fetch(`/api/strategy/traces?${new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()}`),
+    ])
+    if (statusResp.ok) {
+      const data = await statusResp.json()
+      strategyStatus.value = data.status || {}
+    }
+    if (instancesResp.ok) {
+      const data = await instancesResp.json()
+      strategyInstances.value = Array.isArray(data.items) ? data.items : []
+    }
+    if (tracesResp.ok) {
+      const data = await tracesResp.json()
+      strategyTraces.value = Array.isArray(data.items) ? data.items : []
+    }
+  } catch {
+    // strategy subsystem may be disabled
+  }
+}
+
+function pushStrategyTrace(item) {
+  if (!item || typeof item !== 'object') return
+  const symbol = String(item.symbol || '').trim().toLowerCase()
+  if (currentTradeSymbol() && symbol && symbol !== currentTradeSymbol().toLowerCase()) return
+  const id = String(item.trace_id || `${item.instance_id}-${item.event_time}-${item.event_type}`)
+  const next = [item, ...strategyTraces.value.filter((x) => String(x.trace_id || `${x.instance_id}-${x.event_time}-${x.event_type}`) !== id)]
+  strategyTraces.value = next.slice(0, 100)
+}
+
 function updateTradeFormField(field, value) {
   if (!(field in tradeForm)) return
   if (field === 'volume') {
@@ -634,6 +692,112 @@ async function stopLineOrders() {
     await fetchLineOrders()
   } catch (err) {
     showTradeError('画线下单急停', err)
+  }
+}
+
+function formatAnchorTime(unixSeconds) {
+  const n = Number(unixSeconds || 0)
+  if (!Number.isFinite(n) || n <= 0) return '--'
+  const d = new Date(n * 1000)
+  const p = (v) => String(v).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+
+function closeStrategyContextMenu() {
+  strategyContextMenu.open = false
+  strategyContextMenu.anchor = null
+  strategyContextMenu.loading = false
+}
+
+function strategyContextMenuStyle() {
+  const width = 240
+  const height = 240
+  const maxX = Math.max(8, window.innerWidth - width - 8)
+  const maxY = Math.max(8, window.innerHeight - height - 8)
+  return {
+    left: `${Math.max(8, Math.min(Number(strategyContextMenu.x || 0), maxX))}px`,
+    top: `${Math.max(8, Math.min(Number(strategyContextMenu.y || 0), maxY))}px`,
+  }
+}
+
+async function onChartContextMenu(payload) {
+  const anchor = payload?.anchor
+  if (!anchor) return
+  strategyContextMenu.x = Number(payload.x || 0)
+  strategyContextMenu.y = Number(payload.y || 0)
+  strategyContextMenu.anchor = anchor
+  strategyContextMenu.open = true
+  strategyContextMenu.loading = true
+  try {
+    if (!strategyDefinitions.value.length) await fetchStrategyDefinitions()
+  } finally {
+    strategyContextMenu.loading = false
+  }
+}
+
+async function startStrategyFromAnchor(anchor, definition) {
+  if (strategyStarting.value) return
+  if (!anchor) {
+    window.alert('右键位置没有可用K线')
+    return
+  }
+  const strategyID = String(definition?.strategy_id || '').trim()
+  if (!strategyID) return
+  strategyStarting.value = true
+  try {
+    closeStrategyContextMenu()
+    const defaultParams = definition?.default_params && typeof definition.default_params === 'object'
+      ? JSON.parse(JSON.stringify(definition.default_params))
+      : {}
+    const instanceID = `chart-${Date.now()}`
+    const mode = dataMode.value === 'replay' ? 'replay' : 'paper'
+    const displayTime = formatAnchorTime(anchor.data_time || anchor.adjusted_time || anchor.plot_time)
+    const instance = {
+      instance_id: instanceID,
+      strategy_id: strategyID,
+      display_name: `${definition?.display_name || strategyID}@${scope.symbol}-${displayTime}`,
+      mode,
+      account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || mode,
+      symbols: [scope.symbol],
+      timeframe: scope.timeframe || '1m',
+      params: {
+        ...defaultParams,
+        chart_anchor: anchor,
+        chart_start_time: displayTime,
+        start_source: 'chart_context_menu',
+      },
+    }
+    const saveResp = await fetch('/api/strategy/instances', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(instance),
+    })
+    if (!saveResp.ok) throw new Error(await saveResp.text())
+    const startResp = await fetch(`/api/strategy/instances/${encodeURIComponent(instanceID)}/start`, {
+      method: 'POST',
+    })
+    if (!startResp.ok) throw new Error(await startResp.text())
+    activeRightTab.value = 'strategy'
+    layout.panes.right_watchlist_open = true
+    await fetchStrategyRuntime()
+  } catch (err) {
+    showTradeError('图表启动策略', err)
+  } finally {
+    strategyStarting.value = false
+  }
+}
+
+async function stopStrategyInstance(instanceID) {
+  const id = String(instanceID || '').trim()
+  if (!id) return
+  try {
+    const resp = await fetch(`/api/strategy/instances/${encodeURIComponent(id)}/stop`, {
+      method: 'POST',
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchStrategyRuntime()
+  } catch (err) {
+    showTradeError('停止策略', err)
   }
 }
 
@@ -1279,6 +1443,19 @@ function connectChartWS() {
       if (msg.data?.changed) void fetchTradeTerminal().catch(() => {})
       return
     }
+    if (msg?.type === 'strategy_trace_update' && msg.data) {
+      pushStrategyTrace(msg.data)
+      return
+    }
+    if (msg?.type === 'strategy_status_update' && msg.data) {
+      strategyStatus.value = msg.data || {}
+      void fetchStrategyRuntime().catch(() => {})
+      return
+    }
+    if (msg?.type === 'strategy_signal' && msg.data) {
+      void fetchStrategyRuntime().catch(() => {})
+      return
+    }
     if (
       tradeWindow.visible &&
       ['trade_status_update', 'trade_account_update', 'trade_position_update', 'trade_order_update', 'trade_trade_update'].includes(msg?.type)
@@ -1395,6 +1572,12 @@ function onReversalAction(action) {
   paneRef.value?.applyReversalAction?.(action || null)
 }
 
+function onStrategyTraceFocus(trace) {
+  const ts = Date.parse(String(trace?.event_time || ''))
+  if (!Number.isFinite(ts)) return
+  paneRef.value?.focusTimeOnCandle?.(Math.floor(ts / 1000))
+}
+
 const bodyStyle = computed(() => {
   const rightCol = layout.panes.right_watchlist_open ? `${watchlistWidth.value}px` : '48px'
   const resizerCol = layout.panes.right_watchlist_open ? '4px' : '0px'
@@ -1443,6 +1626,7 @@ watch(
         // ignore trade terminal refresh failures when hidden backend is unavailable
       }
     }
+    await fetchStrategyRuntime()
   },
 )
 
@@ -1521,10 +1705,18 @@ onMounted(async () => {
   }
   await fetchWatchlist()
   await fetchLineOrders()
+  await fetchStrategyDefinitions()
+  await fetchStrategyRuntime()
   await loadLayout()
   connectChartWS()
   spriteKeyHandler = (evt) => onKeyboardSpriteKeydown(evt)
+  globalClickHandler = () => closeStrategyContextMenu()
+  globalKeyHandler = (evt) => {
+    if (evt.key === 'Escape') closeStrategyContextMenu()
+  }
   window.addEventListener('keydown', spriteKeyHandler)
+  window.addEventListener('click', globalClickHandler)
+  window.addEventListener('keydown', globalKeyHandler)
   window.addEventListener('pointermove', onTradeWindowPointerMove)
   window.addEventListener('pointerup', stopTradeWindowDrag)
   beforeUnloadHandler = () => {
@@ -1545,6 +1737,8 @@ onUnmounted(() => {
   stopTradeWindowDrag()
   if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
   if (spriteKeyHandler) window.removeEventListener('keydown', spriteKeyHandler)
+  if (globalClickHandler) window.removeEventListener('click', globalClickHandler)
+  if (globalKeyHandler) window.removeEventListener('keydown', globalKeyHandler)
   window.removeEventListener('pointermove', onTradeWindowPointerMove)
   window.removeEventListener('pointerup', stopTradeWindowDrag)
   if (beforeUnloadHandler) window.removeEventListener('beforeunload', beforeUnloadHandler)
@@ -1598,6 +1792,7 @@ onUnmounted(() => {
           @select-drawing="onSelectDrawing"
           @channel-view-change="onChannelViewChange"
           @reversal-view-change="onReversalViewChange"
+          @chart-context-menu="onChartContextMenu"
         />
       </div>
 
@@ -1617,6 +1812,11 @@ onUnmounted(() => {
           :quote-ticks="quoteTicks"
           :drawings="objectTreeRows"
           :line-orders="lineOrders"
+          :strategy="{
+            status: strategyStatus,
+            instances: strategyInstances,
+            traces: strategyTraces
+          }"
           :channels="channelState"
           :reversal="{
             settings: reversalState.settings,
@@ -1634,6 +1834,8 @@ onUnmounted(() => {
           @arm-line-order="armLineOrder"
           @disable-line-order="disableLineOrder"
           @stop-line-orders="stopLineOrders"
+          @strategy-trace-focus="onStrategyTraceFocus"
+          @strategy-instance-stop="stopStrategyInstance"
           @channel-action="onChannelAction"
           @channel-settings="onChannelSettings"
           @reversal-action="onReversalAction"
@@ -1677,5 +1879,31 @@ onUnmounted(() => {
       @close="resetKeyboardSprite"
       @set-active-index="keyboardSprite.activeIndex = $event"
     />
+
+    <div
+      v-if="strategyContextMenu.open"
+      class="tv-strategy-context-menu"
+      :style="strategyContextMenuStyle()"
+      @click.stop
+      @contextmenu.prevent
+    >
+      <div class="tv-strategy-context-head">
+        <span>从此K线启动策略</span>
+        <small>{{ formatAnchorTime(strategyContextMenu.anchor?.data_time || strategyContextMenu.anchor?.adjusted_time || strategyContextMenu.anchor?.plot_time) }}</small>
+      </div>
+      <div v-if="strategyContextMenu.loading" class="tv-strategy-context-empty">加载策略...</div>
+      <button
+        v-for="def in strategyDefinitions"
+        v-else
+        :key="def.strategy_id"
+        class="tv-strategy-context-item"
+        :disabled="strategyStarting"
+        @click="startStrategyFromAnchor(strategyContextMenu.anchor, def)"
+      >
+        <span>{{ def.display_name || def.strategy_id }}</span>
+        <small>{{ def.strategy_id }}</small>
+      </button>
+      <div v-if="!strategyContextMenu.loading && !strategyDefinitions.length" class="tv-strategy-context-empty">暂无可用策略</div>
+    </div>
   </div>
 </template>

@@ -90,6 +90,36 @@ type SignalRecord struct {
 	CreatedAt      time.Time      `json:"created_at"`
 }
 
+type TraceCheck struct {
+	Name        string `json:"name"`
+	Passed      bool   `json:"passed"`
+	Current     any    `json:"current,omitempty"`
+	Target      any    `json:"target,omitempty"`
+	Delta       any    `json:"delta,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
+type StrategyTraceRecord struct {
+	TraceID       int64          `json:"trace_id"`
+	InstanceID    string         `json:"instance_id"`
+	StrategyID    string         `json:"strategy_id"`
+	Symbol        string         `json:"symbol"`
+	Timeframe     string         `json:"timeframe"`
+	Mode          string         `json:"mode"`
+	EventType     string         `json:"event_type"`
+	EventTime     time.Time      `json:"event_time"`
+	StepKey       string         `json:"step_key"`
+	StepLabel     string         `json:"step_label"`
+	StepIndex     int            `json:"step_index"`
+	StepTotal     int            `json:"step_total"`
+	Status        string         `json:"status"`
+	Reason        string         `json:"reason"`
+	Checks        []TraceCheck   `json:"checks"`
+	Metrics       map[string]any `json:"metrics"`
+	SignalPreview map[string]any `json:"signal_preview"`
+	CreatedAt     time.Time      `json:"created_at"`
+}
+
 type StrategyRun struct {
 	RunID      string         `json:"run_id"`
 	InstanceID string         `json:"instance_id"`

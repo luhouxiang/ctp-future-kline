@@ -39,6 +39,16 @@
     "browser_path": "",
     "browser_headless": true
   },
+  "strategy": {
+    "enabled": true,
+    "grpc_addr": "127.0.0.1:50051",
+    "auto_start": true,
+    "python_entry": "python/strategy_service.py",
+    "python_workdir": ".",
+    "healthcheck_interval_ms": 2000,
+    "request_timeout_ms": 3000,
+    "backtest_output_dir": "flow/strategy_backtests"
+  },
   "trade": {
     "enabled": true,
     "account_id": "default",

@@ -48,8 +48,8 @@ def _params(request):
     return (request.get("instance") or {}).get("params") or {}
 
 
-def _no_signal(request, reason, metrics=None):
-    return {
+def _no_signal(request, reason, metrics=None, trace=None):
+    out = {
         "no_signal": True,
         "instance_id": _instance_id(request),
         "symbol": request.get("symbol", ""),
@@ -58,6 +58,42 @@ def _no_signal(request, reason, metrics=None):
         "confidence": 0,
         "reason": reason,
         "metrics": metrics or {},
+    }
+    if trace is not None:
+        out["trace"] = trace
+    return out
+
+
+def _trace(request, event_type, step_key, step_label, step_index, status, reason, checks=None, metrics=None, signal_preview=None):
+    instance = request.get("instance") or {}
+    return {
+        "instance_id": _instance_id(request),
+        "strategy_id": instance.get("strategy_id", ""),
+        "symbol": request.get("symbol", ""),
+        "timeframe": instance.get("timeframe", ""),
+        "mode": request.get("mode", ""),
+        "event_type": event_type,
+        "event_time": request.get("event_time", ""),
+        "step_key": step_key,
+        "step_label": step_label,
+        "step_index": step_index,
+        "step_total": 5,
+        "status": status,
+        "reason": reason,
+        "checks": checks or [],
+        "metrics": metrics or {},
+        "signal_preview": signal_preview or {},
+    }
+
+
+def _check(name, passed, current=None, target=None, delta=None, description=""):
+    return {
+        "name": name,
+        "passed": bool(passed),
+        "current": current,
+        "target": target,
+        "delta": delta,
+        "description": description,
     }
 
 
@@ -204,6 +240,34 @@ class MA20PullbackShortStrategy(Strategy):
             "wait_bars": state.wait_bars,
         }
 
+    def _bar_trace(self, request, state, step_key, step_label, step_index, status, reason, checks, ma20=None):
+        return _trace(
+            request,
+            "bar",
+            step_key,
+            step_label,
+            step_index,
+            status,
+            reason,
+            checks,
+            self._base_metrics(state, ma20),
+        )
+
+    def _tick_trace(self, request, state, status, reason, checks, last_price):
+        metrics = self._base_metrics(state, state.touch_ma20)
+        metrics["trigger_price"] = last_price
+        return _trace(
+            request,
+            "key_tick",
+            WAIT_BREAK_TOUCH_OPEN,
+            "等待跌破触碰K开盘价",
+            4,
+            status,
+            reason,
+            checks,
+            metrics,
+        )
+
     def on_bar(self, request):
         bar = request.get("bar") or {}
         if not bar:
@@ -223,21 +287,50 @@ class MA20PullbackShortStrategy(Strategy):
         if ma20 is None:
             state.prev_close = close
             state.prev_ma = ma20
-            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20))
+            checks = [
+                _check("MA样本数量", len(state.closes) >= ma_period, len(state.closes), ma_period, len(state.closes) - ma_period, "等待收集足够K线计算均线")
+            ]
+            trace = self._bar_trace(request, state, "WAIT_MA_READY", "等待 MA20 数据足够", 1, "waiting", "waiting for enough bars", checks, ma20)
+            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20), trace)
 
         if state.state == DONE:
             state.prev_close = close
             state.prev_ma = ma20
-            return _no_signal(request, "strategy already done", self._base_metrics(state, ma20))
+            trace = self._bar_trace(request, state, DONE, "已触发/已完成", 5, "done", "strategy already done", [], ma20)
+            return _no_signal(request, "strategy already done", self._base_metrics(state, ma20), trace)
+
+        step_key = state.state
+        step_label = "等待跌破 MA20"
+        step_index = 2
+        status = "waiting"
+        reason = "no trade signal"
+        checks = []
 
         if state.state == WAIT_BREAK_BELOW_MA20:
             full_break = open_price < ma20 and close < ma20
             cross_break = previous_close is not None and previous_ma is not None and previous_close >= previous_ma and close < ma20
+            checks = [
+                _check("开盘低于MA20", open_price < ma20, open_price, ma20, open_price - ma20),
+                _check("收盘低于MA20", close < ma20, close, ma20, close - ma20),
+                _check("从上向下跌破", cross_break, close, ma20, close - ma20),
+            ]
             if (state.reset_requires_full_break and full_break) or (not state.reset_requires_full_break and cross_break):
                 state.state = BROKEN_BELOW_MA20
                 state.reset_requires_full_break = False
+                step_key = BROKEN_BELOW_MA20
+                step_label = "已跌破，等待反抽触碰 MA20"
+                step_index = 3
+                status = "passed"
+                reason = "break below MA20 confirmed"
+            else:
+                step_key = WAIT_BREAK_BELOW_MA20
+                step_label = "等待跌破 MA20"
+                step_index = 2
 
         elif state.state == BROKEN_BELOW_MA20:
+            checks = [
+                _check("最高价触碰MA20", high >= ma20, high, ma20, high - ma20, "等待反抽到MA20附近")
+            ]
             if high >= ma20:
                 state.state = WAIT_BREAK_TOUCH_OPEN
                 state.touch_open = open_price
@@ -245,19 +338,49 @@ class MA20PullbackShortStrategy(Strategy):
                 state.touch_ma20 = ma20
                 state.touch_time = data_time
                 state.wait_bars = 1
+                step_key = WAIT_BREAK_TOUCH_OPEN
+                step_label = "等待跌破触碰K开盘价"
+                step_index = 4
+                status = "passed"
+                reason = "MA20 touch bar found"
+            else:
+                step_key = BROKEN_BELOW_MA20
+                step_label = "已跌破，等待反抽触碰 MA20"
+                step_index = 3
 
         elif state.state == WAIT_BREAK_TOUCH_OPEN:
             stood_above = open_price > ma20 and close > ma20
+            wait_remaining = max_wait_bars - state.wait_bars
+            checks = [
+                _check("未重新站上MA20", not stood_above, close, ma20, close - ma20, "重新站上则形态失败"),
+                _check("等待未超时", state.wait_bars < max_wait_bars, state.wait_bars, max_wait_bars, wait_remaining),
+                _check("触碰K开盘价有效", state.touch_open is not None, state.touch_open, "not null"),
+            ]
             if stood_above:
                 self._reset_after_failure(state)
+                step_key = WAIT_BREAK_BELOW_MA20
+                step_label = "等待跌破 MA20"
+                step_index = 2
+                status = "failed"
+                reason = "reset: stood above MA20"
             else:
                 state.wait_bars += 1
                 if state.wait_bars >= max_wait_bars:
                     self._reset_after_failure(state)
+                    step_key = WAIT_BREAK_BELOW_MA20
+                    step_label = "等待跌破 MA20"
+                    step_index = 2
+                    status = "failed"
+                    reason = "reset: wait bars exceeded"
+                else:
+                    step_key = WAIT_BREAK_TOUCH_OPEN
+                    step_label = "等待跌破触碰K开盘价"
+                    step_index = 4
 
         state.prev_close = close
         state.prev_ma = ma20
-        return _no_signal(request, "no trade signal", self._base_metrics(state, ma20))
+        trace = self._bar_trace(request, state, step_key, step_label, step_index, status, reason, checks, ma20)
+        return _no_signal(request, reason, self._base_metrics(state, ma20), trace)
 
     def on_tick(self, request):
         tick = request.get("tick") or {}
@@ -266,8 +389,12 @@ class MA20PullbackShortStrategy(Strategy):
             return _no_signal(request, "waiting for setup", self._base_metrics(state))
 
         last_price = _float(tick.get("last_price"))
+        checks = [
+            _check("最新价跌破触碰K开盘价", last_price < state.touch_open, last_price, state.touch_open, last_price - state.touch_open)
+        ]
         if last_price >= state.touch_open:
-            return _no_signal(request, "touch open not broken", self._base_metrics(state))
+            trace = self._tick_trace(request, state, "waiting", "touch open not broken", checks, last_price)
+            return _no_signal(request, "touch open not broken", self._base_metrics(state), trace)
 
         state.state = DONE
         metrics = self._base_metrics(state, state.touch_ma20)
@@ -281,6 +408,18 @@ class MA20PullbackShortStrategy(Strategy):
                 "trigger_price": last_price,
             }
         )
+        trace = _trace(
+            request,
+            "key_tick",
+            DONE,
+            "已触发/已完成",
+            5,
+            "passed",
+            "SHORT: tick broke below MA20 touch bar open",
+            checks,
+            metrics,
+            {"target_position": -1, "confidence": 0.8, "signal": "SHORT"},
+        )
         return {
             "instance_id": _instance_id(request),
             "symbol": request.get("symbol", ""),
@@ -289,6 +428,7 @@ class MA20PullbackShortStrategy(Strategy):
             "confidence": 0.8,
             "reason": "SHORT: tick broke below MA20 touch bar open",
             "metrics": metrics,
+            "trace": trace,
         }
 
     def on_replay_bar(self, request):
