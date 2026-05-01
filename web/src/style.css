@@ -78,6 +78,62 @@ select {
   padding: 10px;
 }
 
+.startup-check-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.startup-check-card {
+  border: 1px solid #d7e2ef;
+  border-radius: 8px;
+  padding: 10px;
+  background: #f8fbff;
+}
+
+.startup-check-card p {
+  margin: 8px 0;
+  line-height: 1.45;
+  font-size: 13px;
+}
+
+.startup-check-head,
+.startup-check-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.startup-check-foot {
+  color: #4f657a;
+  font-size: 12px;
+}
+
+.startup-check-foot button {
+  padding: 6px 10px;
+}
+
+.startup-level.ok {
+  border-color: #b9e2c7;
+  background: #f4fbf6;
+}
+
+.startup-level.info {
+  border-color: #cddbe8;
+}
+
+.startup-level.warn {
+  border-color: #f2cc6d;
+  background: #fff9e8;
+}
+
+.startup-level.error {
+  border-color: #eeafa8;
+  background: #fff3f1;
+}
+
 .row {
   display: flex;
   gap: 10px;

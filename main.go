@@ -112,14 +112,15 @@ func main() {
 
 	server := web.NewServer(cfg)
 	url := fmt.Sprintf("http://%s", cfg.Web.ListenAddr)
-	if cfg.Web.IsAutoOpenBrowser() && !*noOpen {
-		if err := openBrowser(url); err != nil {
-			logger.Error("open browser failed", "url", url, "error", err)
-		}
-	}
 
 	tryFreeListenPort(cfg.Web.ListenAddr)
-	if err := server.Run(); err != nil {
+	if err := server.RunWithStartedCallback(func() {
+		if cfg.Web.IsAutoOpenBrowser() && !*noOpen {
+			if err := openBrowser(url); err != nil {
+				logger.Error("open browser failed", "url", url, "error", err)
+			}
+		}
+	}); err != nil {
 		logger.Error("run web server failed", "error", err)
 		os.Exit(1)
 	}

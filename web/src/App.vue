@@ -250,6 +250,13 @@ const loadingTradingSessionImport = ref(false)
 const tradeConfigSaving = ref(false)
 const conflict = ref(null)
 const replaySupported = ref(false)
+const startupChecks = reactive({
+  loading: false,
+  generated_at: '',
+  trading_day: '',
+  needs_attention: 0,
+  checks: [],
+})
 let ws
 let statusPollTimer = null
 let tradePollTimer = null
@@ -320,6 +327,12 @@ const replayEtaText = computed(() => {
 const tradingSessionSkippedText = computed(() => {
   if (tradingSessionSelection.skippedFiles <= 0) return '--'
   return tradingSessionSelection.skippedExamples.join(', ') || '--'
+})
+const startupAttentionText = computed(() => {
+  const count = Number(startupChecks.needs_attention || 0)
+  if (startupChecks.loading) return '检查中'
+  if (count <= 0) return '全部正常'
+  return `${count} 项需要处理`
 })
 
 function addLog(message) {
@@ -532,6 +545,86 @@ async function fetchStatus() {
   }
 }
 
+async function fetchStartupChecks() {
+  startupChecks.loading = true
+  try {
+    const resp = await fetch('/api/startup/checks')
+    if (!resp.ok) {
+      throw new Error(`startup checks http ${resp.status}`)
+    }
+    const data = await resp.json()
+    startupChecks.generated_at = data.generated_at || ''
+    startupChecks.trading_day = data.trading_day || ''
+    startupChecks.needs_attention = Number(data.needs_attention || 0)
+    startupChecks.checks = Array.isArray(data.checks) ? data.checks : []
+  } finally {
+    startupChecks.loading = false
+  }
+}
+
+function startupLevelClass(level) {
+  switch (String(level || 'info')) {
+    case 'ok':
+      return 'startup-level ok'
+    case 'warn':
+      return 'startup-level warn'
+    case 'error':
+      return 'startup-level error'
+    default:
+      return 'startup-level info'
+  }
+}
+
+function startupActionText(action) {
+  switch (action) {
+    case 'start_runtime':
+      return '启动行情补齐'
+    case 'calendar_refresh':
+      return '刷新日历'
+    case 'trading_sessions_import':
+      return '导入交易时段'
+    case 'rebuild_all_index':
+      return '重建索引'
+    case 'trade_refresh':
+      return '刷新交易'
+    default:
+      return ''
+  }
+}
+
+async function refreshCalendar() {
+  const resp = await fetch('/api/calendar/refresh', { method: 'POST' })
+  if (!resp.ok) {
+    addLog(`刷新交易日历失败: ${await resp.text()}`)
+    return
+  }
+  addLog('交易日历已刷新')
+  await fetchStartupChecks()
+}
+
+async function runStartupAction(action) {
+  switch (action) {
+    case 'start_runtime':
+      await startServer()
+      break
+    case 'calendar_refresh':
+      await refreshCalendar()
+      break
+    case 'trading_sessions_import':
+      addLog('请在“更新交易时段”面板选择 L9 目录后点击开始更新')
+      break
+    case 'rebuild_all_index':
+      await rebuildAllIndex()
+      break
+    case 'trade_refresh':
+      await refreshTradeData()
+      break
+    default:
+      break
+  }
+  await fetchStartupChecks().catch(() => {})
+}
+
 async function fetchAppMode() {
   const resp = await fetch('/api/app-mode')
   if (!resp.ok) {
@@ -608,6 +701,7 @@ async function refreshTradeData() {
   }
   addLog('已刷新交易查询')
   await fetchTradeBundle()
+  await fetchStartupChecks().catch(() => {})
 }
 
 async function toggleTradeEnabled(enabled) {
@@ -960,6 +1054,7 @@ async function startServer() {
     }
     addLog('已触发启动服务器')
     await fetchStatus()
+    await fetchStartupChecks()
   } finally {
     serverStarting.value = false
   }
@@ -1065,6 +1160,7 @@ async function importTradingDays() {
     }
     addLog(`加载历史交易日历成功: 首日=${data.min_date} 末日=${data.max_date} 交易日=${data.imported_days} 表=${data.table_name || 'trading_calendar'} 写入成功=${data.write_success === true}`)
     addLog(`加载历史交易日历详情: 删除区间记录 ${data.deleted_range_rows} 条`)
+    await fetchStartupChecks()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     alert(message)
@@ -1108,6 +1204,7 @@ async function importTradingSessions() {
     }
     addLog(`更新交易时段成功: 文件=${data.processed_files || 0}/${data.total_files || 0} 行数=${data.total_lines || 0} 新增=${data.inserted_rows || 0} 覆盖=${data.overwritten_rows || 0}`)
     addLog(`更新交易时段详情: 品种=${(data.updated_varieties || []).join(',') || '--'} 共享库=${data.shared_meta_db || '--'}`)
+    await fetchStartupChecks()
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     alert(message)
@@ -1182,6 +1279,7 @@ async function rebuildCurrentIndex() {
       throw new Error(await resp.text() || `http ${resp.status}`)
     }
     await runSearch(false)
+    await fetchStartupChecks().catch(() => {})
   } catch (error) {
     addLog(`重建当前索引失败: ${error.message}`)
   } finally {
@@ -1198,6 +1296,7 @@ async function rebuildAllIndex() {
       throw new Error(await resp.text() || `http ${resp.status}`)
     }
     await runSearch(false)
+    await fetchStartupChecks().catch(() => {})
   } catch (error) {
     addLog(`重建全部索引失败: ${error.message}`)
   } finally {
@@ -1431,6 +1530,7 @@ onMounted(async () => {
   try {
     await fetchAppMode()
     await fetchStatus()
+    await fetchStartupChecks()
     await fetchKlineGenerationSettings()
   } catch (error) {
     addLog(`状态获取失败: ${error.message}`)
@@ -1481,6 +1581,32 @@ onUnmounted(() => {
         </select>
       </div>
       <p v-if="isReplayAppMode" class="error-text">回放模拟模式不需要连接实时行情服务器或真实交易前置，启动服务器按钮已禁用</p>
+    </div>
+
+    <div class="panel">
+      <div class="row">
+        <h3>启动检查</h3>
+        <span :class="startupChecks.needs_attention > 0 ? 'badge closed' : 'badge open'">{{ startupAttentionText }}</span>
+        <span>交易日: {{ startupChecks.trading_day || status.trading_day || '--' }}</span>
+        <button class="secondary" :disabled="startupChecks.loading" @click="fetchStartupChecks">
+          {{ startupChecks.loading ? '检查中...' : '重新检查' }}
+        </button>
+      </div>
+      <div class="startup-check-grid">
+        <div v-for="item in startupChecks.checks" :key="item.key" class="startup-check-card" :class="startupLevelClass(item.level)">
+          <div class="startup-check-head">
+            <strong>{{ item.title }}</strong>
+            <span>{{ item.status }}</span>
+          </div>
+          <p>{{ item.detail }}</p>
+          <div class="startup-check-foot">
+            <span>更新时间: {{ item.updated_at || '--' }}</span>
+            <button v-if="item.action" class="secondary" @click="runStartupAction(item.action)">
+              {{ startupActionText(item.action) }}
+            </button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <div class="panel">

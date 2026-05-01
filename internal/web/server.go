@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -144,12 +145,6 @@ func NewServer(cfg config.AppConfig) *Server {
 		lineOrders:          newLineOrderEngine(),
 	}
 	quotes.SetKlineGenerationSettings(s.klineGeneration)
-	if err := dbx.EnsureAllLogicalDatabases(cfg.DB); err != nil {
-		logger.Error("ensure mysql database failed", "error", err)
-	}
-	if err := dbx.MigrateSharedMetaTables(cfg.DB); err != nil {
-		logger.Error("migrate shared meta tables failed", "error", err)
-	}
 	if count, err := quotes.DefaultProductExchangeCache().EnsureLoadedFromDSN(sharedDSN); err != nil {
 		logger.Error("load product exchange cache on startup failed", "error", err)
 	} else {
@@ -259,6 +254,10 @@ func (s *Server) ListenAddr() string {
 }
 
 func (s *Server) Run() error {
+	return s.RunWithStartedCallback(nil)
+}
+
+func (s *Server) RunWithStartedCallback(onStarted func()) error {
 	mux := s.Handler()
 	go s.broadcastStatusTicker()
 	go s.broadcastQueueTicker()
@@ -282,13 +281,21 @@ func (s *Server) Run() error {
 		go s.forwardChartEvents()
 		go s.forwardQuoteEvents()
 	}
-	logger.Info("web server listening", "addr", s.cfg.Web.ListenAddr)
-	return http.ListenAndServe(s.cfg.Web.ListenAddr, mux)
+	ln, err := net.Listen("tcp", s.cfg.Web.ListenAddr)
+	if err != nil {
+		return err
+	}
+	logger.Info("start success.", "addr", s.cfg.Web.ListenAddr)
+	if onStarted != nil {
+		onStarted()
+	}
+	return http.Serve(ln, mux)
 }
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/status", s.handleStatus)
+	mux.HandleFunc("/api/startup/checks", s.handleStartupChecks)
 	mux.HandleFunc("/api/app-mode", s.handleAppMode)
 	mux.HandleFunc("/api/queues", s.handleQueues)
 	mux.HandleFunc("/api/server/start", s.handleStartRuntime)

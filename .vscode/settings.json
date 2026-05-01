@@ -1,5 +1,21 @@
-﻿{
+{
   "gopls": {
-    "ui.diagnostic.staticcheck": false
+    "ui.diagnostic.staticcheck": true
+  },
+  "editor.formatOnSave": true,
+  "[go]": {
+    "editor.defaultFormatter": "golang.go",
+    "editor.codeActionsOnSave": {
+      "source.organizeImports": "explicit"
+    }
+  },
+  "[vue]": {
+    "editor.formatOnSave": true
+  },
+  "[javascript]": {
+    "editor.formatOnSave": true
+  },
+  "[typescript]": {
+    "editor.formatOnSave": true
   }
 }
