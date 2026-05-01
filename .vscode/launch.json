@@ -1,45 +1,49 @@
 {
   "version": "0.2.0",
   "configurations": [
-        {
-      "name": "Go: 启动",
-      "type": "go",
+    {
+      "name": "Go: 运行",
+      "type": "node-terminal",
       "request": "launch",
-      "mode": "auto",
-      "program": "${workspaceFolder}",
       "cwd": "${workspaceFolder}",
-      "args": [
-        "-config",
-        "${workspaceFolder}/config/config.json"
-      ],
-      "console": "internalConsole",
-      "outputMode": "remote",
-      "internalConsoleOptions": "openOnSessionStart",
+      "command": "$env:PATH = \"${workspaceFolder};$env:PATH\"; .\\ctp-future-kline-release.exe -config \"${workspaceFolder}\\config\\config.json\"",
       "presentation": {
         "order": 1
       }
     },
     {
-      "name": "Go: 编译后启动",
-      "type": "go",
+      "name": "Go: 编译运行",
+      "type": "node-terminal",
       "request": "launch",
-      "mode": "auto",
-      "program": "${workspaceFolder}",
       "cwd": "${workspaceFolder}",
-      "args": [
-        "-config",
-        "${workspaceFolder}/config/config.json"
-      ],
-      "preLaunchTask": "go: build all",
-      "console": "internalConsole",
-      "outputMode": "remote",
-      "internalConsoleOptions": "openOnSessionStart",
+      "preLaunchTask": "go: build release",
+      "command": "$env:PATH = \"${workspaceFolder};$env:PATH\"; .\\ctp-future-kline-release.exe -config \"${workspaceFolder}\\config\\config.json\"",
       "presentation": {
         "order": 2
       }
     },
     {
-      "name": "Vue: 编译后启动",
+      "name": "Go: 调试",
+      "type": "go",
+      "request": "launch",
+      "mode": "auto",
+      "program": "${workspaceFolder}",
+      "cwd": "${workspaceFolder}",
+      "preLaunchTask": "go: build debug",
+      "args": [
+        "-config",
+        "${workspaceFolder}/config/config.json"
+      ],
+      "console": "internalConsole",
+      "outputMode": "remote",
+      "internalConsoleOptions": "openOnSessionStart",
+
+      "presentation": {
+        "order": 2
+      }
+    },
+    {
+      "name": "Vue: 编译运行",
       "type": "node",
       "request": "launch",
       "cwd": "${workspaceFolder}/web",
@@ -54,6 +58,7 @@
         "runtimeExecutable": "npm.cmd"
       },
       "preLaunchTask": "vue: build all",
+      "postDebugTask": "vue: dev stop",
       "console": "internalConsole",
       "outputCapture": "std",
       "internalConsoleOptions": "openOnSessionStart",
@@ -75,8 +80,8 @@
     {
       "name": "一键启动",
       "configurations": [
-        "Go: 编译后启动",
-        "Vue: 编译后启动"
+        "Go: 编译运行",
+        "Vue: 编译运行"
       ],
       "stopAll": true,
       "presentation": {

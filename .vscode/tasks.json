@@ -1,10 +1,10 @@
 {
   "version": "2.0.0",
   "tasks": [
-    {
-      "label": "go: build all",
+   {
+      "label": "go: build debug",
       "type": "shell",
-      "command": "go build -v -x ./...",
+      "command": "go build -v -x -o ctp-future-kline.exe .",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -16,7 +16,28 @@
         "$go"
       ],
       "presentation": {
-        "reveal": "silent",
+        "reveal": "always",
+        "panel": "dedicated",
+        "clear": true
+      }
+    },
+
+    {
+      "label": "go: build release",
+      "type": "shell",
+      "command": "go build -trimpath -ldflags='-s -w' -o ctp-future-kline-release.exe .",
+      "options": {
+        "cwd": "${workspaceFolder}"
+      },
+      "group": {
+        "kind": "build",
+        "isDefault": true
+      },
+      "problemMatcher": [
+        "$go"
+      ],
+      "presentation": {
+        "reveal": "always",
         "panel": "dedicated",
         "clear": true
       }
@@ -31,10 +52,41 @@
       "group": "build",
       "problemMatcher": [],
       "presentation": {
-        "reveal": "silent",
+        "reveal": "always",
         "panel": "dedicated",
         "clear": true
       }
+    }
+    ,
+    {
+      "label": "vue: dev stop",
+      "type": "shell",
+      "command": "lsof -ti:5173 | xargs -r kill -9",
+      "windows": {
+        "options": {
+          "shell": {
+            "executable": "powershell.exe",
+            "args": [
+              "-NoProfile",
+              "-ExecutionPolicy",
+              "Bypass",
+              "-Command"
+            ]
+          }
+        },
+        "command": "Get-NetTCPConnection -LocalPort 5173 -ErrorAction SilentlyContinue | Select-Object -ExpandProperty OwningProcess -Unique | ForEach-Object { Stop-Process -Id $_ -Force }"
+      },
+      "osx": {
+        "command": "lsof -ti tcp:5173 | xargs kill -9 || true"
+      },
+      "linux": {
+        "command": "lsof -ti:5173 | xargs -r kill -9"
+      },
+      "presentation": {
+        "reveal": "always",
+        "panel": "shared"
+      },
+      "problemMatcher": []
     }
   ]
 }
