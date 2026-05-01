@@ -219,6 +219,7 @@ func openInstrumentCatalogTestDB(t *testing.T) *sql.DB {
   options_type TEXT NOT NULL,
   underlying_multiple REAL NOT NULL DEFAULT 0,
   combination_type TEXT NOT NULL,
+  trading_day TEXT NOT NULL DEFAULT '',
   sync_trading_day TEXT NOT NULL,
   updated_at DATETIME NOT NULL,
   PRIMARY KEY (sync_trading_day, instrument_id, exchange_id)

@@ -77,11 +77,6 @@ func newKlineStore(path string) (*klineStore, error) {
 		logger.Error("kline store open failed", "db_path", path, "error", err)
 		return nil, fmt.Errorf("open mysql failed: %w", err)
 	}
-	if err := ensureAllFutureKlineUpdateTime(db); err != nil {
-		_ = db.Close()
-		logger.Error("kline store update-time migration failed", "db_path", path, "error", err)
-		return nil, err
-	}
 	logger.Info("kline store open success", "db_path", path, "elapsed_ms", time.Since(start).Milliseconds())
 	return &klineStore{db: db, tables: make(map[string]struct{})}, nil
 }
@@ -347,9 +342,6 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if _, err := s.db.Exec(stmt); err != nil {
 		return fmt.Errorf("create kline table failed: %w", err)
 	}
-	if err := ensureUpdateTimeColumn(s.db, tableName); err != nil {
-		return err
-	}
 	if err := ensureAdjustedTimeIndex(s.db, tableName); err != nil {
 		return err
 	}
@@ -434,40 +426,6 @@ func ensureAdjustedTimeIndex(db *sql.DB, tableName string) error {
 		tableName, tableName, colAdjustedTime)
 	if _, err := db.Exec(byAdjusted); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
-	}
-	return nil
-}
-
-func ensureUpdateTimeColumn(db *sql.DB, tableName string) error {
-	has, err := dbx.TableHasColumn(db, tableName, colUpdateTime)
-	if err != nil {
-		return fmt.Errorf("check update-time column failed: %w", err)
-	}
-	if !has {
-		stmt := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
-			tableName, colUpdateTime)
-		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("add update-time column failed: %w", err)
-		}
-		return nil
-	}
-	stmt := fmt.Sprintf(`ALTER TABLE "%s" MODIFY COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
-		tableName, colUpdateTime)
-	if _, err := db.Exec(stmt); err != nil {
-		return fmt.Errorf("modify update-time column failed: %w", err)
-	}
-	return nil
-}
-
-func ensureAllFutureKlineUpdateTime(db *sql.DB) error {
-	tables, err := dbx.ListKlineTables(db)
-	if err != nil {
-		return fmt.Errorf("list future_kline tables failed: %w", err)
-	}
-	for _, tableName := range tables {
-		if err := ensureUpdateTimeColumn(db, tableName); err != nil {
-			return fmt.Errorf("ensure update-time for table %s failed: %w", tableName, err)
-		}
 	}
 	return nil
 }

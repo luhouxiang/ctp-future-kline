@@ -9,42 +9,11 @@ import (
 )
 
 func EnsureDatabaseAndSchema(cfg config.DBConfig, db *sql.DB) error {
-	if err := ensureSchemaStatements(db, fullSchemaStatements()); err != nil {
-		return err
-	}
-	if err := ensureSharedMetaTablesEvolution(db); err != nil {
-		return err
-	}
-	if err := ensureChartTablesEvolution(db); err != nil {
-		return err
-	}
-	if err := ensureTradeTablesEvolution(db); err != nil {
-		return err
-	}
-	return nil
+	return ensureSchemaStatements(db, fullSchemaStatements())
 }
 
 func EnsureDatabaseAndSchemaForRole(cfg config.DBConfig, role string, db *sql.DB) error {
-	stmts := schemaStatementsForRole(role)
-	if err := ensureSchemaStatements(db, stmts); err != nil {
-		return err
-	}
-	if role == RoleSharedMeta {
-		if err := ensureSharedMetaTablesEvolution(db); err != nil {
-			return err
-		}
-	}
-	if role == RoleChartUserRealtime || role == RoleChartUserReplay {
-		if err := ensureChartTablesEvolution(db); err != nil {
-			return err
-		}
-	}
-	if role == RoleTradeLive || role == RoleTradePaperLive || role == RoleTradePaperReplay {
-		if err := ensureTradeTablesEvolution(db); err != nil {
-			return err
-		}
-	}
-	return nil
+	return ensureSchemaStatements(db, schemaStatementsForRole(role))
 }
 
 func ensureSchemaStatements(db *sql.DB, stmts []string) error {
@@ -209,48 +178,6 @@ func sharedMetaSchemaStatements() []string {
 )`,
 		`CREATE INDEX idx_user_config_updated_at ON user_config(updated_at DESC)`,
 	}
-}
-
-func ensureSharedMetaTablesEvolution(db *sql.DB) error {
-	if err := ensureColumn(db, "ctp_instruments", "trading_day", "ALTER TABLE ctp_instruments ADD COLUMN trading_day VARCHAR(16) NOT NULL DEFAULT '' AFTER combination_type"); err != nil {
-		return err
-	}
-	if err := ensurePrimaryKey(db, "ctp_instruments", []string{"sync_trading_day", "instrument_id", "exchange_id"}); err != nil {
-		return err
-	}
-	if err := ensurePrimaryKey(db, "ctp_commission_rates", []string{"sync_trading_day", "instrument_id", "exchange_id"}); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`UPDATE ctp_instruments SET trading_day=sync_trading_day WHERE (trading_day IS NULL OR trading_day='') AND sync_trading_day<>''`); err != nil {
-		return fmt.Errorf("backfill ctp_instruments.trading_day failed: %w", err)
-	}
-	if err := ensureColumn(db, "ctp_product_exchange", "product_id_norm", "ALTER TABLE ctp_product_exchange ADD COLUMN product_id_norm VARCHAR(32) NOT NULL DEFAULT '' AFTER product_id"); err != nil {
-		return err
-	}
-	if _, err := db.Exec(`UPDATE ctp_product_exchange SET product_id_norm=LOWER(TRIM(product_id)) WHERE product_id_norm IS NULL OR product_id_norm=''`); err != nil {
-		return fmt.Errorf("backfill ctp_product_exchange.product_id_norm failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE UNIQUE INDEX idx_ctp_product_exchange_norm_exchange ON ctp_product_exchange(product_id_norm, exchange_id)`); err != nil && !isDuplicateObjectError(err) {
-		return fmt.Errorf("ensure ctp_product_exchange norm-exchange index failed: %w", err)
-	}
-
-	drops := []struct {
-		table  string
-		column string
-	}{
-		{"ctp_product_exchange", "long_margin_ratio"},
-		{"ctp_product_exchange", "short_margin_ratio"},
-		{"ctp_product_exchange", "max_market_order_volume"},
-		{"ctp_product_exchange", "min_market_order_volume"},
-		{"ctp_product_exchange", "max_limit_order_volume"},
-		{"ctp_product_exchange", "min_limit_order_volume"},
-	}
-	for _, item := range drops {
-		if err := dropColumnIfExists(db, item.table, item.column); err != nil {
-			return err
-		}
-	}
-	return nil
 }
 
 func marketSchemaStatements(includeReplayDedup bool) []string {
@@ -573,159 +500,6 @@ func tradeSchemaStatements() []string {
   PRIMARY KEY (account_id)
 )`,
 	}
-}
-
-func ensureChartTablesEvolution(db *sql.DB) error {
-	if err := ensureColumn(db, "chart_layouts", "owner", "ALTER TABLE chart_layouts ADD COLUMN owner VARCHAR(64) NOT NULL DEFAULT 'admin' FIRST"); err != nil {
-		return err
-	}
-	if err := ensurePrimaryKey(db, "chart_layouts", []string{"owner", "symbol", "kind", "variety", "timeframe"}); err != nil {
-		return err
-	}
-
-	changes := []struct {
-		column string
-		ddl    string
-	}{
-		{"owner", "ALTER TABLE chart_drawings ADD COLUMN owner VARCHAR(64) NOT NULL DEFAULT 'admin' AFTER id"},
-		{"object_class", "ALTER TABLE chart_drawings ADD COLUMN object_class VARCHAR(32) NOT NULL DEFAULT 'general' AFTER style_json"},
-		{"start_time", "ALTER TABLE chart_drawings ADD COLUMN start_time BIGINT NULL AFTER object_class"},
-		{"end_time", "ALTER TABLE chart_drawings ADD COLUMN end_time BIGINT NULL AFTER start_time"},
-		{"start_price", "ALTER TABLE chart_drawings ADD COLUMN start_price DOUBLE NULL AFTER end_time"},
-		{"end_price", "ALTER TABLE chart_drawings ADD COLUMN end_price DOUBLE NULL AFTER start_price"},
-		{"line_color", "ALTER TABLE chart_drawings ADD COLUMN line_color VARCHAR(32) NULL AFTER end_price"},
-		{"line_width", "ALTER TABLE chart_drawings ADD COLUMN line_width DOUBLE NULL AFTER line_color"},
-		{"line_style", "ALTER TABLE chart_drawings ADD COLUMN line_style VARCHAR(16) NULL AFTER line_width"},
-		{"left_cap", "ALTER TABLE chart_drawings ADD COLUMN left_cap VARCHAR(16) NULL AFTER line_style"},
-		{"right_cap", "ALTER TABLE chart_drawings ADD COLUMN right_cap VARCHAR(16) NULL AFTER left_cap"},
-		{"label_text", "ALTER TABLE chart_drawings ADD COLUMN label_text TEXT NULL AFTER right_cap"},
-		{"label_pos", "ALTER TABLE chart_drawings ADD COLUMN label_pos VARCHAR(16) NULL AFTER label_text"},
-		{"label_align", "ALTER TABLE chart_drawings ADD COLUMN label_align VARCHAR(16) NULL AFTER label_pos"},
-		{"visible_range", "ALTER TABLE chart_drawings ADD COLUMN visible_range VARCHAR(16) NOT NULL DEFAULT 'all' AFTER label_align"},
-	}
-	for _, ch := range changes {
-		if err := ensureColumn(db, "chart_drawings", ch.column, ch.ddl); err != nil {
-			return err
-		}
-	}
-
-	if _, err := db.Exec(`CREATE INDEX idx_chart_drawings_owner_scope ON chart_drawings(owner, symbol, kind, variety, timeframe, updated_at)`); err != nil && !isDuplicateObjectError(err) {
-		return fmt.Errorf("ensure chart_drawings owner scope index failed: %w", err)
-	}
-	if _, err := db.Exec(`CREATE INDEX idx_chart_drawings_object_class ON chart_drawings(object_class)`); err != nil && !isDuplicateObjectError(err) {
-		return fmt.Errorf("ensure chart_drawings object_class index failed: %w", err)
-	}
-	if _, err := db.Exec(`ALTER TABLE chart_drawings MODIFY COLUMN z_index BIGINT NOT NULL`); err != nil {
-		return fmt.Errorf("ensure chart_drawings z_index bigint failed: %w", err)
-	}
-
-	if _, err := db.Exec(`UPDATE chart_drawings SET owner='admin' WHERE owner IS NULL OR owner=''`); err != nil {
-		return fmt.Errorf("backfill drawing owner failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_layouts SET owner='admin' WHERE owner IS NULL OR owner=''`); err != nil {
-		return fmt.Errorf("backfill layout owner failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_drawings SET object_class=CASE WHEN type='trendline' THEN 'trendline' ELSE 'general' END WHERE object_class IS NULL OR object_class=''`); err != nil {
-		return fmt.Errorf("backfill drawing object_class failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_drawings SET label_text=text_value WHERE (label_text IS NULL OR label_text='') AND text_value<>''`); err != nil {
-		return fmt.Errorf("backfill drawing label_text failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_drawings SET line_color=JSON_UNQUOTE(JSON_EXTRACT(style_json,'$.color')) WHERE (line_color IS NULL OR line_color='') AND JSON_EXTRACT(style_json,'$.color') IS NOT NULL`); err != nil {
-		return fmt.Errorf("backfill drawing line_color failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_drawings SET line_width=CAST(JSON_UNQUOTE(JSON_EXTRACT(style_json,'$.width')) AS DOUBLE) WHERE line_width IS NULL AND JSON_EXTRACT(style_json,'$.width') IS NOT NULL`); err != nil {
-		return fmt.Errorf("backfill drawing line_width failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_drawings SET start_time=CAST(JSON_UNQUOTE(JSON_EXTRACT(points_json,'$[0].time')) AS SIGNED), end_time=CAST(JSON_UNQUOTE(JSON_EXTRACT(points_json,'$[1].time')) AS SIGNED) WHERE type='trendline' AND (start_time IS NULL OR end_time IS NULL)`); err != nil {
-		return fmt.Errorf("backfill drawing time range failed: %w", err)
-	}
-	if _, err := db.Exec(`UPDATE chart_drawings SET start_price=CAST(JSON_UNQUOTE(JSON_EXTRACT(points_json,'$[0].price')) AS DOUBLE), end_price=CAST(JSON_UNQUOTE(JSON_EXTRACT(points_json,'$[1].price')) AS DOUBLE) WHERE type='trendline' AND (start_price IS NULL OR end_price IS NULL)`); err != nil {
-		return fmt.Errorf("backfill drawing price range failed: %w", err)
-	}
-	return nil
-}
-
-func ensureTradeTablesEvolution(db *sql.DB) error {
-	changes := []struct {
-		column string
-		ddl    string
-	}{
-		{"static_balance", "ALTER TABLE trade_account_snapshots ADD COLUMN static_balance DOUBLE NOT NULL DEFAULT 0 AFTER account_id"},
-		{"frozen_margin", "ALTER TABLE trade_account_snapshots ADD COLUMN frozen_margin DOUBLE NOT NULL DEFAULT 0 AFTER margin_value"},
-		{"frozen_commission", "ALTER TABLE trade_account_snapshots ADD COLUMN frozen_commission DOUBLE NOT NULL DEFAULT 0 AFTER frozen_margin"},
-		{"frozen_premium", "ALTER TABLE trade_account_snapshots ADD COLUMN frozen_premium DOUBLE NOT NULL DEFAULT 0 AFTER frozen_commission"},
-		{"deposit", "ALTER TABLE trade_account_snapshots ADD COLUMN deposit DOUBLE NOT NULL DEFAULT 0 AFTER frozen_cash"},
-		{"withdraw", "ALTER TABLE trade_account_snapshots ADD COLUMN withdraw DOUBLE NOT NULL DEFAULT 0 AFTER deposit"},
-		{"premium", "ALTER TABLE trade_account_snapshots ADD COLUMN premium DOUBLE NOT NULL DEFAULT 0 AFTER withdraw"},
-		{"other_fee", "ALTER TABLE trade_account_snapshots ADD COLUMN other_fee DOUBLE NOT NULL DEFAULT 0 AFTER premium"},
-	}
-	for _, change := range changes {
-		if err := ensureColumn(db, "trade_account_snapshots", change.column, change.ddl); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func ensureColumn(db *sql.DB, tableName, columnName, ddl string) error {
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?`, tableName, columnName).Scan(&cnt); err != nil {
-		return fmt.Errorf("check column %s.%s failed: %w", tableName, columnName, err)
-	}
-	if cnt > 0 {
-		return nil
-	}
-	if _, err := db.Exec(ddl); err != nil {
-		return fmt.Errorf("add column %s.%s failed: %w", tableName, columnName, err)
-	}
-	return nil
-}
-
-func dropColumnIfExists(db *sql.DB, tableName, columnName string) error {
-	var cnt int
-	if err := db.QueryRow(`SELECT COUNT(1) FROM information_schema.columns WHERE table_schema=DATABASE() AND table_name=? AND column_name=?`, tableName, columnName).Scan(&cnt); err != nil {
-		return fmt.Errorf("check column %s.%s failed: %w", tableName, columnName, err)
-	}
-	if cnt == 0 {
-		return nil
-	}
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s DROP COLUMN %s", tableName, columnName)); err != nil {
-		return fmt.Errorf("drop column %s.%s failed: %w", tableName, columnName, err)
-	}
-	return nil
-}
-
-func ensurePrimaryKey(db *sql.DB, tableName string, want []string) error {
-	rows, err := db.Query(`SELECT column_name FROM information_schema.key_column_usage WHERE table_schema=DATABASE() AND table_name=? AND constraint_name='PRIMARY' ORDER BY ordinal_position`, tableName)
-	if err != nil {
-		return fmt.Errorf("query primary key for %s failed: %w", tableName, err)
-	}
-	defer rows.Close()
-	current := make([]string, 0, 8)
-	for rows.Next() {
-		var c string
-		if err := rows.Scan(&c); err != nil {
-			return fmt.Errorf("scan primary key for %s failed: %w", tableName, err)
-		}
-		current = append(current, strings.ToLower(strings.TrimSpace(c)))
-	}
-	if len(current) == len(want) {
-		same := true
-		for i := range want {
-			if current[i] != strings.ToLower(want[i]) {
-				same = false
-				break
-			}
-		}
-		if same {
-			return nil
-		}
-	}
-	if _, err := db.Exec(fmt.Sprintf("ALTER TABLE %s DROP PRIMARY KEY, ADD PRIMARY KEY (%s)", tableName, strings.Join(want, ","))); err != nil {
-		return fmt.Errorf("alter primary key for %s failed: %w", tableName, err)
-	}
-	return nil
 }
 
 func isDuplicateObjectError(err error) bool {

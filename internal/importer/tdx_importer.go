@@ -1023,9 +1023,6 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure kline table failed: %w", err)
 	}
-	if err := ensureUpdateTimeColumnImporter(db, tableName); err != nil {
-		return err
-	}
 	if _, err := db.Exec(fmt.Sprintf(`CREATE INDEX "idx_%s_inst_period_adj" ON "%s"("%s","%s","%s" DESC)`,
 		tableName, tableName, quotes.ColInstrumentID, quotes.ColPeriod, quotes.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
@@ -1033,27 +1030,6 @@ CREATE TABLE IF NOT EXISTS "%s" (
 	if _, err := db.Exec(fmt.Sprintf(`CREATE INDEX "idx_%s_adj" ON "%s"("%s" DESC)`,
 		tableName, tableName, quotes.ColAdjustedTime)); err != nil && !isDuplicateIndexErr(err) {
 		return fmt.Errorf("create adjusted index failed: %w", err)
-	}
-	return nil
-}
-
-func ensureUpdateTimeColumnImporter(db *sql.DB, tableName string) error {
-	has, err := dbx.TableHasColumn(db, tableName, quotes.ColUpdateTime)
-	if err != nil {
-		return fmt.Errorf("check update-time column failed: %w", err)
-	}
-	if !has {
-		stmt := fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
-			tableName, quotes.ColUpdateTime)
-		if _, err := db.Exec(stmt); err != nil {
-			return fmt.Errorf("add update-time column failed: %w", err)
-		}
-		return nil
-	}
-	stmt := fmt.Sprintf(`ALTER TABLE "%s" MODIFY COLUMN "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP`,
-		tableName, quotes.ColUpdateTime)
-	if _, err := db.Exec(stmt); err != nil {
-		return fmt.Errorf("modify update-time column failed: %w", err)
 	}
 	return nil
 }
