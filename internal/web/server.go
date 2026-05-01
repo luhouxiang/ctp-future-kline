@@ -241,11 +241,6 @@ func NewServer(cfg config.AppConfig) *Server {
 			s.replay.RegisterConsumer("trade.paper_replay", svc.ConsumeBusEvent)
 		}
 	}
-	if cfg.Trade.IsEnabled() && s.currentAppMode() == appmode.LiveReal {
-		if err := s.startTradeService(); err != nil {
-			logger.Error("init trade service failed", "error", err)
-		}
-	}
 	return s
 }
 
@@ -261,22 +256,6 @@ func (s *Server) RunWithStartedCallback(onStarted func()) error {
 	mux := s.Handler()
 	go s.broadcastStatusTicker()
 	go s.broadcastQueueTicker()
-	if s.strategy != nil {
-		if err := s.strategy.Start(); err != nil {
-			logger.Error("start strategy manager failed", "error", err)
-		}
-		go s.forwardStrategyEvents()
-	}
-	for _, svc := range []*trade.Service{s.tradeLive, s.tradePaperLive, s.tradePaperReplay} {
-		if svc == nil {
-			continue
-		}
-		if err := svc.Start(); err != nil {
-			logger.Error("start trade service failed", "error", err)
-		} else {
-			go s.forwardTradeEvents(svc)
-		}
-	}
 	if s.chartStream != nil {
 		go s.forwardChartEvents()
 		go s.forwardQuoteEvents()
@@ -289,7 +268,32 @@ func (s *Server) RunWithStartedCallback(onStarted func()) error {
 	if onStarted != nil {
 		onStarted()
 	}
+	go s.startBackgroundServices()
 	return http.Serve(ln, mux)
+}
+
+func (s *Server) startBackgroundServices() {
+	if s.strategy != nil {
+		if err := s.strategy.Start(); err != nil {
+			logger.Error("start strategy manager failed", "error", err)
+		}
+		go s.forwardStrategyEvents()
+	}
+	if s.cfg.Trade.IsEnabled() && s.currentAppMode() == appmode.LiveReal {
+		if err := s.startTradeService(); err != nil {
+			logger.Error("start trade service failed", "error", err)
+		}
+	}
+	for _, svc := range []*trade.Service{s.tradePaperLive, s.tradePaperReplay} {
+		if svc == nil {
+			continue
+		}
+		if err := svc.Start(); err != nil {
+			logger.Error("start trade service failed", "error", err)
+		} else {
+			go s.forwardTradeEvents(svc)
+		}
+	}
 }
 
 func (s *Server) Handler() http.Handler {

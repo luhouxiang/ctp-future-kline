@@ -2,7 +2,7 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Go: 运行",
+      "name": "Go运行",
       "type": "node-terminal",
       "request": "launch",
       "cwd": "${workspaceFolder}",
@@ -12,7 +12,7 @@
       }
     },
     {
-      "name": "Go: 编译运行",
+      "name": "Go编译运行",
       "type": "node-terminal",
       "request": "launch",
       "cwd": "${workspaceFolder}",
@@ -23,7 +23,7 @@
       }
     },
     {
-      "name": "Go: 调试",
+      "name": "Go调试",
       "type": "go",
       "request": "launch",
       "mode": "auto",
@@ -43,7 +43,7 @@
       }
     },
     {
-      "name": "Vue: 编译运行",
+      "name": "Vue编译运行",
       "type": "node",
       "request": "launch",
       "cwd": "${workspaceFolder}/web",
@@ -80,8 +80,8 @@
     {
       "name": "一键启动",
       "configurations": [
-        "Go: 编译运行",
-        "Vue: 编译运行"
+        "Go编译运行",
+        "Vue编译运行"
       ],
       "stopAll": true,
       "presentation": {
