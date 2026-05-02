@@ -256,6 +256,7 @@ const startupChecks = reactive({
   trading_day: '',
   needs_attention: 0,
   checks: [],
+  tasks: [],
 })
 let ws
 let statusPollTimer = null
@@ -333,6 +334,18 @@ const startupAttentionText = computed(() => {
   if (startupChecks.loading) return '检查中'
   if (count <= 0) return '全部正常'
   return `${count} 项需要处理`
+})
+const activeStartupTasks = computed(() => startupChecks.tasks.filter((item) => {
+  const state = String(item?.status || '').toLowerCase()
+  return state === 'pending' || state === 'running' || state === 'error'
+}))
+const startupTaskBannerText = computed(() => {
+  const running = activeStartupTasks.value.filter((item) => ['pending', 'running'].includes(String(item?.status || '').toLowerCase()))
+  const failed = activeStartupTasks.value.filter((item) => String(item?.status || '').toLowerCase() === 'error')
+  const parts = []
+  if (running.length) parts.push(`${running.length} 项后台启动中`)
+  if (failed.length) parts.push(`${failed.length} 项启动失败`)
+  return parts.join('，')
 })
 
 function addLog(message) {
@@ -543,6 +556,9 @@ async function fetchStatus() {
   if (data.trade) {
     applyTradeStatus(data.trade)
   }
+  if (Array.isArray(data.startup_tasks)) {
+    startupChecks.tasks = data.startup_tasks
+  }
 }
 
 async function fetchStartupChecks() {
@@ -557,8 +573,26 @@ async function fetchStartupChecks() {
     startupChecks.trading_day = data.trading_day || ''
     startupChecks.needs_attention = Number(data.needs_attention || 0)
     startupChecks.checks = Array.isArray(data.checks) ? data.checks : []
+    startupChecks.tasks = Array.isArray(data.tasks) ? data.tasks : startupChecks.tasks
   } finally {
     startupChecks.loading = false
+  }
+}
+
+function startupTaskStatusText(status) {
+  switch (String(status || '').toLowerCase()) {
+    case 'pending':
+      return '等待中'
+    case 'running':
+      return '进行中'
+    case 'done':
+      return '已完成'
+    case 'skipped':
+      return '已跳过'
+    case 'error':
+      return '失败'
+    default:
+      return '--'
   }
 }
 
@@ -1442,6 +1476,14 @@ function connectWS() {
       Object.assign(status, msg.data)
       return
     }
+    if (msg.type === 'status_update' && msg.data) {
+      applyStatusSnapshot(msg.data.status || {})
+      if (msg.data.replay) applyReplayState(msg.data.replay)
+      if (msg.data.strategy) applyStrategyStatus(msg.data.strategy)
+      if (msg.data.trade) applyTradeStatus(msg.data.trade)
+      if (Array.isArray(msg.data.startup_tasks)) startupChecks.tasks = msg.data.startup_tasks
+      return
+    }
     if (msg.type === 'strategy_status' && msg.data) {
       applyStrategyStatus(msg.data)
       fetchStrategyBundle()
@@ -1457,6 +1499,19 @@ function connectWS() {
     }
     if (msg.type === 'trade_status_update' && msg.data) {
       applyTradeStatus(msg.data)
+      return
+    }
+    if (msg.type === 'startup_task_update' && msg.data) {
+      const next = msg.data
+      const idx = startupChecks.tasks.findIndex((item) => item.key === next.key)
+      if (idx >= 0) {
+        startupChecks.tasks.splice(idx, 1, next)
+      } else {
+        startupChecks.tasks.push(next)
+      }
+      if (String(next.status || '').toLowerCase() === 'error') {
+        addLog(`${next.title || next.key}启动失败: ${next.error || next.detail || '--'}`)
+      }
       return
     }
     if (msg.type === 'app_mode_update' && msg.data) {
@@ -1568,6 +1623,12 @@ onUnmounted(() => {
     <div class="panel">
       <h2>CTP Kline 控制台</h2>
       <p>版本号: {{ APP_VERSION }}</p>
+      <div v-if="activeStartupTasks.length" class="startup-task-banner" :class="{ error: activeStartupTasks.some((item) => item.status === 'error') }">
+        <strong>{{ startupTaskBannerText }}</strong>
+        <span v-for="item in activeStartupTasks" :key="item.key">
+          {{ item.title }}: {{ startupTaskStatusText(item.status) }}{{ item.error ? ` - ${item.error}` : '' }}
+        </span>
+      </div>
       <div class="row">
         <button :disabled="!canStartServer" @click="startServer">{{ startServerButtonText }}</button>
         <button class="secondary" @click="openChartTradeDock">打开图表交易窗口</button>
@@ -1593,6 +1654,17 @@ onUnmounted(() => {
         </button>
       </div>
       <div class="startup-check-grid">
+        <div v-for="task in startupChecks.tasks" :key="`task-${task.key}`" class="startup-check-card" :class="startupLevelClass(task.status === 'error' ? 'error' : (task.status === 'running' || task.status === 'pending' ? 'warn' : 'info'))">
+          <div class="startup-check-head">
+            <strong>{{ task.title }}</strong>
+            <span>{{ startupTaskStatusText(task.status) }}</span>
+          </div>
+          <p>{{ task.error || task.detail || '--' }}</p>
+          <div class="startup-check-foot">
+            <span>开始: {{ task.started_at ? formatDisplayDateTime(task.started_at) : '--' }}</span>
+            <span>完成: {{ task.finished_at ? formatDisplayDateTime(task.finished_at) : '--' }}</span>
+          </div>
+        </div>
         <div v-for="item in startupChecks.checks" :key="item.key" class="startup-check-card" :class="startupLevelClass(item.level)">
           <div class="startup-check-head">
             <strong>{{ item.title }}</strong>

@@ -30,6 +30,9 @@
       "program": "${workspaceFolder}",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "go: build debug",
+      "env": {
+        "PATH": "${workspaceFolder};${env:PATH}"
+      },
       "args": [
         "-config",
         "${workspaceFolder}/config/config.json"

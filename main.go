@@ -16,7 +16,6 @@ import (
 	"strings"
 	"time"
 
-	"ctp-future-kline/internal/calendar"
 	"ctp-future-kline/internal/config"
 	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
@@ -96,19 +95,6 @@ func main() {
 	_ = db.Close()
 	cfg.CTP.DBDSN = dbx.DSNForRole(cfg.DB, dbx.RoleMarketRealtime)
 	cfg.CTP.SharedMetaDSN = dsn
-	cm := calendar.NewManager(dbx.DSNForRole(cfg.DB, dbx.RoleSharedMeta))
-	if err := cm.EnsureOnStart(calendar.Config{
-		AutoUpdateOnStart:  cfg.Calendar.IsAutoUpdateOnStart(),
-		MinFutureOpenDays:  cfg.Calendar.MinFutureOpenDays,
-		SourceURL:          cfg.Calendar.SourceURL,
-		SourceCSVPath:      cfg.Calendar.SourceCSVPath,
-		CheckIntervalHours: cfg.Calendar.CheckIntervalHours,
-		BrowserFallback:    cfg.Calendar.IsBrowserFallbackEnabled(),
-		BrowserPath:        cfg.Calendar.BrowserPath,
-		BrowserHeadless:    cfg.Calendar.IsBrowserHeadless(),
-	}); err != nil {
-		logger.Error("calendar auto update failed", "error", err)
-	}
 
 	server := web.NewServer(cfg)
 	url := fmt.Sprintf("http://%s", cfg.Web.ListenAddr)

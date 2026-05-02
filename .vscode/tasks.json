@@ -4,7 +4,7 @@
    {
       "label": "go: build debug",
       "type": "shell",
-      "command": "go build -v -x -o ctp-future-kline.exe .",
+      "command": "go build -v -x -buildvcs=false -o ctp-future-kline.exe .",
       "options": {
         "cwd": "${workspaceFolder}"
       },
@@ -25,7 +25,7 @@
     {
       "label": "go: build release",
       "type": "shell",
-      "command": "go build -trimpath -ldflags='-s -w' -o ctp-future-kline-release.exe .",
+      "command": "go build -trimpath -buildvcs=false -ldflags='-s -w' -o ctp-future-kline-release.exe .",
       "options": {
         "cwd": "${workspaceFolder}"
       },

@@ -22,10 +22,11 @@ type startupCheckItem struct {
 }
 
 type startupChecksResponse struct {
-	Checks         []startupCheckItem `json:"checks"`
-	TradingDay     string             `json:"trading_day"`
-	GeneratedAt    string             `json:"generated_at"`
-	NeedsAttention int                `json:"needs_attention"`
+	Checks         []startupCheckItem    `json:"checks"`
+	Tasks          []startupTaskSnapshot `json:"tasks"`
+	TradingDay     string                `json:"trading_day"`
+	GeneratedAt    string                `json:"generated_at"`
+	NeedsAttention int                   `json:"needs_attention"`
 }
 
 func (s *Server) handleStartupChecks(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +76,7 @@ func (s *Server) startupChecks() startupChecksResponse {
 	}
 	return startupChecksResponse{
 		Checks:         checks,
+		Tasks:          s.startupTaskSnapshots(),
 		TradingDay:     tradingDay,
 		GeneratedAt:    time.Now().Format(time.RFC3339),
 		NeedsAttention: needs,

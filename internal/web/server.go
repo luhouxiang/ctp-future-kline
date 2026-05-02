@@ -97,6 +97,9 @@ type Server struct {
 	subscriptionTickets *subscriptionTicketManager
 	// lineOrders 管理当前进程内的画线模拟下单规则。
 	lineOrders *lineOrderEngine
+	// startupTasks 记录后台启动任务状态，供前端显式提示未完成或失败的 sidecar。
+	startupMu    sync.Mutex
+	startupTasks map[string]startupTaskSnapshot
 }
 
 type wsClient struct {
@@ -143,6 +146,7 @@ func NewServer(cfg config.AppConfig) *Server {
 		wsConns:             make(map[*websocket.Conn]*wsClient),
 		subscriptionTickets: newSubscriptionTicketManager(sharedDSN),
 		lineOrders:          newLineOrderEngine(),
+		startupTasks:        make(map[string]startupTaskSnapshot),
 	}
 	quotes.SetKlineGenerationSettings(s.klineGeneration)
 	if count, err := quotes.DefaultProductExchangeCache().EnsureLoadedFromDSN(sharedDSN); err != nil {
@@ -273,26 +277,70 @@ func (s *Server) RunWithStartedCallback(onStarted func()) error {
 }
 
 func (s *Server) startBackgroundServices() {
-	if s.strategy != nil {
-		if err := s.strategy.Start(); err != nil {
-			logger.Error("start strategy manager failed", "error", err)
+	if s.calendar != nil {
+		if !s.cfg.Calendar.IsAutoUpdateOnStart() {
+			s.setStartupTask("calendar_auto_update", "交易日历自动刷新", startupTaskSkipped, "配置未启用启动自动刷新。", nil)
+		} else {
+			s.runStartupTask("calendar_auto_update", "交易日历自动刷新", "后台检查并补齐交易日历，不阻塞控制台打开。", func() error {
+				return s.calendar.RefreshIfNeeded(calendar.Config{
+					AutoUpdateOnStart:  true,
+					MinFutureOpenDays:  s.cfg.Calendar.MinFutureOpenDays,
+					SourceURL:          s.cfg.Calendar.SourceURL,
+					SourceCSVPath:      s.cfg.Calendar.SourceCSVPath,
+					CheckIntervalHours: s.cfg.Calendar.CheckIntervalHours,
+					BrowserFallback:    s.cfg.Calendar.IsBrowserFallbackEnabled(),
+					BrowserPath:        s.cfg.Calendar.BrowserPath,
+					BrowserHeadless:    s.cfg.Calendar.IsBrowserHeadless(),
+				})
+			})
 		}
-		go s.forwardStrategyEvents()
+	}
+	if s.strategy != nil {
+		s.runStartupTask("strategy", "策略服务", "后台启动或连接 Python gRPC 策略服务。", func() error {
+			if err := s.strategy.Start(); err != nil {
+				logger.Error("start strategy manager failed", "error", err)
+				return err
+			}
+			go s.forwardStrategyEvents()
+			return nil
+		})
+	} else {
+		s.setStartupTask("strategy", "策略服务", startupTaskSkipped, "策略配置未启用。", nil)
 	}
 	if s.cfg.Trade.IsEnabled() && s.currentAppMode() == appmode.LiveReal {
-		if err := s.startTradeService(); err != nil {
-			logger.Error("start trade service failed", "error", err)
-		}
+		s.runStartupTask("trade_live", "实盘交易连接", "后台连接交易前置、认证、登录并确认结算。", func() error {
+			if err := s.startTradeService(); err != nil {
+				logger.Error("start trade service failed", "error", err)
+				return err
+			}
+			return nil
+		})
+	} else {
+		s.setStartupTask("trade_live", "实盘交易连接", startupTaskSkipped, "当前模式或配置不需要启动实盘交易。", nil)
 	}
-	for _, svc := range []*trade.Service{s.tradePaperLive, s.tradePaperReplay} {
+	for _, item := range []struct {
+		key    string
+		title  string
+		detail string
+		svc    *trade.Service
+	}{
+		{"trade_paper_live", "实时模拟交易", "后台准备实时模拟交易账户和费率元数据。", s.tradePaperLive},
+		{"trade_paper_replay", "回放模拟交易", "后台准备回放模拟交易账户。", s.tradePaperReplay},
+	} {
+		item := item
+		svc := item.svc
 		if svc == nil {
+			s.setStartupTask(item.key, item.title, startupTaskSkipped, "服务未初始化。", nil)
 			continue
 		}
-		if err := svc.Start(); err != nil {
-			logger.Error("start trade service failed", "error", err)
-		} else {
+		s.runStartupTask(item.key, item.title, item.detail, func() error {
+			if err := svc.Start(); err != nil {
+				logger.Error("start trade service failed", "error", err)
+				return err
+			}
 			go s.forwardTradeEvents(svc)
-		}
+			return nil
+		})
 	}
 }
 
@@ -490,6 +538,7 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		"kline_data_mode": s.currentChartDataMode(),
 	}
 	resp["trade"] = s.tradeStatusSnapshot()
+	resp["startup_tasks"] = s.startupTaskSnapshots()
 	writeJSON(w, http.StatusOK, resp)
 }
 
@@ -586,9 +635,13 @@ func (s *Server) handleAppMode(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		if prevMode != appmode.LiveReal && nextMode == appmode.LiveReal && s.cfg.Trade.IsEnabled() {
-			if err := s.startTradeService(); err != nil {
-				logger.Error("start trade service on app mode switch failed", "error", err, "from_mode", prevMode, "to_mode", nextMode)
-			}
+			s.runStartupTask("trade_live", "实盘交易连接", "后台连接交易前置、认证、登录并确认结算。", func() error {
+				if err := s.startTradeService(); err != nil {
+					logger.Error("start trade service on app mode switch failed", "error", err, "from_mode", prevMode, "to_mode", nextMode)
+					return err
+				}
+				return nil
+			})
 		}
 		payload := s.appModePayload()
 		payload["ok"] = true
@@ -2134,10 +2187,11 @@ func (s *Server) startTradeService() error {
 		return nil
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.tradeLive != nil {
+		s.mu.Unlock()
 		return nil
 	}
+	s.mu.Unlock()
 	svc, err := trade.NewService(s.cfg.Trade, s.cfg.CTP, s.tradeLiveDSN, s.status.QueueRegistry())
 	if err != nil {
 		return err
@@ -2146,7 +2200,14 @@ func (s *Server) startTradeService() error {
 		_ = svc.Close()
 		return err
 	}
+	s.mu.Lock()
+	if s.tradeLive != nil {
+		s.mu.Unlock()
+		_ = svc.Close()
+		return nil
+	}
 	s.tradeLive = svc
+	s.mu.Unlock()
 	go s.forwardTradeEvents(svc)
 	return nil
 }
@@ -2966,7 +3027,8 @@ func (s *Server) broadcastQueueTicker() {
 
 func (s *Server) statusPayload() map[string]any {
 	out := map[string]any{
-		"status": s.status.Snapshot(time.Now()),
+		"status":        s.status.Snapshot(time.Now()),
+		"startup_tasks": s.startupTaskSnapshots(),
 	}
 	if s.replay != nil {
 		out["replay"] = s.replay.Status()

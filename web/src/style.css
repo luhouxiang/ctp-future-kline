@@ -78,6 +78,25 @@ select {
   padding: 10px;
 }
 
+.startup-task-banner {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid #f2cc6d;
+  border-radius: 8px;
+  background: #fff9e8;
+  color: #5f4700;
+}
+
+.startup-task-banner.error {
+  border-color: #eeafa8;
+  background: #fff3f1;
+  color: #8f1f1f;
+}
+
 .startup-check-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
