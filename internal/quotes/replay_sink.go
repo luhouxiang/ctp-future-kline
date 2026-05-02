@@ -16,6 +16,7 @@ import (
 	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/replay"
+	"ctp-future-kline/internal/sessiontime"
 	"ctp-future-kline/internal/strategy"
 )
 
@@ -29,6 +30,7 @@ type ReplaySink struct {
 	metaDB           *sql.DB
 	spi              *mdSpi
 	seenFirstConsume map[string]struct{}
+	clearedKlines    map[string]struct{}
 }
 
 // NewReplaySink 为回放模式创建独立的 store、L9 计算器和 mdSpi。
@@ -105,47 +107,14 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		metaDB:           metaDB,
 		spi:              spi,
 		seenFirstConsume: make(map[string]struct{}),
+		clearedKlines:    make(map[string]struct{}),
 	}, nil
 }
 
 func (s *ReplaySink) PrepareReplayWindow(req replay.StartRequest) error {
-	if s == nil || s.store == nil {
-		return nil
-	}
-	var start *time.Time
-	var end *time.Time
-	if strings.TrimSpace(req.TickDir) != "" {
-		window, err := replay.InspectTickCSVWindow(req)
-		if err != nil {
-			return fmt.Errorf("inspect replay tick window failed: %w", err)
-		}
-		start = window.StartTime
-		end = window.EndTime
-		logger.Info(
-			"replay tick window inspected",
-			"tick_dir", req.TickDir,
-			"event_count", window.EventCount,
-			"file_count", window.FileCount,
-			"instrument_count", window.InstrumentCount,
-			"start_time", formatReplayWindowTime(start),
-			"end_time", formatReplayWindowTime(end),
-		)
-	} else {
-		start = req.StartTime
-		end = req.EndTime
-	}
-	if start == nil || start.IsZero() {
-		logger.Info("replay window cleanup skipped", "reason", "time_range_unavailable")
-		return nil
-	}
-	if err := s.store.DeleteRange(*start, time.Time{}); err != nil {
-		return err
-	}
-	logger.Info(
-		"replay window cleanup completed",
-		"start_time", start.Format(time.RFC3339Nano),
-		"end_time", "MAX",
-	)
+	_ = req
+	s.resetReplayKlineCleanupState()
+	logger.Info("replay kline cleanup scheduled", "strategy", "first_tick_per_instrument")
 	return nil
 }
 
@@ -176,6 +145,9 @@ func (s *ReplaySink) ConsumeBusEvent(_ context.Context, ev bus.BusEvent) error {
 	s.logFirstConsume(ev.ReplayTaskID, tick)
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.prepareInstrumentKlinesLocked(ev.ReplayTaskID, tick); err != nil {
+		return err
+	}
 	if err := s.spi.ProcessReplayTick(tick); err != nil {
 		logger.Error(
 			"replay sink process tick failed",
@@ -283,6 +255,7 @@ func (s *ReplaySink) logFirstConsume(taskID string, tick tickEvent) {
 func (s *ReplaySink) resetReplayStageLogState() {
 	s.mu.Lock()
 	s.seenFirstConsume = make(map[string]struct{})
+	s.clearedKlines = make(map[string]struct{})
 	spi := s.spi
 	s.mu.Unlock()
 	if spi != nil {
@@ -290,9 +263,141 @@ func (s *ReplaySink) resetReplayStageLogState() {
 	}
 }
 
-func formatReplayWindowTime(ts *time.Time) string {
-	if ts == nil || ts.IsZero() {
-		return ""
+func (s *ReplaySink) resetReplayKlineCleanupState() {
+	if s == nil {
+		return
 	}
-	return ts.Format(time.RFC3339Nano)
+	s.mu.Lock()
+	s.clearedKlines = make(map[string]struct{})
+	s.mu.Unlock()
+}
+
+func (s *ReplaySink) prepareInstrumentKlinesLocked(taskID string, tick tickEvent) error {
+	instrumentID := tick.InstrumentID
+	instrumentID = strings.ToLower(strings.TrimSpace(instrumentID))
+	if taskID == "" || instrumentID == "" || s.store == nil {
+		return nil
+	}
+	variety := normalizeVariety(instrumentID)
+	if variety == "" {
+		return nil
+	}
+	subs := DefaultReplaySubscriptionsForSymbol(instrumentID, "contract", variety)
+	if len(subs) == 0 {
+		return nil
+	}
+	sessions, err := s.spi.runtime.sessionResolver.Sessions(variety)
+	if err != nil {
+		return err
+	}
+	baseMinute, adjustedMinute, _, err := parseTickTimesWithMillis(tick.ActionDay, tick.TradingDay, tick.UpdateTime, tick.UpdateMillisec, sessions, s.spi.runtime.clock)
+	if err != nil {
+		return err
+	}
+	type cleanupPlan struct {
+		sub             ChartSubscription
+		currentAdjusted time.Time
+	}
+	plans := make([]cleanupPlan, 0, len(subs))
+	for _, sub := range subs {
+		key := taskID + "|" + ChartSubscriptionKey(sub)
+		if _, ok := s.clearedKlines[key]; ok {
+			continue
+		}
+		currentAdjusted, ok := replayCleanupCurrentAdjusted(baseMinute, adjustedMinute, sub.Timeframe, sessions)
+		if !ok {
+			continue
+		}
+		s.clearedKlines[key] = struct{}{}
+		plans = append(plans, cleanupPlan{sub: sub, currentAdjusted: currentAdjusted})
+	}
+	if len(plans) == 0 {
+		return nil
+	}
+	store := s.store
+	go func() {
+		for _, plan := range plans {
+			logger.Info(
+				"replay subscribed kline cleanup begin",
+				"task_id", taskID,
+				"symbol", plan.sub.Symbol,
+				"type", plan.sub.Type,
+				"variety", plan.sub.Variety,
+				"timeframe", plan.sub.Timeframe,
+				"current_adjusted_time", plan.currentAdjusted.Format(time.RFC3339Nano),
+				"limit", 2000,
+			)
+			deleted, firstDeleted, err := store.DeleteReplaySubscriptionFutureBars(plan.sub, plan.currentAdjusted, 2000)
+			if err != nil {
+				logger.Error(
+					"replay subscribed kline cleanup failed",
+					"task_id", taskID,
+					"symbol", plan.sub.Symbol,
+					"type", plan.sub.Type,
+					"variety", plan.sub.Variety,
+					"timeframe", plan.sub.Timeframe,
+					"current_adjusted_time", plan.currentAdjusted.Format(time.RFC3339Nano),
+					"error", err,
+				)
+				continue
+			}
+			firstText := ""
+			if !firstDeleted.IsZero() {
+				firstText = firstDeleted.Format(time.RFC3339Nano)
+			}
+			logger.Info(
+				"replay subscribed kline cleanup completed",
+				"task_id", taskID,
+				"symbol", plan.sub.Symbol,
+				"type", plan.sub.Type,
+				"variety", plan.sub.Variety,
+				"timeframe", plan.sub.Timeframe,
+				"current_adjusted_time", plan.currentAdjusted.Format(time.RFC3339Nano),
+				"first_deleted_adjusted_time", firstText,
+				"deleted_rows", deleted,
+				"limit", 2000,
+			)
+		}
+	}()
+	return nil
+}
+
+func replayCleanupCurrentAdjusted(baseMinute time.Time, adjustedMinute time.Time, timeframe string, sessions []sessiontime.Range) (time.Time, bool) {
+	timeframe = strings.ToLower(strings.TrimSpace(timeframe))
+	if timeframe == "1m" {
+		if adjustedMinute.IsZero() {
+			return time.Time{}, false
+		}
+		return adjustedMinute, true
+	}
+	minutes := replayCleanupTimeframeMinutes(timeframe)
+	if minutes <= 1 {
+		return time.Time{}, false
+	}
+	plan, ok := planTimeframeBucket(minuteBar{
+		MinuteTime:   baseMinute,
+		AdjustedTime: adjustedMinute,
+		Period:       "1m",
+	}, timeframe, minutes, sessions)
+	if !ok {
+		return time.Time{}, false
+	}
+	return plan.AdjustedTime, true
+}
+
+func replayCleanupTimeframeMinutes(timeframe string) int {
+	switch strings.ToLower(strings.TrimSpace(timeframe)) {
+	case "5m":
+		return 5
+	case "15m":
+		return 15
+	case "30m":
+		return 30
+	case "1h":
+		return 60
+	case "1d":
+		return 1440
+	default:
+		return 0
+	}
 }

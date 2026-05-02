@@ -376,6 +376,105 @@ func (s *klineStore) DeleteRange(start time.Time, end time.Time) error {
 	return nil
 }
 
+func (s *klineStore) DeleteReplaySubscriptionFutureBars(sub ChartSubscription, currentAdjusted time.Time, limit int) (int64, time.Time, error) {
+	if s == nil || s.db == nil || currentAdjusted.IsZero() {
+		return 0, time.Time{}, nil
+	}
+	if limit <= 0 {
+		limit = 2000
+	}
+	sub, err := NormalizeChartSubscription(sub)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	tableName, targetID, err := tableAndInstrumentForSubscription(sub)
+	if err != nil {
+		return 0, time.Time{}, err
+	}
+	if err := s.ensureTable(tableName); err != nil {
+		return 0, time.Time{}, err
+	}
+	currentText := currentAdjusted.Format("2006-01-02 15:04:00")
+	var firstDeleted time.Time
+	findStmt := fmt.Sprintf(`
+SELECT "%s"
+FROM "%s"
+WHERE lower("%s") = ? AND "%s" = ? AND "%s" > ?
+ORDER BY "%s" ASC
+LIMIT 1`,
+		colAdjustedTime,
+		tableName,
+		colInstrumentID,
+		colPeriod,
+		colAdjustedTime,
+		colAdjustedTime,
+	)
+	if err := s.db.QueryRow(findStmt, targetID, sub.Timeframe, currentText).Scan(&firstDeleted); err != nil {
+		if err == sql.ErrNoRows {
+			return 0, time.Time{}, nil
+		}
+		return 0, time.Time{}, fmt.Errorf("find replay stale kline row failed for %s: %w", tableName, err)
+	}
+	deleteStmt := fmt.Sprintf(`
+DELETE FROM "%s"
+WHERE lower("%s") = ? AND "%s" = ? AND "%s" IN (
+  SELECT "%s" FROM (
+    SELECT "%s"
+    FROM "%s"
+    WHERE lower("%s") = ? AND "%s" = ? AND "%s" > ?
+    ORDER BY "%s" ASC
+    LIMIT ?
+  ) AS doomed
+)`,
+		tableName,
+		colInstrumentID,
+		colPeriod,
+		colAdjustedTime,
+		colAdjustedTime,
+		colAdjustedTime,
+		tableName,
+		colInstrumentID,
+		colPeriod,
+		colAdjustedTime,
+		colAdjustedTime,
+	)
+	result, err := s.db.Exec(deleteStmt, targetID, sub.Timeframe, targetID, sub.Timeframe, currentText, limit)
+	if err != nil {
+		return 0, firstDeleted, fmt.Errorf("delete replay future kline rows failed for %s: %w", tableName, err)
+	}
+	deleted, _ := result.RowsAffected()
+	return deleted, firstDeleted, nil
+}
+
+func tableAndInstrumentForSubscription(sub ChartSubscription) (string, string, error) {
+	var tableName string
+	var err error
+	if sub.Timeframe == "1m" {
+		if sub.Type == "l9" {
+			tableName, err = tableNameForL9Variety(sub.Variety)
+		} else {
+			tableName, err = tableNameForVariety(sub.Variety)
+		}
+	} else {
+		if sub.Type == "l9" {
+			tableName = l9MMTablePrefix + sanitizeSQLIdent(sub.Variety)
+		} else {
+			tableName = instrumentMMTablePrefix + sanitizeSQLIdent(sub.Variety)
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	targetID := strings.ToLower(strings.TrimSpace(sub.Symbol))
+	if sub.Type == "l9" {
+		targetID = sub.Variety + "l9"
+	}
+	if tableName == "" || targetID == "" {
+		return "", "", fmt.Errorf("invalid replay subscription cleanup target: %+v", sub)
+	}
+	return tableName, targetID, nil
+}
+
 func (s *klineStore) listReplayKlineTables() ([]string, error) {
 	rows, err := s.db.Query(`SHOW TABLES`)
 	if err != nil {

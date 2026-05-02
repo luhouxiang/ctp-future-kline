@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"ctp-future-kline/internal/appmode"
 	"ctp-future-kline/internal/bus"
@@ -73,6 +74,7 @@ func TestHandleReplayStartResetsReplayPaperTradeState(t *testing.T) {
 		t.Fatalf("handleReplayStart status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 
+	waitUntilWebReplayTaskFinished(t, replaySvc, 3*time.Second)
 	account, err := tradeSvc.Account()
 	if err != nil {
 		t.Fatalf("account after replay start failed: %v", err)
@@ -153,6 +155,28 @@ func TestHandleTradeTerminalReturnsAggregatedSnapshot(t *testing.T) {
 	}
 }
 
+func TestReplayTickDirSearchFindsCSVContract(t *testing.T) {
+	tickDir := filepath.Join(t.TempDir(), "ticks")
+	if err := os.MkdirAll(tickDir, 0o755); err != nil {
+		t.Fatalf("mkdir tick dir failed: %v", err)
+	}
+	writeReplayTickCSV(t, filepath.Join(tickDir, "ag2610.csv"), []string{
+		"2026-04-29 21:01:44.122,ag2610,SHFE,20260430,20260429,21:01:44,17847,811,54497,17846,17849,0,0",
+	})
+
+	srv := &Server{}
+	items := srv.searchReplayTickDirContracts(tickDir, "ag2610")
+	if len(items) != 1 {
+		t.Fatalf("tick dir search items = %d, want 1: %+v", len(items), items)
+	}
+	if items[0].Symbol != "ag2610" || items[0].Type != "contract" || items[0].Variety != "ag" {
+		t.Fatalf("unexpected item: %+v", items[0])
+	}
+	if items[0].Exchange != "SHFE" {
+		t.Fatalf("exchange = %q, want SHFE", items[0].Exchange)
+	}
+}
+
 func newReplayServiceForWebTest(t *testing.T) *replay.Service {
 	t.Helper()
 	log := bus.NewFileLog(filepath.Join(t.TempDir(), "bus"), 0)
@@ -176,6 +200,19 @@ func writeReplayTickCSV(t *testing.T, path string, rows []string) {
 	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatalf("write tick csv failed: %v", err)
 	}
+}
+
+func waitUntilWebReplayTaskFinished(t *testing.T, svc *replay.Service, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		status := svc.Status().Status
+		if status == replay.StatusDone || status == replay.StatusError || status == replay.StatusStopped {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("replay task did not finish in %s, status=%s", timeout, svc.Status().Status)
 }
 
 func tradeTestConfig() config.TradeConfig {

@@ -5,6 +5,7 @@ package web
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -1148,13 +1149,134 @@ func (s *Server) handleKlineSearch(w http.ResponseWriter, r *http.Request) {
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
 	page, pageSize := parsePageArgs(r.URL.Query().Get("page"), r.URL.Query().Get("page_size"))
 
-	querySvc := s.queryForMode(s.currentAppMode())
+	mode := s.currentDataMode(r)
+	querySvc := s.queryForMode(mode)
 	resp, err := querySvc.Search(keyword, page, pageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if appmode.Normalize(mode) == appmode.ReplayPaper {
+		resp = s.mergeReplayTickDirSearch(resp, keyword, page, pageSize)
+	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+func (s *Server) mergeReplayTickDirSearch(resp klinequery.SearchResponse, keyword string, page int, pageSize int) klinequery.SearchResponse {
+	keyword = normalizeKlineSearchKeyword(keyword)
+	if keyword == "" {
+		return resp
+	}
+	tickDir := s.currentReplayTickDir()
+	if tickDir == "" {
+		return resp
+	}
+	items := s.searchReplayTickDirContracts(tickDir, keyword)
+	if len(items) == 0 {
+		return resp
+	}
+	merged := append([]klinequery.SearchItem(nil), resp.Items...)
+	seen := make(map[string]struct{}, len(merged)+len(items))
+	for _, item := range merged {
+		seen[searchItemDedupeKey(item)] = struct{}{}
+	}
+	for _, item := range items {
+		key := searchItemDedupeKey(item)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		merged = append(merged, item)
+	}
+	resp.Items = merged
+	if resp.Total < len(merged) {
+		resp.Total = len(merged)
+	}
+	resp.Page = page
+	resp.PageSize = pageSize
+	return resp
+}
+
+func (s *Server) currentReplayTickDir() string {
+	if s.replay != nil {
+		task := s.replay.Status()
+		if tickDir := strings.TrimSpace(task.TickDir); tickDir != "" {
+			return tickDir
+		}
+	}
+	if tickDir := strings.TrimSpace(s.cfg.CTP.FlowPath); tickDir != "" {
+		return filepath.Join(tickDir, "ticks")
+	}
+	return ""
+}
+
+func (s *Server) searchReplayTickDirContracts(tickDir string, keyword string) []klinequery.SearchItem {
+	entries, err := os.ReadDir(tickDir)
+	if err != nil {
+		logger.Info("replay tick dir search skipped", "tick_dir", tickDir, "error", err)
+		return nil
+	}
+	out := make([]klinequery.SearchItem, 0, 16)
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".csv") {
+			continue
+		}
+		symbol := strings.ToLower(strings.TrimSuffix(entry.Name(), filepath.Ext(entry.Name())))
+		symbol = normalizeKlineSearchKeyword(symbol)
+		if symbol == "" || !strings.Contains(symbol, keyword) {
+			continue
+		}
+		variety := inferVarietyBySymbol(symbol, "contract")
+		out = append(out, klinequery.SearchItem{
+			Type:     "contract",
+			Symbol:   symbol,
+			Variety:  variety,
+			Exchange: inferExchangeByReplayTickCSV(tickDir, entry.Name()),
+		})
+	}
+	return out
+}
+
+func inferExchangeByReplayTickCSV(tickDir string, name string) string {
+	path := filepath.Join(tickDir, name)
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 8192)
+	n, _ := f.Read(buf)
+	lines := strings.Split(string(buf[:n]), "\n")
+	if len(lines) < 2 {
+		return ""
+	}
+	header := strings.Split(strings.TrimSpace(lines[0]), ",")
+	record := strings.Split(strings.TrimSpace(lines[1]), ",")
+	for i, col := range header {
+		if strings.EqualFold(strings.TrimSpace(col), "exchange_id") && i < len(record) {
+			return strings.ToUpper(strings.TrimSpace(record[i]))
+		}
+	}
+	return ""
+}
+
+func normalizeKlineSearchKeyword(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.Grow(len(value))
+	for _, ch := range value {
+		if (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') {
+			b.WriteRune(ch)
+		}
+	}
+	return b.String()
+}
+
+func searchItemDedupeKey(item klinequery.SearchItem) string {
+	return strings.ToLower(strings.TrimSpace(item.Type)) + "|" + strings.ToLower(strings.TrimSpace(item.Symbol)) + "|" + strings.ToLower(strings.TrimSpace(item.Variety))
 }
 
 func (s *Server) handleKlineIndexRebuildCurrent(w http.ResponseWriter, r *http.Request) {
@@ -1579,6 +1701,8 @@ func (s *Server) serveIndexWithWebDefaults(w http.ResponseWriter, r *http.Reques
 }
 
 func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	logger.Info("replay start button request received", "method", r.Method, "path", r.URL.Path)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1606,33 +1730,77 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 		req.TickDir = filepath.Join(s.cfg.CTP.FlowPath, "ticks")
 	}
 	req.SharedMetaDSN = strings.TrimSpace(s.sharedDSN)
+	logger.Info(
+		"replay start request normalized",
+		"mode", req.Mode,
+		"speed", req.Speed,
+		"tick_dir", req.TickDir,
+		"full_replay", req.FullReplay,
+		"topics", strings.Join(req.Topics, ","),
+		"sources", strings.Join(req.Sources, ","),
+		"has_start_time", req.StartTime != nil,
+		"has_end_time", req.EndTime != nil,
+	)
+	prepares := make([]replay.StartPrepareFunc, 0, 3)
 	if s.tradePaperReplay != nil {
-		if err := s.tradePaperReplay.ResetPaperReplay(); err != nil {
-			http.Error(w, "reset replay paper account failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		prepares = append(prepares, func(ctx context.Context, req replay.StartRequest) error {
+			_ = ctx
+			stepStartedAt := time.Now()
+			logger.Info("replay prepare begin", "step", "reset_paper_replay_account")
+			if err := s.tradePaperReplay.ResetPaperReplay(); err != nil {
+				return fmt.Errorf("reset replay paper account failed: %w", err)
+			}
+			logger.Info("replay prepare done", "step", "reset_paper_replay_account", "elapsed_ms", time.Since(stepStartedAt).Milliseconds())
+			return nil
+		})
 	}
 	if s.replaySink != nil {
-		if err := s.replaySink.PrepareReplayWindow(req); err != nil {
-			http.Error(w, "prepare replay window failed: "+err.Error(), http.StatusInternalServerError)
-			return
-		}
+		prepares = append(prepares, func(ctx context.Context, req replay.StartRequest) error {
+			_ = ctx
+			stepStartedAt := time.Now()
+			logger.Info("replay prepare begin", "step", "prepare_replay_window")
+			if err := s.replaySink.PrepareReplayWindow(req); err != nil {
+				return fmt.Errorf("prepare replay window failed: %w", err)
+			}
+			logger.Info("replay prepare done", "step", "prepare_replay_window", "elapsed_ms", time.Since(stepStartedAt).Milliseconds())
+			return nil
+		})
 	}
 	if s.chartStream != nil {
-		s.chartStream.ResetReplayState()
+		prepares = append(prepares, func(ctx context.Context, req replay.StartRequest) error {
+			_ = ctx
+			_ = req
+			stepStartedAt := time.Now()
+			logger.Info("replay prepare begin", "step", "reset_chart_replay_state")
+			s.chartStream.ResetReplayState()
+			logger.Info("replay prepare done", "step", "reset_chart_replay_state", "elapsed_ms", time.Since(stepStartedAt).Milliseconds())
+			return nil
+		})
 	}
 	if !req.FullReplay {
 		logger.Info("replay start requested without full replay", "tick_dir", req.TickDir)
 	}
-	task, err := s.replay.Start(req)
+	task, err := s.replay.StartWithPrepare(req, prepares)
 	if err != nil {
+		logger.Info("replay start request rejected", "error", err, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	logger.Info(
+		"replay start response ready",
+		"task_id", task.TaskID,
+		"status", task.Status,
+		"mode", task.Mode,
+		"speed", task.Speed,
+		"prepare_count", len(prepares),
+		"elapsed_ms", time.Since(startedAt).Milliseconds(),
+	)
 	writeJSON(w, http.StatusOK, replay.StartResponse{OK: true, Task: task})
 }
 
 func (s *Server) handleReplayPause(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	logger.Info("replay pause button request received", "method", r.Method, "path", r.URL.Path)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1643,13 +1811,17 @@ func (s *Server) handleReplayPause(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.replay.Pause()
 	if err != nil {
+		logger.Info("replay pause request rejected", "error", err, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	logger.Info("replay pause response ready", "task_id", task.TaskID, "status", task.Status, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	writeJSON(w, http.StatusOK, replay.ActionResponse{OK: true, Task: task})
 }
 
 func (s *Server) handleReplayResume(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	logger.Info("replay resume button request received", "method", r.Method, "path", r.URL.Path)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1660,13 +1832,17 @@ func (s *Server) handleReplayResume(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.replay.Resume()
 	if err != nil {
+		logger.Info("replay resume request rejected", "error", err, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	logger.Info("replay resume response ready", "task_id", task.TaskID, "status", task.Status, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	writeJSON(w, http.StatusOK, replay.ActionResponse{OK: true, Task: task})
 }
 
 func (s *Server) handleReplayStop(w http.ResponseWriter, r *http.Request) {
+	startedAt := time.Now()
+	logger.Info("replay stop button request received", "method", r.Method, "path", r.URL.Path)
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -1677,9 +1853,11 @@ func (s *Server) handleReplayStop(w http.ResponseWriter, r *http.Request) {
 	}
 	task, err := s.replay.Stop()
 	if err != nil {
+		logger.Info("replay stop request rejected", "error", err, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	logger.Info("replay stop response ready", "task_id", task.TaskID, "status", task.Status, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	writeJSON(w, http.StatusOK, replay.ActionResponse{OK: true, Task: task})
 }
 

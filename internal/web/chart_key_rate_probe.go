@@ -4,8 +4,7 @@ import (
 	"sort"
 	"sync"
 	"time"
-
-	"ctp-future-kline/internal/logger"
+	// "ctp-future-kline/internal/logger"
 )
 
 type keyedRateProbe struct {
@@ -69,10 +68,10 @@ func (p *keyedRateProbe) flush() {
 		keys = append(keys, key)
 	}
 	sort.Strings(keys)
-	for _, key := range keys {
-		item := snapshot[key]
-		logger.Debug("chart key rate", "stage", p.stage, "subscription_key", key, "count_per_sec", item.count, "matched_conns", item.matchedConns)
-	}
+	// for _, key := range keys {
+	// 	item := snapshot[key]
+	// 	logger.Debug("chart key rate", "stage", p.stage, "subscription_key", key, "count_per_sec", item.count, "matched_conns", item.matchedConns)
+	// }
 }
 
 var broadcastChartUpdateKeyRateProbe = newKeyedRateProbe("broadcastChartUpdate_by_key")

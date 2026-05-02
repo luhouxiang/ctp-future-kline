@@ -907,6 +907,9 @@ async function runBacktest() {
 
 async function startReplay() {
   if (!canStartReplay.value) return
+  const clickedAt = Date.now()
+  console.info('[replay] start button clicked')
+  addLog('回放启动按钮已点击，正在提交启动请求...')
   if (Number(replayForm.speed) <= 0) {
     addLog('回放启动失败: speed 必须大于 0')
     return
@@ -964,7 +967,7 @@ async function startReplay() {
     const data = await resp.json()
     replaySupported.value = true
     applyReplayState(data.task || {})
-    addLog(`回放已启动: task=${data.task?.task_id || '--'} mode=${data.task?.mode || payload.mode}`)
+    addLog(`回放已启动: task=${data.task?.task_id || '--'} mode=${data.task?.mode || payload.mode} elapsed=${Date.now() - clickedAt}ms`)
   } catch (error) {
     addLog(`回放启动失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -974,6 +977,9 @@ async function startReplay() {
 
 async function pauseReplay() {
   if (!canPauseReplay.value) return
+  const clickedAt = Date.now()
+  console.info('[replay] pause button clicked')
+  addLog('回放暂停按钮已点击，正在提交暂停请求...')
   replayLoading.pausing = true
   try {
     const resp = await fetch('/api/replay/pause', { method: 'POST' })
@@ -984,7 +990,7 @@ async function pauseReplay() {
     }
     const data = await resp.json()
     applyReplayState(data.task || {})
-    addLog(`回放已暂停: task=${data.task?.task_id || '--'}`)
+    addLog(`回放已暂停: task=${data.task?.task_id || '--'} elapsed=${Date.now() - clickedAt}ms`)
   } catch (error) {
     addLog(`回放暂停失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -994,6 +1000,9 @@ async function pauseReplay() {
 
 async function resumeReplay() {
   if (!canResumeReplay.value) return
+  const clickedAt = Date.now()
+  console.info('[replay] resume button clicked')
+  addLog('回放继续按钮已点击，正在提交继续请求...')
   replayLoading.resuming = true
   try {
     const resp = await fetch('/api/replay/resume', { method: 'POST' })
@@ -1004,7 +1013,7 @@ async function resumeReplay() {
     }
     const data = await resp.json()
     applyReplayState(data.task || {})
-    addLog(`回放已继续: task=${data.task?.task_id || '--'}`)
+    addLog(`回放已继续: task=${data.task?.task_id || '--'} elapsed=${Date.now() - clickedAt}ms`)
   } catch (error) {
     addLog(`回放继续失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {
@@ -1014,6 +1023,9 @@ async function resumeReplay() {
 
 async function stopReplay() {
   if (!canStopReplay.value) return
+  const clickedAt = Date.now()
+  console.info('[replay] stop button clicked')
+  addLog('回放停止按钮已点击，正在提交停止请求...')
   replayLoading.stopping = true
   try {
     const resp = await fetch('/api/replay/stop', { method: 'POST' })
@@ -1024,7 +1036,7 @@ async function stopReplay() {
     }
     const data = await resp.json()
     applyReplayState(data.task || {})
-    addLog(`回放已停止: task=${data.task?.task_id || '--'}`)
+    addLog(`回放已停止: task=${data.task?.task_id || '--'} elapsed=${Date.now() - clickedAt}ms`)
   } catch (error) {
     addLog(`回放停止失败: ${error instanceof Error ? error.message : String(error)}`)
   } finally {

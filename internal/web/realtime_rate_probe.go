@@ -4,8 +4,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"ctp-future-kline/internal/logger"
 )
 
 type rateProbe struct {
@@ -32,8 +30,8 @@ func (p *rateProbe) loop() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 	for range ticker.C {
-		n := p.count.Swap(0)
-		logger.Debug("realtime rate", "stage", p.stage, "count_per_sec", n)
+		p.count.Swap(0)
+		//logger.Debug("realtime rate", "stage", p.stage, "count_per_sec", n)
 	}
 }
 

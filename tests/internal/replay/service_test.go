@@ -218,6 +218,51 @@ func TestReplayServiceTickDirIgnoresWrongSourcesByAutoIncludingTickCSV(t *testin
 	}
 }
 
+func TestReplayServiceStartWithPrepareReturnsBeforePrepareCompletes(t *testing.T) {
+	t.Parallel()
+
+	svc := newReplayService(t)
+	prepareStarted := make(chan struct{})
+	allowPrepare := make(chan struct{})
+	var hits atomic.Int64
+	svc.RegisterConsumer("consumer_1", func(_ context.Context, _ bus.BusEvent) error {
+		hits.Add(1)
+		return nil
+	})
+
+	task, err := svc.StartWithPrepare(replay.StartRequest{Mode: "fast"}, []replay.StartPrepareFunc{
+		func(ctx context.Context, _ replay.StartRequest) error {
+			close(prepareStarted)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-allowPrepare:
+				return nil
+			}
+		},
+	})
+	if err != nil {
+		t.Fatalf("start replay failed: %v", err)
+	}
+	if task.Status != replay.StatusRunning {
+		t.Fatalf("status after start = %s, want running", task.Status)
+	}
+	select {
+	case <-prepareStarted:
+	case <-time.After(time.Second):
+		t.Fatal("prepare did not start")
+	}
+	if got := hits.Load(); got != 0 {
+		t.Fatalf("dispatch before prepare completed = %d, want 0", got)
+	}
+
+	close(allowPrepare)
+	waitTaskDone(t, svc, task.TaskID, 3*time.Second)
+	if got := hits.Load(); got != 2 {
+		t.Fatalf("dispatch after prepare completed = %d, want 2", got)
+	}
+}
+
 func newReplayService(t *testing.T) *replay.Service {
 	t.Helper()
 

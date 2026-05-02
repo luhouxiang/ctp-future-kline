@@ -349,6 +349,35 @@ func (s *ChartStream) RemoveInterest(raw ChartSubscription) {
 	s.mu.Unlock()
 }
 
+func (s *ChartStream) ReplaySubscriptionsForSymbol(symbol string, kind string, variety string) []ChartSubscription {
+	if s == nil {
+		return nil
+	}
+	symbol = strings.ToLower(strings.TrimSpace(symbol))
+	kind = strings.ToLower(strings.TrimSpace(kind))
+	variety = strings.ToLower(strings.TrimSpace(variety))
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]ChartSubscription, 0, 6)
+	for _, tf := range []string{"1m", "5m", "15m", "30m", "1h", "1d"} {
+		sub := ChartSubscription{Symbol: symbol, Type: kind, Variety: variety, Timeframe: tf, DataMode: "replay"}
+		if s.interests[ChartSubscriptionKey(sub)] > 0 {
+			out = append(out, sub)
+		}
+	}
+	return out
+}
+
+func DefaultReplaySubscriptionsForSymbol(symbol string, kind string, variety string) []ChartSubscription {
+	defaultChartStreamMu.RLock()
+	stream := defaultChartStream
+	defaultChartStreamMu.RUnlock()
+	if stream == nil {
+		return nil
+	}
+	return stream.ReplaySubscriptionsForSymbol(symbol, kind, variety)
+}
+
 func (s *ChartStream) AddQuoteInterest(raw ChartSubscription) (ChartSubscription, error) {
 	sub, err := NormalizeChartSubscription(raw)
 	if err != nil {

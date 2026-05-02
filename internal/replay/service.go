@@ -109,6 +109,7 @@ type TaskSnapshot struct {
 }
 
 type ConsumerFunc func(ctx context.Context, ev bus.BusEvent) error
+type StartPrepareFunc func(ctx context.Context, req StartRequest) error
 type TaskLifecycle interface {
 	OnTaskFinished(ctx context.Context, snap TaskSnapshot) error
 }
@@ -179,6 +180,14 @@ func (s *Service) RegisterTaskLifecycle(id string, hook TaskLifecycle) {
 // Start 启动一次新的 replay 任务。
 // 如果当前已有运行中的任务，会直接拒绝。
 func (s *Service) Start(req StartRequest) (TaskSnapshot, error) {
+	return s.StartWithPrepare(req, nil)
+}
+
+// StartWithPrepare 启动一次新的 replay 任务，并在后台正式分发事件前按顺序执行准备步骤。
+// 准备步骤可能包含重置模拟账户、清理回放 K 线、重置图表缓存等耗时操作；
+// 这些操作不阻塞 HTTP 启动请求，但一定早于 tick 加载和事件分发。
+func (s *Service) StartWithPrepare(req StartRequest, prepares []StartPrepareFunc) (TaskSnapshot, error) {
+	startedAt := time.Now()
 	req = normalizeStartRequest(req)
 	mode := req.Mode
 	if mode == "" {
@@ -194,20 +203,24 @@ func (s *Service) Start(req StartRequest) (TaskSnapshot, error) {
 	if speed <= 0 {
 		return TaskSnapshot{}, fmt.Errorf("invalid replay speed: %v", speed)
 	}
+	logger.Info(
+		"replay service start requested",
+		"mode", mode,
+		"speed", speed,
+		"tick_dir", req.TickDir,
+		"full_replay", req.FullReplay,
+		"topics", strings.Join(req.Topics, ","),
+		"sources", strings.Join(req.Sources, ","),
+		"prepare_count", len(prepares),
+	)
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.activeID != "" && (s.snapshot.Status == StatusRunning || s.snapshot.Status == StatusPaused) {
+		logger.Info("replay service start rejected", "reason", "task_already_running", "active_task_id", s.activeID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		return TaskSnapshot{}, fmt.Errorf("replay task already running")
 	}
 	s.seenFirstDispatch = make(map[string]struct{})
-	if req.FullReplay && s.dedup != nil {
-		if err := s.dedup.ClearAll(); err != nil {
-			return TaskSnapshot{}, err
-		}
-		// 系统在执行“全量重放”（Full Replay）操作之前，主动清空了用于“去重”（Deduplication）的记录
-		logger.Info("replay dedup records cleared before full replay")
-	}
 	taskID := bus.NewEventID()
 	ctx, cancel := context.WithCancel(context.Background())
 	s.cancel = cancel
@@ -226,7 +239,9 @@ func (s *Service) Start(req StartRequest) (TaskSnapshot, error) {
 		CreatedAt:  time.Now(),
 		StartedAt:  time.Now(),
 	}
-	go s.run(ctx, taskID, req, mode, speed)
+	prepares = append([]StartPrepareFunc(nil), prepares...)
+	go s.run(ctx, taskID, req, mode, speed, prepares)
+	logger.Info("replay service task created", "task_id", taskID, "status", s.snapshot.Status, "elapsed_ms", time.Since(startedAt).Milliseconds())
 	return s.snapshot, nil
 }
 
@@ -328,7 +343,9 @@ func (s *Service) Status() TaskSnapshot {
 
 // run 是 replay 主循环入口。
 // 当配置了 tick_dir 时，实际回放逻辑会转交给 runTickDir；否则从 bus 日志迭代。
-func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode string, speed float64) {
+func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode string, speed float64, prepares []StartPrepareFunc) {
+	startedAt := time.Now()
+	logger.Info("replay task goroutine started", "task_id", taskID, "mode", mode, "speed", speed, "tick_dir", req.TickDir, "prepare_count", len(prepares))
 	defer func() {
 		s.mu.Lock()
 		if s.snapshot.TaskID == taskID && s.snapshot.Status == StatusRunning {
@@ -343,16 +360,45 @@ func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode
 		s.activeID = ""
 		s.cancel = nil
 		s.mu.Unlock()
+		logger.Info("replay task goroutine finished", "task_id", taskID, "status", snapshot.Status, "processed_ticks", snapshot.ProcessedTicks, "dispatched", snapshot.Dispatched, "skipped", snapshot.Skipped, "errors", snapshot.Errors, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		for _, hook := range hooks {
 			_ = hook.OnTaskFinished(context.Background(), snapshot)
 		}
 	}()
 
+	prepareStartedAt := time.Now()
+	logger.Info("replay task prepare start", "task_id", taskID, "full_replay", req.FullReplay, "prepare_count", len(prepares))
+	if err := s.prepareStart(ctx, taskID, req, prepares); err != nil {
+		if err == context.Canceled {
+			logger.Info("replay task prepare canceled", "task_id", taskID, "elapsed_ms", time.Since(prepareStartedAt).Milliseconds())
+			s.mu.Lock()
+			if s.snapshot.TaskID == taskID && s.snapshot.Status != StatusStopped {
+				s.snapshot.Status = StatusStopped
+				s.snapshot.FinishedAt = time.Now()
+			}
+			s.mu.Unlock()
+			return
+		}
+		logger.Info("replay task prepare failed", "task_id", taskID, "error", err, "elapsed_ms", time.Since(prepareStartedAt).Milliseconds())
+		s.mu.Lock()
+		if s.snapshot.TaskID == taskID {
+			s.snapshot.Status = StatusError
+			s.snapshot.LastError = err.Error()
+			s.snapshot.Errors++
+			s.snapshot.FinishedAt = time.Now()
+		}
+		s.mu.Unlock()
+		return
+	}
+	logger.Info("replay task prepare done", "task_id", taskID, "elapsed_ms", time.Since(prepareStartedAt).Milliseconds())
+
 	if req.TickDir != "" {
+		logger.Info("replay task entering tick_dir replay", "task_id", taskID, "tick_dir", req.TickDir)
 		s.runTickDir(ctx, taskID, req, mode, speed)
 		return
 	}
 
+	logger.Info("replay task entering bus replay", "task_id", taskID, "from_cursor", req.FromCursor)
 	opts := bus.ReadOptions{
 		StartTime:  req.StartTime,
 		EndTime:    req.EndTime,
@@ -393,6 +439,7 @@ func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode
 		return err
 	})
 	if err != nil && err != context.Canceled {
+		logger.Info("replay bus replay failed", "task_id", taskID, "error", err)
 		s.mu.Lock()
 		if s.snapshot.TaskID == taskID {
 			s.snapshot.Status = StatusError
@@ -403,11 +450,42 @@ func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode
 		s.mu.Unlock()
 		return
 	}
+	logger.Info("replay bus replay completed", "task_id", taskID, "error", err)
 	s.mu.Lock()
 	if s.snapshot.TaskID == taskID && s.snapshot.Status == StatusStopped {
 		s.snapshot.FinishedAt = time.Now()
 	}
 	s.mu.Unlock()
+}
+
+func (s *Service) prepareStart(ctx context.Context, taskID string, req StartRequest, prepares []StartPrepareFunc) error {
+	if req.FullReplay && s.dedup != nil {
+		if err := s.waitIfPaused(ctx, taskID); err != nil {
+			return err
+		}
+		startedAt := time.Now()
+		logger.Info("replay prepare begin", "task_id", taskID, "step", "clear_dedup_records")
+		if err := s.dedup.ClearAll(); err != nil {
+			return err
+		}
+		// 系统在执行“全量重放”（Full Replay）操作之前，主动清空了用于“去重”（Deduplication）的记录
+		logger.Info("replay prepare done", "task_id", taskID, "step", "clear_dedup_records", "elapsed_ms", time.Since(startedAt).Milliseconds())
+	}
+	for i, prepare := range prepares {
+		if prepare == nil {
+			continue
+		}
+		if err := s.waitIfPaused(ctx, taskID); err != nil {
+			return err
+		}
+		startedAt := time.Now()
+		logger.Info("replay prepare callback begin", "task_id", taskID, "index", i+1, "total", len(prepares))
+		if err := prepare(ctx, req); err != nil {
+			return err
+		}
+		logger.Info("replay prepare callback done", "task_id", taskID, "index", i+1, "total", len(prepares), "elapsed_ms", time.Since(startedAt).Milliseconds())
+	}
+	return nil
 }
 
 // waitIfPaused 在每条事件处理前检查任务是否暂停或停止。

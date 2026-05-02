@@ -129,8 +129,11 @@ type tickPayload struct {
 // 3. 按 fast/realtime 模式推进回放时间
 // 4. 把每一条事件交给 dispatch 分发到各个 consumer
 func (s *Service) runTickDir(ctx context.Context, taskID string, req StartRequest, mode string, speed float64) {
+	loadStartedAt := time.Now()
+	logger.Info("replay tick_dir load begin", "task_id", taskID, "tick_dir", req.TickDir, "mode", mode, "speed", speed)
 	result, err := loadTickCSVEvents(req)
 	if err != nil {
+		logger.Info("replay tick_dir load failed", "task_id", taskID, "tick_dir", req.TickDir, "error", err, "elapsed_ms", time.Since(loadStartedAt).Milliseconds())
 		s.mu.Lock()
 		if s.snapshot.TaskID == taskID {
 			s.snapshot.Status = StatusError
@@ -141,6 +144,17 @@ func (s *Service) runTickDir(ctx context.Context, taskID string, req StartReques
 		s.mu.Unlock()
 		return
 	}
+	logger.Info(
+		"replay tick_dir load done",
+		"task_id", taskID,
+		"tick_dir", req.TickDir,
+		"file_count", result.FileCount,
+		"instrument_count", result.InstrumentCount,
+		"event_count", len(result.Events),
+		"first_sim_time", result.FirstTime,
+		"last_sim_time", result.LastTime,
+		"elapsed_ms", time.Since(loadStartedAt).Milliseconds(),
+	)
 	s.mu.Lock()
 	if s.snapshot.TaskID == taskID {
 		s.snapshot.TickFiles = result.FileCount
@@ -151,9 +165,12 @@ func (s *Service) runTickDir(ctx context.Context, taskID string, req StartReques
 	}
 	s.mu.Unlock()
 
+	replayStartedAt := time.Now()
+	logger.Info("replay tick_dir dispatch begin", "task_id", taskID, "event_count", len(result.Events))
 	var prevOccurred time.Time
 	for _, item := range result.Events {
 		if err := s.waitIfPaused(ctx, taskID); err != nil {
+			logger.Info("replay tick_dir dispatch stopped", "task_id", taskID, "error", err, "processed_ticks", s.Status().ProcessedTicks, "elapsed_ms", time.Since(replayStartedAt).Milliseconds())
 			break
 		}
 		if mode == "realtime" {
@@ -188,6 +205,7 @@ func (s *Service) runTickDir(ctx context.Context, taskID string, req StartReques
 		}
 		s.mu.Unlock()
 		if dispatchErr != nil {
+			logger.Info("replay tick_dir dispatch failed", "task_id", taskID, "instrument_id", item.InstrumentID, "error", dispatchErr, "elapsed_ms", time.Since(replayStartedAt).Milliseconds())
 			s.mu.Lock()
 			if s.snapshot.TaskID == taskID {
 				s.snapshot.Status = StatusError
@@ -199,6 +217,7 @@ func (s *Service) runTickDir(ctx context.Context, taskID string, req StartReques
 			return
 		}
 	}
+	logger.Info("replay tick_dir dispatch completed", "task_id", taskID, "processed_ticks", s.Status().ProcessedTicks, "elapsed_ms", time.Since(replayStartedAt).Milliseconds())
 
 	s.mu.Lock()
 	if s.snapshot.TaskID == taskID && s.snapshot.Status == StatusStopped {
