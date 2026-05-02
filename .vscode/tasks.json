@@ -18,7 +18,8 @@
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
-        "clear": true
+        "clear": true,
+        "showReuseMessage": false
       }
     },
 
@@ -39,7 +40,8 @@
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
-        "clear": true
+        "clear": true,
+        "showReuseMessage": false
       }
     },
     {
@@ -54,7 +56,8 @@
       "presentation": {
         "reveal": "always",
         "panel": "dedicated",
-        "clear": true
+        "clear": true,
+        "showReuseMessage": false
       }
     }
     ,
@@ -84,7 +87,8 @@
       },
       "presentation": {
         "reveal": "always",
-        "panel": "shared"
+        "panel": "shared",
+        "showReuseMessage": false
       },
       "problemMatcher": []
     }

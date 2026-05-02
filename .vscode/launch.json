@@ -30,6 +30,12 @@
       "program": "${workspaceFolder}",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "go: build debug",
+
+      "buildFlags": [
+        "-v",
+        "-x",
+        "-buildvcs=false"
+      ],
       "env": {
         "PATH": "${workspaceFolder};${env:PATH}"
       },
@@ -60,7 +66,6 @@
       "windows": {
         "runtimeExecutable": "npm.cmd"
       },
-      "preLaunchTask": "vue: build all",
       "postDebugTask": "vue: dev stop",
       "console": "internalConsole",
       "outputCapture": "std",
