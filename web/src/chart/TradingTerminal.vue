@@ -90,6 +90,7 @@ const activeChartSubscriptionKey = ref('')
 const dataMode = ref('realtime')
 const appMode = ref('')
 const replayMode = ref('kline')
+const replayKlineAdjustedTime = ref(0)
 const chartSubscribedTicket = ref(null)
 const autoOpenTradeWindow = ref(false)
 const chartHealth = reactive({
@@ -710,6 +711,14 @@ function formatAnchorTime(unixSeconds) {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
 }
 
+function formatScopeEndTime(unixSeconds) {
+  const n = Number(unixSeconds || 0)
+  if (!Number.isFinite(n) || n <= 0) return ''
+  const d = new Date(n * 1000)
+  const p = (v) => String(v).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`
+}
+
 function closeStrategyContextMenu() {
   strategyContextMenu.open = false
   strategyContextMenu.anchor = null
@@ -1294,6 +1303,9 @@ function onSetTool(v) {
 }
 
 function onSetTimeframe(v) {  // K线顶部按钮切换周期时会把周期传到这儿
+  if (replayKlineMode.value && replayKlineAdjustedTime.value > 0) {
+    scope.end = formatScopeEndTime(replayKlineAdjustedTime.value)
+  }
   scope.timeframe = v
 }
 
@@ -1301,6 +1313,8 @@ async function onKlineReplayDateChange(payload) {
   const end = String(payload?.end || '').trim()
   if (!end) return
   scope.end = end
+  const ts = Date.parse(end.replace(' ', 'T'))
+  if (Number.isFinite(ts)) replayKlineAdjustedTime.value = Math.floor(ts / 1000)
   await syncChartScopeAndReload()
 }
 
@@ -1312,6 +1326,8 @@ function onLatestBarChange(bar) {
   if (!replayKlineMode.value) return
   const close = pickQuoteNumber(bar?.close)
   if (close <= 0) return
+  const adjusted = Number(bar?.adjusted_time || 0)
+  if (Number.isFinite(adjusted) && adjusted > 0) replayKlineAdjustedTime.value = adjusted
   quoteSnapshot.value = {
     ...(quoteSnapshot.value || {}),
     symbol: String(bar?.symbol || scope.symbol || '').trim(),

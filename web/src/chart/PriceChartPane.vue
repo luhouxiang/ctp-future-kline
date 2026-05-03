@@ -103,6 +103,7 @@ const klineReplayPanel = reactive({
   x: 70,
   y: 80,
   dragging: false,
+  running: false,
 });
 
 const containerRef = ref(null);
@@ -169,6 +170,8 @@ let realtimeApplyRateTimer = null;
 let realtimeApplyCount = 0;
 let loadRequestSeq = 0;
 let klineReplayPanelDrag = null;
+let klineReplayStatusTimer = null;
+let klineReplayActionSeq = 0;
 
 const drawState = reactive({
   activeTool: "cursor",
@@ -2341,6 +2344,36 @@ async function updateRunningKlineReplaySpeed(intervalMs) {
   }
 }
 
+function applyKlineReplayTaskStatus(task) {
+  const status = String(task?.status || "").trim().toLowerCase();
+  const mode = String(task?.mode || "").trim().toLowerCase();
+  klineReplayPanel.running = mode === "kline" && (status === "running" || status === "paused");
+}
+
+async function refreshKlineReplayStatus() {
+  try {
+    const resp = await fetch("/api/replay/status");
+    if (!resp.ok) return;
+    const data = await resp.json();
+    applyKlineReplayTaskStatus(data?.task || null);
+  } catch {
+    // status polling is only a UI sync aid.
+  }
+}
+
+function ensureKlineReplayStatusPolling() {
+  if (klineReplayStatusTimer) return;
+  klineReplayStatusTimer = setInterval(() => {
+    if (klineReplayPanel.open || klineReplayPanel.running) void refreshKlineReplayStatus();
+  }, 1000);
+}
+
+function stopKlineReplayStatusPolling() {
+  if (!klineReplayStatusTimer) return;
+  clearInterval(klineReplayStatusTimer);
+  klineReplayStatusTimer = null;
+}
+
 function placeKlineReplayPanelFromRect(rect) {
   if (!rect) return;
   klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - 476, Math.round(rect.left)));
@@ -2351,6 +2384,8 @@ function openKlineReplayPanelFromToolbar(evt) {
   placeKlineReplayPanelFromRect(evt?.currentTarget?.getBoundingClientRect?.());
   klineReplayPanel.open = true;
   klineReplayPanel.error = "";
+  ensureKlineReplayStatusPolling();
+  void refreshKlineReplayStatus();
 }
 
 function startKlineReplayPanelDrag(evt) {
@@ -2389,6 +2424,10 @@ function replayAnchorISO(anchor) {
 }
 
 async function startKlineReplayFromPanel() {
+  if (klineReplayPanel.running) {
+    await stopKlineReplayFromPanel();
+    return;
+  }
   const anchor = getSelectedBarAnchor();
   if (!anchor) {
     klineReplayPanel.error = "当前图表没有可用K线";
@@ -2396,14 +2435,17 @@ async function startKlineReplayFromPanel() {
   }
   const intervalMs = clampReplayInterval(klineReplayPanel.intervalMs);
   const clickedAt = Date.now();
+  const actionSeq = ++klineReplayActionSeq;
   console.info("[replay] kline play button clicked", {
     symbol: anchor.symbol,
     timeframe: anchor.timeframe,
     adjusted_time: anchor.adjusted_time,
     interval_ms: intervalMs,
   });
+  klineReplayPanel.running = true;
   klineReplayPanel.loading = true;
   klineReplayPanel.error = "";
+  ensureKlineReplayStatusPolling();
   try {
     const resp = await fetch("/api/replay/start", {
       method: "POST",
@@ -2427,11 +2469,38 @@ async function startKlineReplayFromPanel() {
     });
     if (!resp.ok) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
     console.info("[replay] kline replay started", { elapsed_ms: Date.now() - clickedAt });
-    klineReplayPanel.open = false;
+    const data = await resp.json().catch(() => null);
+    if (actionSeq === klineReplayActionSeq) {
+      applyKlineReplayTaskStatus(data?.task || { status: "running", mode: "kline" });
+    }
   } catch (err) {
-    klineReplayPanel.error = err?.message || String(err);
+    if (actionSeq === klineReplayActionSeq) {
+      klineReplayPanel.running = false;
+      klineReplayPanel.error = err?.message || String(err);
+    }
   } finally {
-    klineReplayPanel.loading = false;
+    if (actionSeq === klineReplayActionSeq) klineReplayPanel.loading = false;
+  }
+}
+
+async function stopKlineReplayFromPanel() {
+  const clickedAt = Date.now();
+  const actionSeq = ++klineReplayActionSeq;
+  console.info("[replay] kline stop button clicked");
+  klineReplayPanel.running = false;
+  klineReplayPanel.loading = true;
+  klineReplayPanel.error = "";
+  try {
+    const resp = await fetch("/api/replay/stop", { method: "POST" });
+    if (!resp.ok) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+    const data = await resp.json().catch(() => null);
+    if (actionSeq === klineReplayActionSeq) applyKlineReplayTaskStatus(data?.task || null);
+    console.info("[replay] kline replay stopped", { elapsed_ms: Date.now() - clickedAt });
+  } catch (err) {
+    if (actionSeq === klineReplayActionSeq) klineReplayPanel.error = err?.message || String(err);
+    void refreshKlineReplayStatus();
+  } finally {
+    if (actionSeq === klineReplayActionSeq) klineReplayPanel.loading = false;
   }
 }
 
@@ -3419,6 +3488,7 @@ onUnmounted(() => {
   }
   stopResize();
   stopKlineReplayPanelDrag();
+  stopKlineReplayStatusPolling();
   if (channelRecalcTimer) {
     clearTimeout(channelRecalcTimer);
     channelRecalcTimer = null;
@@ -3859,8 +3929,14 @@ onUnmounted(() => {
       </div>
       <div class="kline-replay-footer">
         <span>{{ replaySpeedLabel }}</span>
-        <button class="kline-replay-start" :disabled="klineReplayPanel.loading" @click="startKlineReplayFromPanel">
-          {{ klineReplayPanel.loading ? "启动中" : "▶" }}
+        <button
+          class="kline-replay-start"
+          :class="{ running: klineReplayPanel.running }"
+          :title="klineReplayPanel.running ? '停止回放' : '开始回放'"
+          :disabled="klineReplayPanel.loading && !klineReplayPanel.running"
+          @click="startKlineReplayFromPanel"
+        >
+          {{ klineReplayPanel.running ? "■" : "▶" }}
         </button>
       </div>
       <div class="kline-replay-progress"><span></span></div>
@@ -3873,10 +3949,21 @@ onUnmounted(() => {
 .kline-replay-start {
   min-width: 28px;
   height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid #357abd;
   background: #3f8ed8;
   color: #fff;
   cursor: pointer;
+  line-height: 1;
+  padding: 0;
+  font-size: 13px;
+}
+
+.kline-replay-start.running {
+  background: #64748b;
+  border-color: #475569;
 }
 
 .kline-replay-panel {
@@ -3894,9 +3981,12 @@ onUnmounted(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 8px;
+  margin: -8px -8px 8px;
+  padding: 6px 8px;
   font-size: 13px;
   font-weight: 600;
+  background: #d9e0ea;
+  border-bottom: 1px solid #b7c2d0;
   cursor: move;
   user-select: none;
   touch-action: none;
@@ -3909,10 +3999,15 @@ onUnmounted(() => {
 .kline-replay-close {
   width: 22px;
   height: 22px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid #9aa5b5;
   background: #fff;
   color: #111827;
   cursor: pointer;
+  line-height: 1;
+  padding: 0;
 }
 
 .kline-replay-date-row {
@@ -3948,10 +4043,16 @@ onUnmounted(() => {
 
 .kline-replay-speed-row button {
   height: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 1px solid #9aa5b5;
   background: #fff;
   color: #111827;
   cursor: pointer;
+  line-height: 1;
+  padding: 0 8px;
+  text-align: center;
 }
 
 .kline-replay-speed-row button.active {

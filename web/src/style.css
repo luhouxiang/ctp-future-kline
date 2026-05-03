@@ -499,6 +499,16 @@ select {
   color: #ff9fb0;
 }
 
+.tv-kline-replay-btn {
+  min-width: 24px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding-left: 0;
+  padding-right: 0;
+  line-height: 1;
+}
+
 .tv-body {
   display: grid;
   grid-template-columns: 84px minmax(0, 1fr) 4px 280px;
