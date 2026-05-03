@@ -1148,6 +1148,20 @@ async function startImport() {
   }
 
   loadingImport.value = true
+  Object.assign(importState, {
+    session_id: '',
+    total_files: files.value.length,
+    processed_files: 0,
+    total_lines: 0,
+    inserted_rows: 0,
+    overwritten_rows: 0,
+    skipped_rows: 0,
+    skipped_files: 0,
+    error_count: 0,
+    done: false,
+    canceled: false,
+    last_error: '',
+  })
   try {
     addLog(`开始上传文件，共 ${files.value.length} 个`)
     for (const file of files.value) {
@@ -2231,7 +2245,7 @@ onUnmounted(() => {
     </div>
 
     <div class="panel">
-      <h3>加载历史数据</h3>
+      <h3>加载1分钟历史数据</h3>
       <div class="row">
         <input type="file" webkitdirectory directory multiple @change="onSelectFiles" />
         <button :disabled="loadingImport" @click="startImport">{{ loadingImport ? '上传中...' : '开始导入' }}</button>

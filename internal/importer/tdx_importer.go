@@ -234,6 +234,27 @@ func (s *TDXImportSession) Snapshot() Progress {
 	return s.progress
 }
 
+func (s *TDXImportSession) addParsedLines(delta int, notify bool) {
+	if delta <= 0 {
+		return
+	}
+	s.mu.Lock()
+	s.progress.TotalLines += delta
+	p := s.progress
+	s.mu.Unlock()
+	if notify {
+		s.handler.OnProgress(p)
+	}
+}
+
+func (s *TDXImportSession) flushParsedLines(delta *int) {
+	if delta == nil || *delta <= 0 {
+		return
+	}
+	s.addParsedLines(*delta, true)
+	*delta = 0
+}
+
 func (s *TDXImportSession) Start() {
 	logger.Info("import session goroutine start", "session_id", s.id, "file_count", len(s.files))
 	go s.run()
@@ -396,8 +417,11 @@ func (s *TDXImportSession) processFile(db *sql.DB, sharedDB *sql.DB, f UploadFil
 	rawRows := make([]rawTdxRow, 0, len(lines))
 	daySet := make(map[string]time.Time)
 	dataCandidateLines := 0
+	parsedSinceProgress := 0
+	lastParseProgress := time.Now()
 	for i, line := range lines {
 		if s.isDone() {
+			s.flushParsedLines(&parsedSinceProgress)
 			return nil
 		}
 		line = strings.TrimSpace(line)
@@ -430,8 +454,14 @@ func (s *TDXImportSession) processFile(db *sql.DB, sharedDB *sql.DB, f UploadFil
 			}
 		}
 		rawRows = append(rawRows, row)
+		parsedSinceProgress++
+		if time.Since(lastParseProgress) >= time.Second {
+			s.flushParsedLines(&parsedSinceProgress)
+			lastParseProgress = time.Now()
+		}
 		daySet[dayKey] = day
 	}
+	s.flushParsedLines(&parsedSinceProgress)
 
 	fileTradingDays := make([]time.Time, 0, len(daySet))
 	for _, day := range daySet {
@@ -449,12 +479,6 @@ func (s *TDXImportSession) processFile(db *sql.DB, sharedDB *sql.DB, f UploadFil
 		}
 		bars = append(bars, bar)
 	}
-
-	s.mu.Lock()
-	s.progress.TotalLines += len(bars)
-	p := s.progress
-	s.mu.Unlock()
-	s.handler.OnProgress(p)
 
 	if len(bars) == 0 {
 		s.incSkippedFile()

@@ -105,6 +105,6 @@ func (s *Server) ConsumeKlineBar(ctx context.Context, taskID string, req replay.
 			return err
 		}
 	}
-	logger.Debug("kline replay bar consumed", "task_id", taskID, "symbol", sub.Symbol, "timeframe", sub.Timeframe, "adjusted_time", bar.AdjustedTime, "close", bar.Close)
+	// logger.Debug("kline replay bar consumed", "task_id", taskID, "symbol", sub.Symbol, "timeframe", sub.Timeframe, "adjusted_time", bar.AdjustedTime, "close", bar.Close)
 	return nil
 }
