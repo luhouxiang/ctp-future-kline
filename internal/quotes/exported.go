@@ -22,7 +22,6 @@ type ResolvedProduct = ResolvedProductExchange
 
 const (
 	ColInstrumentID = colInstrumentID
-	ColExchange     = colExchange
 	ColDataTime     = colTime
 	ColTime         = colTime
 	ColAdjustedTime = colAdjustedTime

@@ -148,8 +148,8 @@ func TestTDXImportSessionConflictAndOverwriteAll(t *testing.T) {
 
 	var closePrice float64
 	err = store.DB().QueryRow(
-		`SELECT "Close" FROM "future_kline_instrument_1m_sr" WHERE "DataTime"=? AND "InstrumentID"=? AND "Exchange"=? AND "Period"=?`,
-		"2026-01-19 21:02:00", "sr2701", "CZCE", "1m",
+		`SELECT "Close" FROM "future_kline_instrument_1m_sr" WHERE "DataTime"=? AND "InstrumentID"=? AND "Period"=?`,
+		"2026-01-19 21:02:00", "sr2701", "1m",
 	).Scan(&closePrice)
 	if err != nil {
 		t.Fatalf("query updated row failed: %v", err)
@@ -322,8 +322,8 @@ func queryAdjustedTimeByDataTime(t *testing.T, dbPath string, dataTime string) s
 
 	var adjusted time.Time
 	err = store.DB().QueryRow(
-		`SELECT "AdjustedTime" FROM "future_kline_instrument_1m_sr" WHERE "DataTime"=? AND "InstrumentID"=? AND "Exchange"=? AND "Period"=?`,
-		dataTime, "sr2701", "CZCE", "1m",
+		`SELECT "AdjustedTime" FROM "future_kline_instrument_1m_sr" WHERE "DataTime"=? AND "InstrumentID"=? AND "Period"=?`,
+		dataTime, "sr2701", "1m",
 	).Scan(&adjusted)
 	if err != nil {
 		t.Fatalf("query adjusted row failed: %v", err)

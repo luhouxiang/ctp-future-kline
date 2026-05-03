@@ -35,6 +35,8 @@ const DATA_ZONE_MASK_PAD_PX = 12;
 const COLOR_UP = "#ff2f2f";
 const COLOR_DOWN_KLINE_VOLUME = "#49e9f8";
 const COLOR_DOWN_MACD = "#2e7d32";
+const KLINE_REPLAY_MIN_INTERVAL_MS = 10;
+const KLINE_REPLAY_MAX_INTERVAL_MS = 60000;
 
 const props = defineProps({
   scope: { type: Object, required: true },
@@ -61,6 +63,8 @@ const emit = defineEmits([
   "channel-view-change",
   "reversal-view-change",
   "chart-context-menu",
+  "kline-replay-date-change",
+  "latest-bar-change",
 ]);
 
 const state = reactive({
@@ -87,6 +91,18 @@ const state = reactive({
   selectedReversalEventId: "",
   hasMore: true,
   resolvedSymbol: "",
+});
+
+const klineReplayPanel = reactive({
+  open: false,
+  loading: false,
+  error: "",
+  date: defaultReplayDateInput(),
+  slider: intervalToReplaySlider(1000),
+  intervalMs: 1000,
+  x: 70,
+  y: 80,
+  dragging: false,
 });
 
 const containerRef = ref(null);
@@ -152,6 +168,7 @@ let realtimeIndicatorTimer = null;
 let realtimeApplyRateTimer = null;
 let realtimeApplyCount = 0;
 let loadRequestSeq = 0;
+let klineReplayPanelDrag = null;
 
 const drawState = reactive({
   activeTool: "cursor",
@@ -728,6 +745,12 @@ function normalizeBarsAscendingUnique(rawBars, source = "unknown") {
   }
   const times = Array.from(byTime.keys()).sort((a, b) => a - b);
   return times.map((t) => byTime.get(t));
+}
+
+function publishLatestBar() {
+  const bars = Array.isArray(state.bars) ? state.bars : [];
+  const bar = bars.length ? bars[bars.length - 1] : null;
+  emit("latest-bar-change", bar ? buildBarAnchor(bars.length - 1) : null);
 }
 
 function normalizedVolumeValue(raw, bar, source = "unknown") {
@@ -1350,6 +1373,7 @@ async function loadInitialChunk() {
   state.macdHist = [];
   state.hasMore = true;
   renderSeries();
+  publishLatestBar();
   viewVersion.value += 1;
   try {
     const endParam = props.scope.end || fmtTime(Math.floor(Date.now() / 1000));
@@ -1367,6 +1391,7 @@ async function loadInitialChunk() {
         .toLowerCase();
     renderSeries();
     resetViewportToLoadedBars();
+    publishLatestBar();
   } catch (err) {
     if (reqSeq !== loadRequestSeq) return;
     state.error = `闂傚倸鍊风粈渚€骞夐垾鎰佹綎缂備焦蓱閸欏繘鏌熼锝囦汗鐟滅増甯掗悙濠冦亜閹哄棗浜鹃梺缁樺姇閿曨亪寮婚悢鐑樺枂闁告洦鍋勯～鍥⒑闁偛鑻晶顕€鏌涢悤浣哥仩妞ゆ洏鍎靛畷鐔碱敆娴ｈ櫣肖婵＄偑鍊栭崝鎴﹀磿? ${
@@ -1407,6 +1432,7 @@ async function loadOlderChunk() {
     state.hasMore = olderBars.length >= CHUNK_SIZE;
     renderSeries();
     scheduleChannelRecalc();
+    publishLatestBar();
   } finally {
     state.loadingMore = false;
   }
@@ -1875,6 +1901,7 @@ async function reloadRecentWindow() {
     state.bars = normalizeBarsAscendingUnique([...historical, ...latest], "recent_window_merge");
     renderSeries();
     scheduleDerivedSeriesRender();
+    publishLatestBar();
   } catch {
     // ignore
   }
@@ -1907,6 +1934,7 @@ function applyRealtimeBarUpdate(update) {
   state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   updatePrimarySeriesForRealtime();
   scheduleDerivedSeriesRender();
+  publishLatestBar();
 }
 
 function setComposeTicket(payload) {
@@ -1921,6 +1949,7 @@ function resetComposeSession(ticketID) {
   }
   state.bars = [];
   renderSeries();
+  publishLatestBar();
   viewVersion.value += 1;
 }
 
@@ -1956,6 +1985,7 @@ function applyQuoteSynthesis(update, ticketPayload) {
   state.bars = normalizeBarsAscendingUnique(merged, "quote_synthesis");
   updatePrimarySeriesForRealtime();
   scheduleDerivedSeriesRender();
+  publishLatestBar();
 }
 
 function maybeReportComposeMismatch(serverBar, localBar, sub) {
@@ -2219,6 +2249,192 @@ function getSelectedBarAnchor() {
   return buildBarAnchor(selectedBarIndex.value);
 }
 
+function pad2(n) {
+  return String(n).padStart(2, "0");
+}
+
+function defaultReplayDateInput() {
+  const d = new Date();
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+}
+
+function replayDateToEndText(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  const parts = raw.split("-");
+  if (parts.length !== 3) return "";
+  const [year, month, day] = parts.map((x) => Number(x));
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return "";
+  return `${String(year).padStart(4, "0")}-${pad2(month)}-${pad2(day)} 23:59:00`;
+}
+
+function replayDateAnchorISO(value) {
+  const endText = replayDateToEndText(value);
+  if (!endText) return "";
+  const ts = Date.parse(endText.replace(" ", "T"));
+  if (!Number.isFinite(ts)) return "";
+  return new Date(ts).toISOString();
+}
+
+function applyReplayDateToChart() {
+  const end = replayDateToEndText(klineReplayPanel.date);
+  if (!end) {
+    klineReplayPanel.error = "请选择有效日期";
+    return;
+  }
+  klineReplayPanel.error = "";
+  emit("kline-replay-date-change", { end });
+}
+
+function clampReplayInterval(ms) {
+  const n = Number(ms);
+  if (!Number.isFinite(n)) return 1000;
+  return Math.max(KLINE_REPLAY_MIN_INTERVAL_MS, Math.min(KLINE_REPLAY_MAX_INTERVAL_MS, Math.round(n)));
+}
+
+function replaySliderToInterval(value) {
+  const ratio = Math.max(0, Math.min(1000, Number(value) || 0)) / 1000;
+  const minLog = Math.log(KLINE_REPLAY_MAX_INTERVAL_MS);
+  const maxLog = Math.log(KLINE_REPLAY_MIN_INTERVAL_MS);
+  return clampReplayInterval(Math.exp(minLog + ratio * (maxLog - minLog)));
+}
+
+function intervalToReplaySlider(intervalMs) {
+  const interval = clampReplayInterval(intervalMs);
+  const minLog = Math.log(KLINE_REPLAY_MAX_INTERVAL_MS);
+  const maxLog = Math.log(KLINE_REPLAY_MIN_INTERVAL_MS);
+  return Math.round(((Math.log(interval) - minLog) / (maxLog - minLog)) * 1000);
+}
+
+const replaySpeedLabel = computed(() => {
+  const ms = clampReplayInterval(klineReplayPanel.intervalMs);
+  if (ms >= 1000) {
+    const seconds = ms / 1000;
+    return `每${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}秒1根`;
+  }
+  return `每秒${Math.round(1000 / ms)}根`;
+});
+
+function setReplayPreset(intervalMs) {
+  const ms = clampReplayInterval(intervalMs);
+  klineReplayPanel.intervalMs = ms;
+  klineReplayPanel.slider = intervalToReplaySlider(ms);
+  void updateRunningKlineReplaySpeed(ms);
+}
+
+function onReplaySliderInput(evt) {
+  const value = Number(evt?.target?.value || 0);
+  klineReplayPanel.slider = value;
+  klineReplayPanel.intervalMs = replaySliderToInterval(value);
+  void updateRunningKlineReplaySpeed(klineReplayPanel.intervalMs);
+}
+
+async function updateRunningKlineReplaySpeed(intervalMs) {
+  try {
+    await fetch("/api/replay/speed", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ speed: clampReplayInterval(intervalMs) }),
+    });
+  } catch {
+    // best effort; start request still carries the current speed.
+  }
+}
+
+function placeKlineReplayPanelFromRect(rect) {
+  if (!rect) return;
+  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - 476, Math.round(rect.left)));
+  klineReplayPanel.y = Math.max(8, Math.min(window.innerHeight - 230, Math.round(rect.bottom + 6)));
+}
+
+function openKlineReplayPanelFromToolbar(evt) {
+  placeKlineReplayPanelFromRect(evt?.currentTarget?.getBoundingClientRect?.());
+  klineReplayPanel.open = true;
+  klineReplayPanel.error = "";
+}
+
+function startKlineReplayPanelDrag(evt) {
+  if (evt?.button !== undefined && evt.button !== 0) return;
+  evt.preventDefault();
+  klineReplayPanel.dragging = true;
+  klineReplayPanelDrag = {
+    offsetX: evt.clientX - klineReplayPanel.x,
+    offsetY: evt.clientY - klineReplayPanel.y,
+  };
+  window.addEventListener("pointermove", onKlineReplayPanelDragMove);
+  window.addEventListener("pointerup", stopKlineReplayPanelDrag);
+}
+
+function onKlineReplayPanelDragMove(evt) {
+  if (!klineReplayPanelDrag) return;
+  const nextX = evt.clientX - klineReplayPanelDrag.offsetX;
+  const nextY = evt.clientY - klineReplayPanelDrag.offsetY;
+  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - 476, Math.round(nextX)));
+  klineReplayPanel.y = Math.max(8, Math.min(window.innerHeight - 80, Math.round(nextY)));
+}
+
+function stopKlineReplayPanelDrag() {
+  klineReplayPanel.dragging = false;
+  klineReplayPanelDrag = null;
+  window.removeEventListener("pointermove", onKlineReplayPanelDragMove);
+  window.removeEventListener("pointerup", stopKlineReplayPanelDrag);
+}
+
+function replayAnchorISO(anchor) {
+  const fromDate = replayDateAnchorISO(klineReplayPanel.date);
+  if (fromDate) return fromDate;
+  const ts = Number(anchor?.adjusted_time || anchor?.data_time || anchor?.plot_time || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return "";
+  return new Date(ts * 1000).toISOString();
+}
+
+async function startKlineReplayFromPanel() {
+  const anchor = getSelectedBarAnchor();
+  if (!anchor) {
+    klineReplayPanel.error = "当前图表没有可用K线";
+    return;
+  }
+  const intervalMs = clampReplayInterval(klineReplayPanel.intervalMs);
+  const clickedAt = Date.now();
+  console.info("[replay] kline play button clicked", {
+    symbol: anchor.symbol,
+    timeframe: anchor.timeframe,
+    adjusted_time: anchor.adjusted_time,
+    interval_ms: intervalMs,
+  });
+  klineReplayPanel.loading = true;
+  klineReplayPanel.error = "";
+  try {
+    const resp = await fetch("/api/replay/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        mode: "kline",
+        speed: intervalMs,
+        full_replay: true,
+        kline: {
+          symbol: anchor.symbol,
+          type: anchor.type,
+          variety: anchor.variety,
+          timeframe: anchor.timeframe,
+          anchor_adjusted_time: replayAnchorISO(anchor),
+          source_data_mode: "realtime",
+          chunk_size: 300,
+          interval_ms: intervalMs,
+          speed_slider: Math.round(klineReplayPanel.slider),
+        },
+      }),
+    });
+    if (!resp.ok) throw new Error((await resp.text()) || `HTTP ${resp.status}`);
+    console.info("[replay] kline replay started", { elapsed_ms: Date.now() - clickedAt });
+    klineReplayPanel.open = false;
+  } catch (err) {
+    klineReplayPanel.error = err?.message || String(err);
+  } finally {
+    klineReplayPanel.loading = false;
+  }
+}
+
 function getBarAnchorAtClientPoint(clientX) {
   const rect = mainWrapRef.value?.getBoundingClientRect?.();
   if (!rect) return null;
@@ -2247,6 +2463,7 @@ function onCandleContextMenu(evt) {
 defineExpose({
   onDeleteSelected,
   reload: loadInitialChunk,
+  openKlineReplayPanelFromToolbar,
   reloadRecentWindow,
   applyRealtimeBarUpdate,
   applyQuoteSynthesis,
@@ -3201,6 +3418,7 @@ onUnmounted(() => {
     realtimeApplyRateTimer = null;
   }
   stopResize();
+  stopKlineReplayPanelDrag();
   if (channelRecalcTimer) {
     clearTimeout(channelRecalcTimer);
     channelRecalcTimer = null;
@@ -3609,6 +3827,175 @@ onUnmounted(() => {
       </div>
     </div>
   </div>
+  <Teleport to="body">
+    <div
+      v-if="klineReplayPanel.open"
+      class="kline-replay-panel"
+      :style="{ left: `${klineReplayPanel.x}px`, top: `${klineReplayPanel.y}px` }"
+      @click.stop
+    >
+      <div
+        class="kline-replay-panel-title"
+        :class="{ dragging: klineReplayPanel.dragging }"
+        @pointerdown="startKlineReplayPanelDrag"
+      >
+        <span>复盘训练 - K线逐根</span>
+        <button class="kline-replay-close" title="关闭" @pointerdown.stop @click="klineReplayPanel.open = false">×</button>
+      </div>
+      <div class="kline-replay-date-row">
+        <input v-model="klineReplayPanel.date" type="date" />
+        <button @click="applyReplayDateToChart">更换至此日期</button>
+      </div>
+      <div class="kline-replay-speed-row">
+        <button :class="{ active: klineReplayPanel.intervalMs === 5000 }" @click="setReplayPreset(5000)">每5秒1根</button>
+        <button :class="{ active: klineReplayPanel.intervalMs === 3000 }" @click="setReplayPreset(3000)">每3秒1根</button>
+        <button :class="{ active: klineReplayPanel.intervalMs === 1000 }" @click="setReplayPreset(1000)">每秒1根</button>
+        <button :class="{ active: klineReplayPanel.intervalMs === 100 }" @click="setReplayPreset(100)">每秒10根</button>
+      </div>
+      <div class="kline-replay-slider-row">
+        <span>慢</span>
+        <input type="range" min="0" max="1000" step="1" :value="klineReplayPanel.slider" @input="onReplaySliderInput" />
+        <span>快</span>
+      </div>
+      <div class="kline-replay-footer">
+        <span>{{ replaySpeedLabel }}</span>
+        <button class="kline-replay-start" :disabled="klineReplayPanel.loading" @click="startKlineReplayFromPanel">
+          {{ klineReplayPanel.loading ? "启动中" : "▶" }}
+        </button>
+      </div>
+      <div class="kline-replay-progress"><span></span></div>
+      <div v-if="klineReplayPanel.error" class="kline-replay-error">{{ klineReplayPanel.error }}</div>
+    </div>
+  </Teleport>
 </template>
 
+<style scoped>
+.kline-replay-start {
+  min-width: 28px;
+  height: 24px;
+  border: 1px solid #357abd;
+  background: #3f8ed8;
+  color: #fff;
+  cursor: pointer;
+}
 
+.kline-replay-panel {
+  position: fixed;
+  width: 456px;
+  padding: 8px;
+  border: 1px solid #8a96a8;
+  background: #eef2f7;
+  color: #111827;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.24);
+  z-index: 5000;
+}
+
+.kline-replay-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: move;
+  user-select: none;
+  touch-action: none;
+}
+
+.kline-replay-panel-title.dragging {
+  cursor: grabbing;
+}
+
+.kline-replay-close {
+  width: 22px;
+  height: 22px;
+  border: 1px solid #9aa5b5;
+  background: #fff;
+  color: #111827;
+  cursor: pointer;
+}
+
+.kline-replay-date-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.kline-replay-date-row input {
+  height: 26px;
+  border: 1px solid #9aa5b5;
+  background: #fff;
+  color: #111827;
+  padding: 0 6px;
+}
+
+.kline-replay-date-row button {
+  height: 26px;
+  border: 1px solid #9aa5b5;
+  background: #fff;
+  color: #111827;
+  cursor: pointer;
+  padding: 0 12px;
+}
+
+.kline-replay-speed-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.kline-replay-speed-row button {
+  height: 24px;
+  border: 1px solid #9aa5b5;
+  background: #fff;
+  color: #111827;
+  cursor: pointer;
+}
+
+.kline-replay-speed-row button.active {
+  border-color: #2563eb;
+  background: #dbeafe;
+}
+
+.kline-replay-slider-row {
+  display: grid;
+  grid-template-columns: 28px 1fr 28px;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+}
+
+.kline-replay-slider-row input {
+  width: 100%;
+}
+
+.kline-replay-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 8px;
+  font-size: 12px;
+}
+
+.kline-replay-progress {
+  height: 12px;
+  margin-top: 8px;
+  border: 1px solid #b7bfcc;
+  background: #fff;
+}
+
+.kline-replay-progress span {
+  display: block;
+  width: 0;
+  height: 100%;
+  background: #3f8ed8;
+}
+
+.kline-replay-error {
+  margin-top: 6px;
+  color: #b91c1c;
+  font-size: 12px;
+}
+</style>

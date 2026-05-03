@@ -18,7 +18,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func TestReplayServiceFastDispatchAndDedup(t *testing.T) {
+func TestReplayServiceBusDispatchAndDedup(t *testing.T) {
 	t.Parallel()
 
 	svc := newReplayService(t)
@@ -28,7 +28,7 @@ func TestReplayServiceFastDispatchAndDedup(t *testing.T) {
 		return nil
 	})
 
-	task, err := svc.Start(replay.StartRequest{Mode: "fast"})
+	task, err := svc.Start(replay.StartRequest{Mode: "realtime", Speed: 1000})
 	if err != nil {
 		t.Fatalf("start replay failed: %v", err)
 	}
@@ -37,7 +37,7 @@ func TestReplayServiceFastDispatchAndDedup(t *testing.T) {
 		t.Fatalf("dispatch count = %d, want 2", got)
 	}
 
-	task, err = svc.Start(replay.StartRequest{Mode: "fast"})
+	task, err = svc.Start(replay.StartRequest{Mode: "realtime", Speed: 1000})
 	if err != nil {
 		t.Fatalf("start replay second run failed: %v", err)
 	}
@@ -158,7 +158,8 @@ func TestReplayServiceTickDirRealtimeDispatchAndCursor(t *testing.T) {
 	got = got[:0]
 	mu.Unlock()
 	task, err = svc.Start(replay.StartRequest{
-		Mode:    "fast",
+		Mode:    "realtime",
+		Speed:   1000,
 		TickDir: tickDir,
 		FromCursor: &bus.FileCursor{
 			File:   "au2506.csv",
@@ -202,7 +203,8 @@ func TestReplayServiceTickDirIgnoresWrongSourcesByAutoIncludingTickCSV(t *testin
 	})
 
 	task, err := svc.Start(replay.StartRequest{
-		Mode:    "fast",
+		Mode:    "realtime",
+		Speed:   1000,
 		TickDir: tickDir,
 		Sources: []string{"quotes.md"},
 	})
@@ -230,7 +232,7 @@ func TestReplayServiceStartWithPrepareReturnsBeforePrepareCompletes(t *testing.T
 		return nil
 	})
 
-	task, err := svc.StartWithPrepare(replay.StartRequest{Mode: "fast"}, []replay.StartPrepareFunc{
+	task, err := svc.StartWithPrepare(replay.StartRequest{Mode: "realtime", Speed: 1000}, []replay.StartPrepareFunc{
 		func(ctx context.Context, _ replay.StartRequest) error {
 			close(prepareStarted)
 			select {
@@ -261,6 +263,81 @@ func TestReplayServiceStartWithPrepareReturnsBeforePrepareCompletes(t *testing.T
 	if got := hits.Load(); got != 2 {
 		t.Fatalf("dispatch after prepare completed = %d, want 2", got)
 	}
+}
+
+func TestReplayServiceKlineModeLoadsChunksUntilExhausted(t *testing.T) {
+	t.Parallel()
+
+	svc := newReplayService(t)
+	handler := &klineReplayHandlerStub{}
+	base := time.Date(2026, 4, 27, 21, 0, 0, 0, time.Local)
+	for i := 0; i < 351; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		handler.bars = append(handler.bars, replay.KlineBar{
+			Symbol:       "ag2610",
+			Type:         "contract",
+			Variety:      "ag",
+			Timeframe:    "1m",
+			AdjustedTime: ts,
+			DataTime:     ts,
+			Open:         float64(i),
+			High:         float64(i) + 1,
+			Low:          float64(i) - 1,
+			Close:        float64(i),
+		})
+	}
+	svc.RegisterKlineReplayHandler(handler)
+	task, err := svc.Start(replay.StartRequest{
+		Mode: "kline",
+		Kline: &replay.KlineStartRequest{
+			Symbol:             "ag2610",
+			Type:               "contract",
+			Variety:            "ag",
+			Timeframe:          "1m",
+			AnchorAdjustedTime: base,
+			ChunkSize:          300,
+			IntervalMS:         10,
+		},
+	})
+	if err != nil {
+		t.Fatalf("start kline replay failed: %v", err)
+	}
+	waitTaskDone(t, svc, task.TaskID, 10*time.Second)
+	if got := len(handler.consumed); got != 351 {
+		t.Fatalf("consumed bars = %d, want 351", got)
+	}
+	if handler.loadCalls < 2 {
+		t.Fatalf("load calls = %d, want at least 2", handler.loadCalls)
+	}
+	if snap := svc.Status(); snap.Status != replay.StatusDone || snap.ProcessedTicks != 351 {
+		t.Fatalf("snapshot = %+v, want done with 351 processed", snap)
+	}
+}
+
+type klineReplayHandlerStub struct {
+	bars      []replay.KlineBar
+	consumed  []replay.KlineBar
+	loadCalls int
+}
+
+func (h *klineReplayHandlerStub) LoadKlineChunk(_ context.Context, _ replay.KlineStartRequest, afterAdjusted time.Time, limit int) (replay.KlineChunk, error) {
+	h.loadCalls++
+	out := make([]replay.KlineBar, 0, limit)
+	for _, bar := range h.bars {
+		if !bar.AdjustedTime.After(afterAdjusted) {
+			continue
+		}
+		out = append(out, bar)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return replay.KlineChunk{Bars: out, Exhausted: len(out) < limit}, nil
+}
+
+func (h *klineReplayHandlerStub) ConsumeKlineBar(_ context.Context, _ string, _ replay.KlineStartRequest, bar replay.KlineBar) error {
+	h.consumed = append(h.consumed, bar)
+	return nil
 }
 
 func newReplayService(t *testing.T) *replay.Service {

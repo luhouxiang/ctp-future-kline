@@ -21,8 +21,6 @@ type SearchItem struct {
 	Symbol string `json:"symbol"`
 	// Variety 是品种代码。
 	Variety string `json:"variety"`
-	// Exchange 是交易所代码。
-	Exchange string `json:"exchange"`
 	// BarCount 是索引表中记录的 K 线数量。
 	BarCount int64 `json:"bar_count"`
 	// UpdatedAt 是索引最近一次更新时间。
@@ -61,10 +59,9 @@ type MACDPoint struct {
 }
 
 type BarsMeta struct {
-	Symbol   string `json:"symbol"`
-	Type     string `json:"type"`
-	Variety  string `json:"variety"`
-	Exchange string `json:"exchange"`
+	Symbol  string `json:"symbol"`
+	Type    string `json:"type"`
+	Variety string `json:"variety"`
 }
 
 type BarsResponse struct {
@@ -86,8 +83,7 @@ type searchTable struct {
 }
 
 type symbolRow struct {
-	Symbol   string
-	Exchange string
+	Symbol string
 }
 
 func NewService(dbPath string, index *searchindex.Manager) *Service {
@@ -173,7 +169,7 @@ func (s *Service) ListContracts(page int, pageSize int) (SearchResponse, error) 
 
 	offset := (page - 1) * pageSize
 	rows, err := db.Query(`
-SELECT symbol,variety,exchange,bar_count,updated_at,table_name
+SELECT symbol,variety,bar_count,updated_at,table_name
 FROM kline_search_index
 WHERE kind='contract'
 ORDER BY updated_at DESC, symbol ASC
@@ -188,19 +184,17 @@ LIMIT ? OFFSET ?`, pageSize, offset)
 		var (
 			symbol   string
 			variety  string
-			exchange string
 			barCount int64
 			updated  time.Time
 			table    string
 		)
-		if err := rows.Scan(&symbol, &variety, &exchange, &barCount, &updated, &table); err != nil {
+		if err := rows.Scan(&symbol, &variety, &barCount, &updated, &table); err != nil {
 			return SearchResponse{}, fmt.Errorf("scan contract row failed: %w", err)
 		}
 		items = append(items, SearchItem{
 			Type:      "contract",
 			Symbol:    displaySymbol(symbol, "contract"),
 			Variety:   variety,
-			Exchange:  exchange,
 			BarCount:  barCount,
 			UpdatedAt: updated.Format("2006-01-02 15:04:05"),
 			TableName: table,
@@ -292,25 +286,22 @@ func (s *Service) BarsByEnd(symbol string, kind string, variety string, timefram
 	adjustedExpr := `"AdjustedTime"`
 
 	query := fmt.Sprintf(`
-SELECT %s AS "qtime","Open","High","Low","Close","Volume","OpenInterest","Exchange",%s AS "__data_time",%s AS "__sort_time"
+SELECT %s AS "qtime","Open","High","Low","Close","Volume","OpenInterest",%s AS "__data_time",%s AS "__sort_time"
 FROM "%s"
 WHERE (
     lower("InstrumentID") = ?
  OR lower("InstrumentID") = ?
 )
   AND "Period" = ?
-  AND %s >= ?
   AND %s <= ?
 ORDER BY "__sort_time" DESC
-LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr, adjustedExpr)
+LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr)
 
-	loadRows := func(endTime time.Time) ([]KlineBar, string, error) {
-		startTime := endTime.AddDate(0, -1, 0)
+	loadRows := func(endTime time.Time) ([]KlineBar, error) {
 		args := []any{
 			primarySymbol,
 			secondarySymbol,
 			queryPeriod,
-			startTime.Format("2006-01-02 15:04:00"),
 			endTime.Format("2006-01-02 15:04:00"),
 			limit,
 		}
@@ -319,25 +310,22 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr, adjust
 			"period", queryPeriod,
 			"args_symbol", primarySymbol,
 			"args_symbol_fallback", secondarySymbol,
-			"args_start", startTime.Format("2006-01-02 15:04:00"),
 			"args_end", endTime.Format("2006-01-02 15:04:00"),
 			"args_limit", limit,
 			"sql", renderExecutableSQL(query, args...),
 		)
 		rows, qErr := db.Query(query, args...)
 		if qErr != nil {
-			return nil, "", qErr
+			return nil, qErr
 		}
 		defer rows.Close()
 
 		var bars []KlineBar
-		exchange := item.Exchange
 		for rows.Next() {
 			var ts, dataTs, sortTime time.Time
-			var ex string
 			var bar KlineBar
-			if err := rows.Scan(&ts, &bar.Open, &bar.High, &bar.Low, &bar.Close, &bar.Volume, &bar.OpenInterest, &ex, &dataTs, &sortTime); err != nil {
-				return nil, "", err
+			if err := rows.Scan(&ts, &bar.Open, &bar.High, &bar.Low, &bar.Close, &bar.Volume, &bar.OpenInterest, &dataTs, &sortTime); err != nil {
+				return nil, err
 			}
 			bar.AdjustedTime = ts.Unix()
 			if dataTs.IsZero() {
@@ -346,12 +334,9 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr, adjust
 				bar.DataTime = dataTs.Unix()
 			}
 			bars = append(bars, bar)
-			if ex != "" {
-				exchange = ex
-			}
 		}
 		if err := rows.Err(); err != nil {
-			return nil, "", err
+			return nil, err
 		}
 		if len(bars) > 0 {
 			logger.Info("kline query result",
@@ -363,10 +348,10 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr, adjust
 		} else {
 			logger.Info("kline query result empty", "table", queryTable, "period", queryPeriod)
 		}
-		return bars, exchange, nil
+		return bars, nil
 	}
 
-	bars, exchange, err := loadRows(end)
+	bars, err := loadRows(end)
 	if err != nil {
 		return BarsResponse{}, fmt.Errorf("query bars failed: %w", err)
 	}
@@ -396,13 +381,134 @@ LIMIT ?`, adjustedExpr, timeExpr, adjustedExpr, queryTable, adjustedExpr, adjust
 
 	return BarsResponse{
 		Meta: BarsMeta{
-			Symbol:   displaySymbol(item.Symbol, kind),
-			Type:     kind,
-			Variety:  item.Variety,
-			Exchange: exchange,
+			Symbol:  displaySymbol(item.Symbol, kind),
+			Type:    kind,
+			Variety: item.Variety,
 		},
 		Bars: bars,
 		MACD: macd,
+	}, nil
+}
+
+func (s *Service) BarsFrom(symbol string, kind string, variety string, timeframe string, afterAdjusted time.Time, limit int) (BarsResponse, error) {
+	afterAdjusted = afterAdjusted.In(time.Local)
+	kind = normalizeKlineKind(kind, symbol)
+	if kind != "contract" && kind != "l9" {
+		return BarsResponse{}, fmt.Errorf("invalid type: %s", kind)
+	}
+	tf, _, err := normalizeTimeframe(timeframe)
+	if err != nil {
+		return BarsResponse{}, err
+	}
+	if limit <= 0 {
+		limit = 300
+	}
+	if limit > 300 {
+		limit = 300
+	}
+	item, err := s.index.RefreshBySymbol(symbol, kind, variety)
+	if err != nil {
+		if !errors.Is(err, searchindex.ErrBusy) {
+			return BarsResponse{}, err
+		}
+		item, err = s.index.LookupBySymbol(symbol, kind, variety)
+		if err != nil {
+			return BarsResponse{}, err
+		}
+	}
+	if item == nil {
+		return BarsResponse{}, sql.ErrNoRows
+	}
+	symbolCandidates := instrumentIDCandidates(item.Symbol, item.Variety, kind)
+	if len(symbolCandidates) == 0 {
+		return BarsResponse{}, sql.ErrNoRows
+	}
+	primarySymbol := symbolCandidates[0]
+	secondarySymbol := symbolCandidates[0]
+	if len(symbolCandidates) > 1 {
+		secondarySymbol = symbolCandidates[1]
+	}
+	db, err := openQueryDB(s.dbPath)
+	if err != nil {
+		return BarsResponse{}, fmt.Errorf("open mysql failed: %w", err)
+	}
+	defer db.Close()
+
+	queryTable := item.TableName
+	queryPeriod := "1m"
+	if tf != "1m" {
+		sessionDB, sessOpenErr := openQueryDB(s.sessionDBPath)
+		if sessOpenErr != nil {
+			return BarsResponse{}, fmt.Errorf("open session mysql failed: %w", sessOpenErr)
+		}
+		defer sessionDB.Close()
+		if _, sessErr := ensureCompletedTradingSession(sessionDB, item.Variety); sessErr != nil {
+			return BarsResponse{}, sessErr
+		}
+		if kind == "l9" {
+			queryTable, err = mmkline.TableNameForL9MMVariety(item.Variety)
+		} else {
+			queryTable, err = mmkline.TableNameForInstrumentMMVariety(item.Variety)
+		}
+		if err != nil {
+			return BarsResponse{}, err
+		}
+		queryPeriod = tf
+	}
+
+	query := fmt.Sprintf(`
+SELECT "AdjustedTime" AS "qtime","Open","High","Low","Close","Volume","OpenInterest","DataTime" AS "__data_time"
+FROM "%s"
+WHERE (
+    lower("InstrumentID") = ?
+ OR lower("InstrumentID") = ?
+)
+  AND "Period" = ?
+  AND "AdjustedTime" > ?
+ORDER BY "AdjustedTime" ASC
+LIMIT ?`, queryTable)
+	args := []any{primarySymbol, secondarySymbol, queryPeriod, afterAdjusted.Format("2006-01-02 15:04:00"), limit}
+	logger.Info("kline query from execute",
+		"table", queryTable,
+		"period", queryPeriod,
+		"args_symbol", primarySymbol,
+		"args_symbol_fallback", secondarySymbol,
+		"args_after_adjusted", afterAdjusted.Format("2006-01-02 15:04:00"),
+		"args_limit", limit,
+	)
+	rows, err := db.Query(query, args...)
+	if err != nil {
+		return BarsResponse{}, fmt.Errorf("query bars from failed: %w", err)
+	}
+	defer rows.Close()
+	bars := make([]KlineBar, 0, limit)
+	for rows.Next() {
+		var ts, dataTs time.Time
+		var bar KlineBar
+		if err := rows.Scan(&ts, &bar.Open, &bar.High, &bar.Low, &bar.Close, &bar.Volume, &bar.OpenInterest, &dataTs); err != nil {
+			return BarsResponse{}, err
+		}
+		bar.AdjustedTime = ts.Unix()
+		if dataTs.IsZero() {
+			bar.DataTime = bar.AdjustedTime
+		} else {
+			bar.DataTime = dataTs.Unix()
+		}
+		bars = append(bars, bar)
+	}
+	if err := rows.Err(); err != nil {
+		return BarsResponse{}, err
+	}
+	if len(bars) == 0 {
+		return BarsResponse{}, sql.ErrNoRows
+	}
+	return BarsResponse{
+		Meta: BarsMeta{
+			Symbol:  displaySymbol(item.Symbol, kind),
+			Type:    kind,
+			Variety: item.Variety,
+		},
+		Bars: bars,
 	}, nil
 }
 
@@ -436,7 +542,6 @@ func (s *Service) RebuildSearchItem(item SearchItem) (SearchItem, bool, error) {
 			Type:      item.Type,
 			Symbol:    item.Symbol,
 			Variety:   item.Variety,
-			Exchange:  item.Exchange,
 			TableName: item.TableName,
 		}, false, nil
 	}
@@ -444,7 +549,6 @@ func (s *Service) RebuildSearchItem(item SearchItem) (SearchItem, bool, error) {
 		Type:      meta.Kind,
 		Symbol:    displaySymbol(meta.Symbol, meta.Kind),
 		Variety:   meta.Variety,
-		Exchange:  meta.Exchange,
 		BarCount:  meta.BarCount,
 		UpdatedAt: meta.UpdatedAt.Format("2006-01-02 15:04:05"),
 		TableName: meta.TableName,
@@ -487,15 +591,13 @@ func (s *Service) searchItemsFromIndex(db *sql.DB, keyword string) ([]SearchItem
 	prefixLike := keyword + "%"
 	containsLike := "%" + keyword + "%"
 	rows, err := db.Query(`
-SELECT symbol,variety,exchange,kind,bar_count,updated_at,table_name,
+SELECT symbol,variety,kind,bar_count,updated_at,table_name,
        CASE
          WHEN symbol_norm LIKE ? THEN 0
          WHEN symbol_norm LIKE ? THEN 1
          WHEN variety LIKE ? THEN 2
          WHEN variety LIKE ? THEN 3
-         WHEN lower(exchange) LIKE ? THEN 4
-         WHEN lower(exchange) LIKE ? THEN 5
-         ELSE 6
+         ELSE 4
        END AS match_rank,
        CASE WHEN kind='l9' THEN 0 ELSE 1 END AS kind_rank
 FROM kline_search_index
@@ -503,13 +605,7 @@ WHERE symbol_norm LIKE ?
    OR symbol_norm LIKE ?
    OR variety LIKE ?
    OR variety LIKE ?
-   OR lower(exchange) LIKE ?
-   OR lower(exchange) LIKE ?
 ORDER BY match_rank ASC, kind_rank ASC, updated_at DESC, symbol_norm ASC`,
-		prefixLike,
-		containsLike,
-		prefixLike,
-		containsLike,
 		prefixLike,
 		containsLike,
 		prefixLike,
@@ -535,7 +631,6 @@ ORDER BY match_rank ASC, kind_rank ASC, updated_at DESC, symbol_norm ASC`,
 		if err := rows.Scan(
 			&item.Symbol,
 			&item.Variety,
-			&item.Exchange,
 			&item.Type,
 			&item.BarCount,
 			&updatedAt,
@@ -547,7 +642,6 @@ ORDER BY match_rank ASC, kind_rank ASC, updated_at DESC, symbol_norm ASC`,
 		}
 		item.Symbol = displaySymbol(item.Symbol, item.Type)
 		item.UpdatedAt = updatedAt.Format("2006-01-02 15:04:05")
-		item.Exchange = strings.ToUpper(strings.TrimSpace(item.Exchange))
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
@@ -572,7 +666,7 @@ func (s *Service) defaultSearchItemsFromIndex(db *sql.DB, limit int) ([]SearchIt
 			return nil
 		}
 		rows, err := db.Query(`
-SELECT symbol,variety,exchange,kind,bar_count,updated_at,table_name
+SELECT symbol,variety,kind,bar_count,updated_at,table_name
 FROM kline_search_index
 WHERE kind = ?
 ORDER BY updated_at DESC, symbol_norm ASC
@@ -590,7 +684,6 @@ LIMIT ?`, kind, limit-len(items))
 			if err := rows.Scan(
 				&item.Symbol,
 				&item.Variety,
-				&item.Exchange,
 				&item.Type,
 				&item.BarCount,
 				&updatedAt,
@@ -600,7 +693,6 @@ LIMIT ?`, kind, limit-len(items))
 			}
 			item.Symbol = displaySymbol(item.Symbol, item.Type)
 			item.UpdatedAt = updatedAt.Format("2006-01-02 15:04:05")
-			item.Exchange = strings.ToUpper(strings.TrimSpace(item.Exchange))
 			items = append(items, item)
 		}
 		return rows.Err()
@@ -659,7 +751,6 @@ func (s *Service) searchCandidatesFromTables(db *sql.DB, tables []searchTable, k
 				Type:      "contract",
 				Symbol:    displaySymbol(row.Symbol, "contract"),
 				Variety:   table.Variety,
-				Exchange:  row.Exchange,
 				TableName: table.Name,
 			})
 			if l9Table, ok := l9Tables[table.Variety]; ok {
@@ -757,9 +848,6 @@ func (s *Service) fillIndexMetadata(items []SearchItem) error {
 		}
 		items[idx].BarCount = meta.BarCount
 		items[idx].UpdatedAt = meta.UpdatedAt.Format("2006-01-02 15:04:05")
-		if items[idx].Exchange == "" {
-			items[idx].Exchange = meta.Exchange
-		}
 		if items[idx].TableName == "" {
 			items[idx].TableName = meta.TableName
 		}
@@ -838,7 +926,7 @@ func normalizeSearchVariety(value string) string {
 
 func fetchFirstSymbol(db *sql.DB, tableName string, kind string, variety string) (*SearchItem, error) {
 	rows, err := db.Query(`
-SELECT lower("InstrumentID"), MAX("Exchange")
+SELECT lower("InstrumentID")
 FROM "` + tableName + `"
 GROUP BY lower("InstrumentID")
 ORDER BY lower("InstrumentID")
@@ -850,15 +938,14 @@ LIMIT 1`)
 	if !rows.Next() {
 		return nil, nil
 	}
-	var symbol, exchange string
-	if err := rows.Scan(&symbol, &exchange); err != nil {
+	var symbol string
+	if err := rows.Scan(&symbol); err != nil {
 		return nil, fmt.Errorf("scan first symbol from %s failed: %w", tableName, err)
 	}
 	return &SearchItem{
 		Type:      kind,
 		Symbol:    displaySymbol(symbol, kind),
 		Variety:   variety,
-		Exchange:  strings.ToUpper(strings.TrimSpace(exchange)),
 		TableName: tableName,
 	}, nil
 }
@@ -870,13 +957,13 @@ func fetchContractSymbols(db *sql.DB, tableName string, digits string) ([]symbol
 	)
 	if digits == "" {
 		rows, err = db.Query(`
-SELECT lower("InstrumentID"), MAX("Exchange")
+SELECT lower("InstrumentID")
 FROM "` + tableName + `"
 GROUP BY lower("InstrumentID")
 ORDER BY lower("InstrumentID")`)
 	} else {
 		rows, err = db.Query(`
-SELECT lower("InstrumentID"), MAX("Exchange")
+SELECT lower("InstrumentID")
 FROM "`+tableName+`"
 WHERE lower("InstrumentID") LIKE ?
 GROUP BY lower("InstrumentID")
@@ -890,10 +977,9 @@ ORDER BY lower("InstrumentID")`, "%"+digits+"%")
 	out := make([]symbolRow, 0, 64)
 	for rows.Next() {
 		var row symbolRow
-		if err := rows.Scan(&row.Symbol, &row.Exchange); err != nil {
+		if err := rows.Scan(&row.Symbol); err != nil {
 			return nil, fmt.Errorf("scan contract symbol from %s failed: %w", tableName, err)
 		}
-		row.Exchange = strings.ToUpper(strings.TrimSpace(row.Exchange))
 		out = append(out, row)
 	}
 	if err := rows.Err(); err != nil {

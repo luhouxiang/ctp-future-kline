@@ -64,8 +64,8 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 	}
 
 	query := fmt.Sprintf(
-		`SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s" FROM "future_kline_instrument_1m_rb" ORDER BY "%s"`,
-		testkit.ColInstrumentID, testkit.ColExchange, testkit.ColTime, testkit.ColAdjustedTime, testkit.ColPeriod, testkit.ColOpen, testkit.ColHigh, testkit.ColLow, testkit.ColClose, testkit.ColVolume, testkit.ColOpenInterest, testkit.ColSettlement, testkit.ColTime,
+		`SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s" FROM "future_kline_instrument_1m_rb" ORDER BY "%s"`,
+		testkit.ColInstrumentID, testkit.ColTime, testkit.ColAdjustedTime, testkit.ColPeriod, testkit.ColOpen, testkit.ColHigh, testkit.ColLow, testkit.ColClose, testkit.ColVolume, testkit.ColOpenInterest, testkit.ColSettlement, testkit.ColTime,
 	)
 	rows, err := store.DB().Query(query)
 	if err != nil {
@@ -75,7 +75,6 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 
 	type row struct {
 		code       string
-		exchange   string
 		tm         time.Time
 		adjusted   time.Time
 		period     string
@@ -90,7 +89,7 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 	var got []row
 	for rows.Next() {
 		var r row
-		if err := rows.Scan(&r.code, &r.exchange, &r.tm, &r.adjusted, &r.period, &r.open, &r.high, &r.low, &r.close, &r.volume, &r.openInt, &r.settlement); err != nil {
+		if err := rows.Scan(&r.code, &r.tm, &r.adjusted, &r.period, &r.open, &r.high, &r.low, &r.close, &r.volume, &r.openInt, &r.settlement); err != nil {
 			t.Fatalf("scan kline row failed: %v", err)
 		}
 		got = append(got, r)
@@ -102,8 +101,8 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 		t.Fatalf("row count = %d, want 2", len(got))
 	}
 
-	if got[0].code != "rb2405" || got[0].exchange != "SHFE" || got[0].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[0].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[0].period != "1m" {
-		t.Fatalf("first row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:31:00, period 1m", got[0])
+	if got[0].code != "rb2405" || got[0].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[0].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:31:00" || got[0].period != "1m" {
+		t.Fatalf("first row meta = %+v, want code rb2405, time+adjusted 2026-02-10 09:31:00, period 1m", got[0])
 	}
 	if got[0].open != 100 || got[0].high != 102 || got[0].low != 100 || got[0].close != 102 {
 		t.Fatalf("first row ohlc = (%v,%v,%v,%v), want (100,102,100,102)", got[0].open, got[0].high, got[0].low, got[0].close)
@@ -112,8 +111,8 @@ func TestMdSpiAggregatesAndStoresOneMinuteKline(t *testing.T) {
 		t.Fatalf("first row vol/oi/settlement = (%d,%v,%v), want (0,201,99.5)", got[0].volume, got[0].openInt, got[0].settlement)
 	}
 
-	if got[1].code != "rb2405" || got[1].exchange != "SHFE" || got[1].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:32:00" || got[1].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:32:00" || got[1].period != "1m" {
-		t.Fatalf("second row meta = %+v, want code rb2405, exchange SHFE, time+adjusted 2026-02-10 09:32:00, period 1m", got[1])
+	if got[1].code != "rb2405" || got[1].tm.Format("2006-01-02 15:04:05") != "2026-02-10 09:32:00" || got[1].adjusted.Format("2006-01-02 15:04:05") != "2026-02-10 09:32:00" || got[1].period != "1m" {
+		t.Fatalf("second row meta = %+v, want code rb2405, time+adjusted 2026-02-10 09:32:00, period 1m", got[1])
 	}
 	if got[1].open != 101 || got[1].high != 101 || got[1].low != 101 || got[1].close != 101 {
 		t.Fatalf("second row ohlc = (%v,%v,%v,%v), want (101,101,101,101)", got[1].open, got[1].high, got[1].low, got[1].close)

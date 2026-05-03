@@ -13,6 +13,7 @@ const props = defineProps({
   orderForm: { type: Object, required: true },
   terminal: { type: Object, default: () => ({}) },
   quoteSnapshot: { type: Object, default: () => ({}) },
+  replayKlineMode: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -61,6 +62,18 @@ const PRICE_MODE_OPTIONS = [
   { key: 'opponent', label: '对手价' },
   { key: 'market', label: '市价' },
 ]
+
+const priceModeOptions = computed(() => (
+  props.replayKlineMode ? [{ key: 'latest', label: '最新价' }] : PRICE_MODE_OPTIONS
+))
+
+watch(
+  () => props.replayKlineMode,
+  (enabled) => {
+    if (enabled && !priceFrozen.value) selectedPriceMode.value = 'latest'
+  },
+  { immediate: true },
+)
 
 watch(
   () => props.visible,
@@ -266,6 +279,7 @@ function resolveSidePrice(kind) {
   if (priceFrozen.value) return pickQuoteNumber(frozenLatestPrice.value)
   const quote = props.quoteSnapshot || {}
   const latest = latestPriceNow()
+  if (props.replayKlineMode) return latest
   const bid1 = pickQuoteNumber(quote?.bid_price1)
   const ask1 = pickQuoteNumber(quote?.ask_price1)
   const lowerLimit = pickQuoteNumber(quote?.lower_limit_price)
@@ -304,7 +318,7 @@ function sideDeltaText(kind) {
 }
 
 const selectedPriceModeLabel = computed(() => (
-  PRICE_MODE_OPTIONS.find((item) => item.key === selectedPriceMode.value)?.label || '最新价'
+  priceModeOptions.value.find((item) => item.key === selectedPriceMode.value)?.label || '最新价'
 ))
 
 function priceStepTick() {
@@ -345,6 +359,11 @@ const lowerLimitDisplay = computed(() => {
 })
 
 function togglePriceModeMenu() {
+  if (props.replayKlineMode) {
+    selectedPriceMode.value = 'latest'
+    priceFrozen.value = false
+    manualPriceInput.value = ''
+  }
   priceModeMenuOpen.value = !priceModeMenuOpen.value
 }
 
@@ -431,6 +450,7 @@ function reverseOpenDirectionByPosition(item) {
 function resolveSidePriceByMode(mode, side) {
   const quote = props.quoteSnapshot || {}
   const latest = latestPriceNow()
+  if (props.replayKlineMode) return latest
   const bid1 = pickQuoteNumber(quote?.bid_price1)
   const ask1 = pickQuoteNumber(quote?.ask_price1)
   const lowerLimit = pickQuoteNumber(quote?.lower_limit_price)
@@ -694,7 +714,7 @@ function fundsRows() {
                   </div>
                   <div v-if="priceModeMenuOpen" class="trade-classic-price-menu">
                     <button
-                      v-for="mode in PRICE_MODE_OPTIONS"
+                      v-for="mode in priceModeOptions"
                       :key="mode.key"
                       type="button"
                       class="trade-classic-price-menu-item"
@@ -731,13 +751,16 @@ function fundsRows() {
               <button type="button" disabled>连续追</button>
             </div>
 
-            <div class="trade-classic-instrument">{{ instrumentInfoText }}</div>
+            <div class="trade-classic-instrument">
+              {{ instrumentInfoText }}
+              <span v-if="props.replayKlineMode" class="trade-classic-mode-note">K线回放：仅最新价/指定价</span>
+            </div>
             <div class="trade-classic-placeholder-box"></div>
 
             <div class="trade-classic-links">
-              <button type="button" class="linkish">止损开仓</button>
-              <button type="button" class="linkish">画线下单</button>
-              <button type="button" class="linkish">添加条件单</button>
+              <button type="button" class="linkish" :disabled="props.replayKlineMode">止损开仓</button>
+              <button type="button" class="linkish" :disabled="props.replayKlineMode">画线下单</button>
+              <button type="button" class="linkish" :disabled="props.replayKlineMode">添加条件单</button>
               <button type="button" class="linkish" @click="emit('adjust-cashflow')">出入金</button>
               <button type="button" class="linkish" @click="emit('adjust-fee')">费用调整</button>
             </div>
@@ -1518,6 +1541,11 @@ function fundsRows() {
   color: #1b2a38;
 }
 
+.trade-classic-mode-note {
+  margin-left: 10px;
+  color: #8a5a00;
+}
+
 .trade-classic-placeholder-box {
   height: 30px;
   margin-top: 4px;
@@ -1538,6 +1566,13 @@ function fundsRows() {
   min-height: 18px;
   font-size: 11px;
   cursor: pointer;
+}
+
+.linkish:disabled,
+.linkish-inline:disabled {
+  color: #6b7280;
+  cursor: not-allowed;
+  opacity: 0.65;
 }
 
 .trade-classic-right {

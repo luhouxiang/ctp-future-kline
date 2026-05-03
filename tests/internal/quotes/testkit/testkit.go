@@ -12,7 +12,6 @@ type TickEvent = quotes.TickEvent
 
 const (
 	ColInstrumentID = quotes.ColInstrumentID
-	ColExchange     = quotes.ColExchange
 	ColTime         = quotes.ColTime
 	ColAdjustedTime = quotes.ColAdjustedTime
 	ColPeriod       = quotes.ColPeriod

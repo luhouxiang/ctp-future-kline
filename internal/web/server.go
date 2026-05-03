@@ -246,6 +246,9 @@ func NewServer(cfg config.AppConfig) *Server {
 			s.replay.RegisterConsumer("trade.paper_replay", svc.ConsumeBusEvent)
 		}
 	}
+	if s.replay != nil {
+		s.replay.RegisterKlineReplayHandler(s)
+	}
 	return s
 }
 
@@ -494,11 +497,18 @@ func (s *Server) currentDataMode(r *http.Request) string {
 		switch strings.ToLower(raw) {
 		case "replay", "replay_paper":
 			return appmode.ReplayPaper
-		case "live", "live_real", "live_paper":
+		case "realtime", "real_time", "market_realtime", "live", "live_real", "live_paper":
 			return appmode.LiveReal
 		}
 	}
 	return s.currentAppMode()
+}
+
+func (s *Server) currentKlineQueryMode(r *http.Request) string {
+	if r != nil && strings.TrimSpace(r.URL.Query().Get("data_mode")) == "" {
+		return appmode.LiveReal
+	}
+	return s.currentDataMode(r)
 }
 
 func (s *Server) queryForMode(mode string) *klinequery.Service {
@@ -522,6 +532,13 @@ func (s *Server) marketDSNForMode(mode string) string {
 	return s.replayDSN
 }
 
+func (s *Server) marketDatabaseForMode(mode string) string {
+	if appmode.UsesRealtimeMarket(mode) {
+		return dbx.DatabaseForRole(s.cfg.DB, dbx.RoleMarketRealtime)
+	}
+	return dbx.DatabaseForRole(s.cfg.DB, dbx.RoleMarketReplay)
+}
+
 func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 	resp := map[string]any{"status": s.status.Snapshot(time.Now())}
 	if s.replay != nil {
@@ -531,12 +548,13 @@ func (s *Server) handleStatus(w http.ResponseWriter, _ *http.Request) {
 		resp["strategy"] = s.strategy.Status()
 	}
 	resp["app_mode"] = map[string]any{
-		"mode":            s.currentAppMode(),
-		"uses_realtime":   appmode.UsesRealtimeMarket(s.currentAppMode()),
-		"replay_enabled":  s.currentAppMode() == appmode.ReplayPaper,
-		"trade_backend":   s.currentTradeBackendName(),
-		"chart_data_mode": s.currentChartDataMode(),
-		"kline_data_mode": s.currentChartDataMode(),
+		"mode":                s.currentAppMode(),
+		"uses_realtime":       appmode.UsesRealtimeMarket(s.currentAppMode()),
+		"replay_enabled":      s.currentAppMode() == appmode.ReplayPaper,
+		"trade_backend":       s.currentTradeBackendName(),
+		"chart_data_mode":     s.currentChartDataMode(),
+		"kline_data_mode":     s.currentKlineDataMode(),
+		"replay_default_mode": s.cfg.CTP.ReplayDefaultMode,
 	}
 	resp["trade"] = s.tradeStatusSnapshot()
 	resp["startup_tasks"] = s.startupTaskSnapshots()
@@ -585,6 +603,10 @@ func (s *Server) currentChartDataMode() string {
 	return "replay"
 }
 
+func (s *Server) currentKlineDataMode() string {
+	return "realtime"
+}
+
 func (s *Server) appModePayload() map[string]any {
 	cursor, _, _ := s.userConfig.LoadReplayResumeCursor(s.currentOwner())
 	return map[string]any{
@@ -592,7 +614,8 @@ func (s *Server) appModePayload() map[string]any {
 		"uses_realtime":        appmode.UsesRealtimeMarket(s.currentAppMode()),
 		"trade_backend":        s.currentTradeBackendName(),
 		"chart_data_mode":      s.currentChartDataMode(),
-		"kline_data_mode":      s.currentChartDataMode(),
+		"kline_data_mode":      s.currentKlineDataMode(),
+		"replay_default_mode":  s.cfg.CTP.ReplayDefaultMode,
 		"replay_resume_cursor": cursor,
 	}
 }
@@ -1149,7 +1172,15 @@ func (s *Server) handleKlineSearch(w http.ResponseWriter, r *http.Request) {
 	keyword := strings.TrimSpace(r.URL.Query().Get("keyword"))
 	page, pageSize := parsePageArgs(r.URL.Query().Get("page"), r.URL.Query().Get("page_size"))
 
-	mode := s.currentDataMode(r)
+	mode := s.currentKlineQueryMode(r)
+	logger.Info("api kline search request",
+		"keyword", keyword,
+		"page", page,
+		"page_size", pageSize,
+		"raw_data_mode", strings.TrimSpace(r.URL.Query().Get("data_mode")),
+		"resolved_mode", mode,
+		"market_database", s.marketDatabaseForMode(mode),
+	)
 	querySvc := s.queryForMode(mode)
 	resp, err := querySvc.Search(keyword, page, pageSize)
 	if err != nil {
@@ -1228,10 +1259,9 @@ func (s *Server) searchReplayTickDirContracts(tickDir string, keyword string) []
 		}
 		variety := inferVarietyBySymbol(symbol, "contract")
 		out = append(out, klinequery.SearchItem{
-			Type:     "contract",
-			Symbol:   symbol,
-			Variety:  variety,
-			Exchange: inferExchangeByReplayTickCSV(tickDir, entry.Name()),
+			Type:    "contract",
+			Symbol:  symbol,
+			Variety: variety,
 		})
 	}
 	return out
@@ -1381,7 +1411,17 @@ func (s *Server) handleKlineBars(w http.ResponseWriter, r *http.Request) {
 		"limit", limit,
 		"raw_query", r.URL.RawQuery,
 	)
-	mode := s.currentDataMode(r)
+	mode := s.currentKlineQueryMode(r)
+	logger.Info("api kline bars resolved data source",
+		"symbol", symbol,
+		"type", kind,
+		"variety", variety,
+		"timeframe", timeframe,
+		"end_adjusted_time", end.Format("2006-01-02 15:04:00"),
+		"raw_data_mode", strings.TrimSpace(r.URL.Query().Get("data_mode")),
+		"resolved_mode", mode,
+		"market_database", s.marketDatabaseForMode(mode),
+	)
 	resp, err := s.queryForMode(mode).BarsByEnd(symbol, kind, variety, timeframe, end, limit)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -1418,7 +1458,15 @@ func (s *Server) handleInstruments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	page, pageSize := parsePageArgs(r.URL.Query().Get("page"), r.URL.Query().Get("page_size"))
-	resp, err := s.queryForMode(s.currentAppMode()).ListContracts(page, pageSize)
+	mode := s.currentKlineQueryMode(r)
+	logger.Info("api instruments resolved data source",
+		"page", page,
+		"page_size", pageSize,
+		"raw_data_mode", strings.TrimSpace(r.URL.Query().Get("data_mode")),
+		"resolved_mode", mode,
+		"market_database", s.marketDatabaseForMode(mode),
+	)
+	resp, err := s.queryForMode(mode).ListContracts(page, pageSize)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -1723,10 +1771,16 @@ func (s *Server) handleReplayStart(w http.ResponseWriter, r *http.Request) {
 	if strings.TrimSpace(req.Mode) == "" {
 		req.Mode = s.cfg.CTP.ReplayDefaultMode
 	}
+	if strings.TrimSpace(req.Mode) == "" {
+		req.Mode = "kline"
+	}
+	if strings.EqualFold(strings.TrimSpace(req.Mode), "fast") {
+		req.Mode = "kline"
+	}
 	if req.Speed == 0 {
 		req.Speed = s.cfg.CTP.ReplayDefaultSpeed
 	}
-	if strings.TrimSpace(req.TickDir) == "" {
+	if req.Mode != "kline" && strings.TrimSpace(req.TickDir) == "" {
 		req.TickDir = filepath.Join(s.cfg.CTP.FlowPath, "ticks")
 	}
 	req.SharedMetaDSN = strings.TrimSpace(s.sharedDSN)

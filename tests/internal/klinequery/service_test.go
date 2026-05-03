@@ -72,7 +72,6 @@ func TestSearchEmptyKeywordPrefersIndexL9ThenContracts(t *testing.T) {
 			symbol:     variety + "l9",
 			symbolNorm: variety + "l9",
 			variety:    variety,
-			exchange:   "L9",
 			kind:       "l9",
 			barCount:   int64(100 + i),
 			updatedAt:  now.Add(time.Duration(i) * time.Minute),
@@ -83,7 +82,6 @@ func TestSearchEmptyKeywordPrefersIndexL9ThenContracts(t *testing.T) {
 		symbol:     "rb2501",
 		symbolNorm: "rb2501",
 		variety:    "rb",
-		exchange:   "SHFE",
 		kind:       "contract",
 		barCount:   88,
 		updatedAt:  now.Add(20 * time.Minute),
@@ -147,7 +145,6 @@ func TestSearchEmptyKeywordFillsContractsWhenIndexL9Insufficient(t *testing.T) {
 		symbol:     "srl9",
 		symbolNorm: "srl9",
 		variety:    "sr",
-		exchange:   "L9",
 		kind:       "l9",
 		barCount:   90,
 		updatedAt:  now,
@@ -157,7 +154,6 @@ func TestSearchEmptyKeywordFillsContractsWhenIndexL9Insufficient(t *testing.T) {
 		symbol:     "cfl9",
 		symbolNorm: "cfl9",
 		variety:    "cf",
-		exchange:   "L9",
 		kind:       "l9",
 		barCount:   91,
 		updatedAt:  now.Add(time.Minute),
@@ -167,7 +163,6 @@ func TestSearchEmptyKeywordFillsContractsWhenIndexL9Insufficient(t *testing.T) {
 		symbol:     "rb2501",
 		symbolNorm: "rb2501",
 		variety:    "rb",
-		exchange:   "SHFE",
 		kind:       "contract",
 		barCount:   92,
 		updatedAt:  now.Add(2 * time.Minute),
@@ -177,7 +172,6 @@ func TestSearchEmptyKeywordFillsContractsWhenIndexL9Insufficient(t *testing.T) {
 		symbol:     "ag2501",
 		symbolNorm: "ag2501",
 		variety:    "ag",
-		exchange:   "SHFE",
 		kind:       "contract",
 		barCount:   93,
 		updatedAt:  now.Add(3 * time.Minute),
@@ -213,7 +207,6 @@ func TestSearchKeywordPrefersPrefixAndL9OverContainsAndContracts(t *testing.T) {
 		symbol:     "srl9",
 		symbolNorm: "srl9",
 		variety:    "sr",
-		exchange:   "L9",
 		kind:       "l9",
 		barCount:   101,
 		updatedAt:  now.Add(3 * time.Minute),
@@ -223,7 +216,6 @@ func TestSearchKeywordPrefersPrefixAndL9OverContainsAndContracts(t *testing.T) {
 		symbol:     "sr2501",
 		symbolNorm: "sr2501",
 		variety:    "sr",
-		exchange:   "CZCE",
 		kind:       "contract",
 		barCount:   102,
 		updatedAt:  now.Add(2 * time.Minute),
@@ -233,7 +225,6 @@ func TestSearchKeywordPrefersPrefixAndL9OverContainsAndContracts(t *testing.T) {
 		symbol:     "masr",
 		symbolNorm: "masr",
 		variety:    "ma",
-		exchange:   "CZCE",
 		kind:       "contract",
 		barCount:   103,
 		updatedAt:  now.Add(5 * time.Minute),
@@ -271,7 +262,6 @@ func TestBarsByEndUsesAdjustedTime(t *testing.T) {
 	stmts := []string{
 		`CREATE TABLE "future_kline_instrument_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -283,7 +273,7 @@ func TestBarsByEndUsesAdjustedTime(t *testing.T) {
   "OpenInterest" DOUBLE NOT NULL,
   "SettlementPrice" DOUBLE NOT NULL
 )`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-20 21:01:00','2026-01-19 21:01:00','1m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','2026-01-20 21:01:00','2026-01-19 21:01:00','1m',1,2,1,2,10,100,0)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -351,7 +341,6 @@ func TestBarsByEndAggregatesByHourWithCompletedSession(t *testing.T) {
 
 	mustExec(t, db, `CREATE TABLE "future_kline_instrument_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -454,7 +443,6 @@ func TestBarsByEndL9InferTradingSession(t *testing.T) {
 
 	mustExec(t, db, `CREATE TABLE "future_kline_l9_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -516,7 +504,6 @@ func prepareDB(t *testing.T, dsn string) {
 	stmts := []string{
 		`CREATE TABLE "future_kline_instrument_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -530,7 +517,6 @@ func prepareDB(t *testing.T, dsn string) {
 )`,
 		`CREATE TABLE "future_kline_l9_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -542,9 +528,9 @@ func prepareDB(t *testing.T, dsn string) {
   "OpenInterest" DOUBLE NOT NULL,
   "SettlementPrice" DOUBLE NOT NULL
 )`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
-		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('srl9','L9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
+		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('srl9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {
@@ -579,9 +565,9 @@ func insertSessionBars(t *testing.T, db *sql.DB, instrumentID string, dataDate s
 			if ts.Hour() >= 18 {
 				adj = mustTime(fmt.Sprintf("%s %02d:%02d:00", nightAdjustedDate, ts.Hour(), ts.Minute()))
 			}
-			stmt := `INSERT INTO "future_kline_instrument_1m_sr" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+			stmt := `INSERT INTO "future_kline_instrument_1m_sr" VALUES (?,?,?,?,?,?,?,?,?,?,?)`
 			mustExecArgs(t, db, stmt,
-				instrumentID, "CZCE",
+				instrumentID,
 				ts.Format("2006-01-02 15:04:05"),
 				adj.Format("2006-01-02 15:04:05"),
 				"1m",
@@ -598,9 +584,9 @@ func insertL9DayBars(t *testing.T, db *sql.DB, tradeDate string, hhmm []string) 
 	price := 200.0
 	for _, hm := range hhmm {
 		ts := mustTime(fmt.Sprintf("%s %s:00", tradeDate, hm))
-		stmt := `INSERT INTO "future_kline_l9_1m_sr" VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`
+		stmt := `INSERT INTO "future_kline_l9_1m_sr" VALUES (?,?,?,?,?,?,?,?,?,?,?)`
 		mustExecArgs(t, db, stmt,
-			"srl9", "L9",
+			"srl9",
 			ts.Format("2006-01-02 15:04:05"),
 			ts.Format("2006-01-02 15:04:05"),
 			"1m",
@@ -614,7 +600,6 @@ type searchIndexRow struct {
 	symbol     string
 	symbolNorm string
 	variety    string
-	exchange   string
 	kind       string
 	barCount   int64
 	updatedAt  time.Time
@@ -628,7 +613,6 @@ func createSearchIndexTable(t *testing.T, db *sql.DB) {
   symbol VARCHAR(64) NOT NULL,
   symbol_norm VARCHAR(64) NOT NULL,
   variety VARCHAR(32) NOT NULL,
-  exchange VARCHAR(16) NOT NULL,
   kind VARCHAR(16) NOT NULL,
   bar_count BIGINT NOT NULL,
   updated_at DATETIME NOT NULL
@@ -638,13 +622,12 @@ func createSearchIndexTable(t *testing.T, db *sql.DB) {
 
 func insertSearchIndexRow(t *testing.T, db *sql.DB, row searchIndexRow) {
 	t.Helper()
-	mustExecArgs(t, db, `INSERT INTO kline_search_index(table_name,symbol,symbol_norm,variety,exchange,kind,bar_count,updated_at)
-VALUES(?,?,?,?,?,?,?,?)`,
+	mustExecArgs(t, db, `INSERT INTO kline_search_index(table_name,symbol,symbol_norm,variety,kind,bar_count,updated_at)
+VALUES(?,?,?,?,?,?,?)`,
 		row.tableName,
 		row.symbol,
 		row.symbolNorm,
 		row.variety,
-		row.exchange,
 		row.kind,
 		row.barCount,
 		row.updatedAt.Format("2006-01-02 15:04:05"),

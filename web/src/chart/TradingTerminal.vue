@@ -88,6 +88,8 @@ let chartScopeSyncSeq = 0
 const realtimeStatus = ref('connecting')
 const activeChartSubscriptionKey = ref('')
 const dataMode = ref('realtime')
+const appMode = ref('')
+const replayMode = ref('kline')
 const chartSubscribedTicket = ref(null)
 const autoOpenTradeWindow = ref(false)
 const chartHealth = reactive({
@@ -129,6 +131,7 @@ const tradeForm = reactive({
 })
 let tradeWindowDrag = null
 let tradeWindowResize = null
+const replayKlineMode = computed(() => appMode.value === 'replay_paper' && replayMode.value === 'kline')
 const DRAWING_TYPE_LABELS = {
   trendline: '趋势线',
   hline: '水平线',
@@ -457,7 +460,9 @@ function syncTradeFormWithScope(force = false) {
   if (!String(tradeForm.account_id || '').trim()) tradeForm.account_id = defaults.account_id || ''
   if (!String(tradeForm.exchange_id || '').trim()) tradeForm.exchange_id = defaults.exchange_id || ''
   if (!String(tradeForm.limit_price || '').trim()) {
-    const price = pickQuoteNumber(defaults.limit_price, quoteSnapshot.value?.latest_price, quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1)
+    const price = replayKlineMode.value
+      ? pickQuoteNumber(quoteSnapshot.value?.latest_price, defaults.limit_price)
+      : pickQuoteNumber(defaults.limit_price, quoteSnapshot.value?.latest_price, quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1)
     tradeForm.limit_price = price > 0 ? String(price) : ''
   }
   tradeForm.volume = 1
@@ -529,7 +534,9 @@ async function fetchTradeTerminal() {
   if (!tradeWindow.symbolLocked && currentTradeSymbol()) tradeForm.symbol = currentTradeSymbol()
   if (!String(tradeForm.exchange_id || '').trim()) tradeForm.exchange_id = tradeTerminal.order_entry_defaults.exchange_id || ''
   if (!String(tradeForm.limit_price || '').trim()) {
-    const price = pickQuoteNumber(tradeTerminal.order_entry_defaults.limit_price, quoteSnapshot.value?.latest_price, quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1)
+    const price = replayKlineMode.value
+      ? pickQuoteNumber(quoteSnapshot.value?.latest_price, tradeTerminal.order_entry_defaults.limit_price)
+      : pickQuoteNumber(tradeTerminal.order_entry_defaults.limit_price, quoteSnapshot.value?.latest_price, quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1)
     tradeForm.limit_price = price > 0 ? String(price) : ''
   }
 }
@@ -928,9 +935,11 @@ async function closeTradePosition(item, options = {}) {
     const direction = String(item?.direction || '').trim().toLowerCase()
     const volume = closeVolumeByRatio(item?.closable, options.ratio ?? 1)
     if (!item?.symbol || volume <= 0) return
-    const defaultPrice = direction === 'short'
-      ? pickQuoteNumber(quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
-      : pickQuoteNumber(quoteSnapshot.value?.bid_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
+    const defaultPrice = replayKlineMode.value
+      ? pickQuoteNumber(quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
+      : direction === 'short'
+        ? pickQuoteNumber(quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
+        : pickQuoteNumber(quoteSnapshot.value?.bid_price1, quoteSnapshot.value?.latest_price, item.market_price, item.avg_price)
     const price = pickQuoteNumber(options.limitPrice, defaultPrice)
     const resp = await fetch(`/api/trade/positions/${encodeURIComponent(item.symbol)}/close`, {
       method: 'POST',
@@ -1039,8 +1048,7 @@ async function quickTradeOrder(raw) {
   const lastPrice = pickQuoteNumber(
     limitPrice,
     quoteSnapshot.value?.latest_price,
-    quoteSnapshot.value?.ask_price1,
-    quoteSnapshot.value?.bid_price1,
+    ...(replayKlineMode.value ? [] : [quoteSnapshot.value?.ask_price1, quoteSnapshot.value?.bid_price1]),
     tradeTerminal.order_entry_defaults?.limit_price,
   )
   if (kind === 'buy_open') {
@@ -1166,7 +1174,7 @@ async function fetchKeyboardSpriteItems() {
       keyword: query,
       page: '1',
       page_size: '20',
-      data_mode: dataMode.value,
+      data_mode: dataMode.value === 'replay' ? 'realtime' : dataMode.value,
     })
     const resp = await fetch(`/api/kline/search?${params.toString()}`)
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
@@ -1289,6 +1297,32 @@ function onSetTimeframe(v) {  // K线顶部按钮切换周期时会把周期传�
   scope.timeframe = v
 }
 
+async function onKlineReplayDateChange(payload) {
+  const end = String(payload?.end || '').trim()
+  if (!end) return
+  scope.end = end
+  await syncChartScopeAndReload()
+}
+
+function openKlineReplayPanel(evt) {
+  paneRef.value?.openKlineReplayPanelFromToolbar?.(evt)
+}
+
+function onLatestBarChange(bar) {
+  if (!replayKlineMode.value) return
+  const close = pickQuoteNumber(bar?.close)
+  if (close <= 0) return
+  quoteSnapshot.value = {
+    ...(quoteSnapshot.value || {}),
+    symbol: String(bar?.symbol || scope.symbol || '').trim(),
+    latest_price: close,
+    close,
+    data_time: bar?.data_time,
+    adjusted_time: bar?.adjusted_time,
+  }
+  if (!String(tradeForm.limit_price || '').trim()) tradeForm.limit_price = String(close)
+}
+
 function onSetTheme(v) {
   layout.theme = v
 }
@@ -1309,6 +1343,8 @@ function chartSubscriptionKey(sub) {
 }
 
 function applyAppModeSnapshot(snapshot) {
+  appMode.value = String(snapshot?.mode || appMode.value || '').trim().toLowerCase()
+  replayMode.value = String(snapshot?.replay_default_mode || replayMode.value || 'kline').trim().toLowerCase()
   const nextMode = String(snapshot?.kline_data_mode || snapshot?.chart_data_mode || 'realtime').trim().toLowerCase()
   if (!nextMode || dataMode.value === nextMode) return
   dataMode.value = nextMode
@@ -1423,6 +1459,7 @@ function connectChartWS() {
         data_mode: sub.data_mode,
       })
       if (key === activeChartSubscriptionKey.value) {
+        if (replayKlineMode.value) return
         quoteSnapshot.value = msg.data?.snapshot || {}
         quoteTicks.value = Array.isArray(msg.data?.ticks) ? msg.data.ticks : []
         paneRef.value?.applyQuoteSynthesis?.(msg.data, chartSubscribedTicket.value)
@@ -1678,12 +1715,14 @@ watch(
   () => quoteSnapshot.value,
   () => {
     if (String(tradeForm.limit_price || '').trim()) return
-    const price = pickQuoteNumber(
-      tradeTerminal.order_entry_defaults?.limit_price,
-      quoteSnapshot.value?.latest_price,
-      quoteSnapshot.value?.ask_price1,
-      quoteSnapshot.value?.bid_price1,
-    )
+    const price = replayKlineMode.value
+      ? pickQuoteNumber(quoteSnapshot.value?.latest_price, tradeTerminal.order_entry_defaults?.limit_price)
+      : pickQuoteNumber(
+          tradeTerminal.order_entry_defaults?.limit_price,
+          quoteSnapshot.value?.latest_price,
+          quoteSnapshot.value?.ask_price1,
+          quoteSnapshot.value?.bid_price1,
+        )
     if (price > 0) tradeForm.limit_price = String(price)
   },
   { deep: true },
@@ -1698,7 +1737,7 @@ onMounted(async () => {
     const resp = await fetch('/api/app-mode')
     if (resp.ok) {
       const data = await resp.json()
-      dataMode.value = data?.kline_data_mode || 'realtime'
+      applyAppModeSnapshot(data || {})
     }
   } catch {
     dataMode.value = 'realtime'
@@ -1760,6 +1799,7 @@ onUnmounted(() => {
       :channel-debug="channelDebug"
       :reversal-settings="reversalState.settings"
       :lightweight-only="lightweightOnly"
+      :replay-kline-mode="replayKlineMode"
       @set-timeframe="onSetTimeframe"
       @set-theme="onSetTheme"
       @set-active-right-tab="activeRightTab = $event"
@@ -1770,6 +1810,7 @@ onUnmounted(() => {
       @toggle-reversal="onToggleReversal"
       @set-reversal-settings="onSetReversalSettings"
       @recalc-reversal="onRecalcReversal"
+      @open-kline-replay="openKlineReplayPanel"
     />
 
     <div class="tv-body" :style="bodyStyle">
@@ -1793,6 +1834,8 @@ onUnmounted(() => {
           @channel-view-change="onChannelViewChange"
           @reversal-view-change="onReversalViewChange"
           @chart-context-menu="onChartContextMenu"
+          @kline-replay-date-change="onKlineReplayDateChange"
+          @latest-bar-change="onLatestBarChange"
         />
       </div>
 
@@ -1855,6 +1898,7 @@ onUnmounted(() => {
       :order-form="tradeForm"
       :terminal="tradeTerminal"
       :quote-snapshot="quoteSnapshot"
+      :replay-kline-mode="replayKlineMode"
       @close="closeTradeWindow"
       @start-drag="startTradeWindowDrag"
       @start-resize="startTradeWindowResize"

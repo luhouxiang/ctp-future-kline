@@ -16,7 +16,6 @@ import (
 
 const (
 	colInstrumentID = "InstrumentID"
-	colExchange     = "Exchange"
 	colTime         = "DataTime"
 	colAdjustedTime = "AdjustedTime"
 	colUpdateTime   = "UpdateTime"
@@ -117,10 +116,10 @@ func (s *klineStore) QueryMinuteBarsByVariety(variety string, minuteTime time.Ti
 	}
 
 	stmt := fmt.Sprintf(`
-SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"
+SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"
 FROM "%s"
 WHERE "%s" = ? AND "%s" = ?;`,
-		colInstrumentID, colExchange, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
+		colInstrumentID, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
 		tableName,
 		colTime, colPeriod,
 	)
@@ -137,7 +136,6 @@ WHERE "%s" = ? AND "%s" = ?;`,
 		var ts, adjusted time.Time
 		if err := rows.Scan(
 			&bar.InstrumentID,
-			&bar.Exchange,
 			&ts,
 			&adjusted,
 			&bar.Period,
@@ -185,13 +183,13 @@ func (s *klineStore) QueryMinuteBarsForTradingDay(variety string, instrumentID s
 		return nil, err
 	}
 	query := fmt.Sprintf(`
-SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"
+SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"
 FROM "%s"
 WHERE lower("%s") = ?
   AND "%s" = '1m'
   AND DATE("%s") = ?
 ORDER BY "%s" ASC`,
-		colInstrumentID, colExchange, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
+		colInstrumentID, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
 		tableName,
 		colInstrumentID,
 		colPeriod,
@@ -213,7 +211,6 @@ ORDER BY "%s" ASC`,
 		var ts, adjusted time.Time
 		if err := rows.Scan(
 			&bar.InstrumentID,
-			&bar.Exchange,
 			&ts,
 			&adjusted,
 			&bar.Period,
@@ -254,8 +251,8 @@ func (s *klineStore) upsertMinuteBarToTable(tableName string, bar minuteBar) err
 
 	stmt := fmt.Sprintf(`
 INSERT INTO "%s"
-("%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s")
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+("%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s")
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   "%s" = VALUES("%s"),
   "%s" = VALUES("%s"),
@@ -266,7 +263,7 @@ ON DUPLICATE KEY UPDATE
   "%s" = VALUES("%s"),
   "%s" = VALUES("%s");`,
 		tableName,
-		colInstrumentID, colExchange, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
+		colInstrumentID, colTime, colAdjustedTime, colPeriod, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, colSettlement,
 		colAdjustedTime, colAdjustedTime,
 		colOpen, colOpen,
 		colHigh, colHigh,
@@ -280,7 +277,6 @@ ON DUPLICATE KEY UPDATE
 	_, err := s.db.Exec(
 		stmt,
 		storedInstrumentID,
-		bar.Exchange,
 		bar.MinuteTime.Format("2006-01-02 15:04:00"),
 		chooseAdjustedTime(bar).Format("2006-01-02 15:04:00"),
 		bar.Period,
@@ -309,7 +305,6 @@ func (s *klineStore) ensureTable(tableName string) error {
 	stmt := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(32) NOT NULL,
-  "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -321,11 +316,10 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" BIGINT NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
-  PRIMARY KEY ("%s", "%s", "%s", "%s")
+  PRIMARY KEY ("%s", "%s", "%s")
 );`,
 		tableName,
 		colInstrumentID,
-		colExchange,
 		colTime,
 		colAdjustedTime,
 		colUpdateTime,
@@ -337,7 +331,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		colVolume,
 		colOpenInterest,
 		colSettlement,
-		colTime, colInstrumentID, colExchange, colPeriod,
+		colTime, colInstrumentID, colPeriod,
 	)
 	if _, err := s.db.Exec(stmt); err != nil {
 		return fmt.Errorf("create kline table failed: %w", err)
@@ -444,6 +438,27 @@ WHERE lower("%s") = ? AND "%s" = ? AND "%s" IN (
 	}
 	deleted, _ := result.RowsAffected()
 	return deleted, firstDeleted, nil
+}
+
+func (s *klineStore) UpsertReplaySubscriptionBar(sub ChartSubscription, bar minuteBar) error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	sub, err := NormalizeChartSubscription(sub)
+	if err != nil {
+		return err
+	}
+	tableName, targetID, err := tableAndInstrumentForSubscription(sub)
+	if err != nil {
+		return err
+	}
+	bar.Variety = sub.Variety
+	bar.InstrumentID = targetID
+	bar.Period = sub.Timeframe
+	if bar.MinuteTime.IsZero() {
+		bar.MinuteTime = bar.AdjustedTime
+	}
+	return s.upsertMinuteBarToTable(tableName, bar)
 }
 
 func tableAndInstrumentForSubscription(sub ChartSubscription) (string, string, error) {

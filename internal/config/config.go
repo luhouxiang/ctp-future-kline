@@ -514,12 +514,15 @@ func (c *AppConfig) Validate() error {
 		return errors.New("ctp.bus_flush_ms must be >= 0")
 	}
 	if c.CTP.ReplayDefaultMode == "" {
-		c.CTP.ReplayDefaultMode = "realtime"
+		c.CTP.ReplayDefaultMode = "kline"
+	}
+	if c.CTP.ReplayDefaultMode == "fast" {
+		c.CTP.ReplayDefaultMode = "kline"
 	}
 	switch c.CTP.ReplayDefaultMode {
-	case "fast", "realtime":
+	case "kline", "realtime":
 	default:
-		return errors.New("ctp.replay_default_mode must be one of: fast,realtime")
+		return errors.New("ctp.replay_default_mode must be one of: kline,realtime")
 	}
 	if c.CTP.ReplayDefaultSpeed == 0 {
 		c.CTP.ReplayDefaultSpeed = 1.0

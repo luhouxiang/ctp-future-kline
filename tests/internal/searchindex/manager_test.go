@@ -77,7 +77,6 @@ func prepareDB(t *testing.T, dsn string) {
 	stmts := []string{
 		`CREATE TABLE "future_kline_instrument_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -91,7 +90,6 @@ func prepareDB(t *testing.T, dsn string) {
 )`,
 		`CREATE TABLE "future_kline_l9_1m_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -105,7 +103,6 @@ func prepareDB(t *testing.T, dsn string) {
 )`,
 		`CREATE TABLE "future_kline_instrument_mm_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -119,7 +116,6 @@ func prepareDB(t *testing.T, dsn string) {
 )`,
 		`CREATE TABLE "future_kline_l9_mm_sr" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -131,11 +127,11 @@ func prepareDB(t *testing.T, dsn string) {
   "OpenInterest" DOUBLE NOT NULL,
   "SettlementPrice" DOUBLE NOT NULL
 )`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
-		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','CZCE','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
-		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('srl9','L9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
-		`INSERT INTO "future_kline_instrument_mm_sr" VALUES ('sr2701','CZCE','2026-01-19 09:05:00','2026-01-19 09:05:00','5m',1,2,1,2,10,100,0)`,
-		`INSERT INTO "future_kline_l9_mm_sr" VALUES ('srl9','L9','2026-01-19 09:05:00','2026-01-19 09:05:00','5m',1,2,1,2,20,200,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_instrument_1m_sr" VALUES ('sr2701','2026-01-19 09:02:00','2026-01-19 09:02:00','1m',2,3,2,3,11,101,0)`,
+		`INSERT INTO "future_kline_l9_1m_sr" VALUES ('srl9','2026-01-19 09:01:00','2026-01-19 09:01:00','1m',1,2,1,2,20,200,0)`,
+		`INSERT INTO "future_kline_instrument_mm_sr" VALUES ('sr2701','2026-01-19 09:05:00','2026-01-19 09:05:00','5m',1,2,1,2,10,100,0)`,
+		`INSERT INTO "future_kline_l9_mm_sr" VALUES ('srl9','2026-01-19 09:05:00','2026-01-19 09:05:00','5m',1,2,1,2,20,200,0)`,
 	}
 	for _, stmt := range stmts {
 		if _, err := db.Exec(stmt); err != nil {

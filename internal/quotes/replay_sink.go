@@ -33,6 +33,22 @@ type ReplaySink struct {
 	clearedKlines    map[string]struct{}
 }
 
+type ReplayKlineBar struct {
+	Symbol       string
+	Type         string
+	Variety      string
+	Exchange     string
+	Timeframe    string
+	AdjustedTime time.Time
+	DataTime     time.Time
+	Open         float64
+	High         float64
+	Low          float64
+	Close        float64
+	Volume       int64
+	OpenInterest float64
+}
+
 // NewReplaySink 为回放模式创建独立的 store、L9 计算器和 mdSpi。
 func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySink, error) {
 	dbPath, err := resolveStoreDSN(cfg)
@@ -115,6 +131,67 @@ func (s *ReplaySink) PrepareReplayWindow(req replay.StartRequest) error {
 	_ = req
 	s.resetReplayKlineCleanupState()
 	logger.Info("replay kline cleanup scheduled", "strategy", "first_tick_per_instrument")
+	return nil
+}
+
+func (s *ReplaySink) PublishKlineReplayBar(sub ChartSubscription, item ReplayKlineBar) error {
+	if s == nil {
+		return nil
+	}
+	sub, err := NormalizeChartSubscription(sub)
+	if err != nil {
+		return err
+	}
+	if item.AdjustedTime.IsZero() {
+		return fmt.Errorf("replay kline adjusted_time is required")
+	}
+	dataTime := item.DataTime
+	if dataTime.IsZero() {
+		dataTime = item.AdjustedTime
+	}
+	bar := minuteBar{
+		Variety:          firstNonEmpty(strings.TrimSpace(item.Variety), sub.Variety),
+		InstrumentID:     firstNonEmpty(strings.TrimSpace(item.Symbol), sub.Symbol),
+		Exchange:         item.Exchange,
+		Replay:           true,
+		MinuteTime:       dataTime,
+		AdjustedTime:     item.AdjustedTime,
+		SourceReceivedAt: item.AdjustedTime,
+		Period:           sub.Timeframe,
+		Open:             item.Open,
+		High:             item.High,
+		Low:              item.Low,
+		Close:            item.Close,
+		Volume:           item.Volume,
+		OpenInterest:     item.OpenInterest,
+	}
+	if sub.Type == "l9" && !strings.HasSuffix(strings.ToLower(bar.InstrumentID), "l9") {
+		bar.InstrumentID = sub.Variety + "l9"
+	}
+	PublishChartFinalBar(bar, false)
+	strategy.PublishReplayBar(strategy.BarEvent{
+		Variety:      bar.Variety,
+		InstrumentID: bar.InstrumentID,
+		Exchange:     bar.Exchange,
+		DataTime:     bar.MinuteTime,
+		AdjustedTime: bar.AdjustedTime,
+		Period:       bar.Period,
+		Open:         bar.Open,
+		High:         bar.High,
+		Low:          bar.Low,
+		Close:        bar.Close,
+		Volume:       bar.Volume,
+		OpenInterest: bar.OpenInterest,
+	})
+	logger.Debug(
+		"kline replay bar published without replay db write",
+		"symbol", bar.InstrumentID,
+		"type", sub.Type,
+		"variety", bar.Variety,
+		"timeframe", bar.Period,
+		"adjusted_time", bar.AdjustedTime.Format(time.RFC3339Nano),
+		"close", bar.Close,
+	)
 	return nil
 }
 
@@ -400,4 +477,13 @@ func replayCleanupTimeframeMinutes(timeframe string) int {
 	default:
 		return 0
 	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			return value
+		}
+	}
+	return ""
 }

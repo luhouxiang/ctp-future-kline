@@ -124,7 +124,6 @@ func ensureKlineTable(dst *sql.DB, table string) error {
 	ddl := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS "%s" (
   "InstrumentID" VARCHAR(32) NOT NULL,
-  "Exchange" VARCHAR(16) NOT NULL,
   "DataTime" DATETIME NOT NULL,
   "AdjustedTime" DATETIME NOT NULL,
   "Period" VARCHAR(8) NOT NULL,
@@ -135,7 +134,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "Volume" BIGINT NOT NULL,
   "OpenInterest" DOUBLE NOT NULL,
   "SettlementPrice" DOUBLE NOT NULL,
-  PRIMARY KEY ("DataTime", "InstrumentID", "Exchange", "Period")
+  PRIMARY KEY ("DataTime", "InstrumentID", "Period")
 )`, table)
 	if _, err := dst.Exec(ddl); err != nil {
 		return err
@@ -156,7 +155,7 @@ func migrateKlineLike(src *sql.DB, dst *sql.DB, table string, truncate bool, bat
 		}
 	}
 	rows, err := src.Query(fmt.Sprintf(`
-SELECT "InstrumentID","Exchange","DataTime","AdjustedTime","Period","Open","High","Low","Close","Volume","OpenInterest","SettlementPrice"
+SELECT "InstrumentID","DataTime","AdjustedTime","Period","Open","High","Low","Close","Volume","OpenInterest","SettlementPrice"
 FROM "%s"`, table))
 	if err != nil {
 		return 0, 0, err
@@ -164,8 +163,8 @@ FROM "%s"`, table))
 	defer rows.Close()
 	stmt := fmt.Sprintf(`
 INSERT INTO "%s"
-("InstrumentID","Exchange","DataTime","AdjustedTime","Period","Open","High","Low","Close","Volume","OpenInterest","SettlementPrice")
-VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+("InstrumentID","DataTime","AdjustedTime","Period","Open","High","Low","Close","Volume","OpenInterest","SettlementPrice")
+VALUES (?,?,?,?,?,?,?,?,?,?,?)
 ON DUPLICATE KEY UPDATE
   "AdjustedTime"=VALUES("AdjustedTime"),
   "Open"=VALUES("Open"),
@@ -183,15 +182,15 @@ ON DUPLICATE KEY UPDATE
 	var readCount int64
 	var writeCount int64
 	for rows.Next() {
-		var instrument, exchange, dt, adt, period string
+		var instrument, dt, adt, period string
 		var open, high, low, closeP float64
 		var volume int64
 		var oi, settle float64
-		if err := rows.Scan(&instrument, &exchange, &dt, &adt, &period, &open, &high, &low, &closeP, &volume, &oi, &settle); err != nil {
+		if err := rows.Scan(&instrument, &dt, &adt, &period, &open, &high, &low, &closeP, &volume, &oi, &settle); err != nil {
 			return readCount, writeCount, err
 		}
 		readCount++
-		if _, err := prep.Exec(instrument, exchange, dt, adt, period, open, high, low, closeP, volume, oi, settle); err != nil {
+		if _, err := prep.Exec(instrument, dt, adt, period, open, high, low, closeP, volume, oi, settle); err != nil {
 			return readCount, writeCount, err
 		}
 		writeCount++
@@ -274,18 +273,17 @@ func migrateKlineSearchIndex(src *sql.DB, dst *sql.DB, truncate bool) (int64, in
 			return 0, 0, err
 		}
 	}
-	rows, err := src.Query(`SELECT table_name,symbol,symbol_norm,variety,exchange,kind,min_time,max_time,bar_count,updated_at FROM kline_search_index`)
+	rows, err := src.Query(`SELECT table_name,symbol,symbol_norm,variety,kind,min_time,max_time,bar_count,updated_at FROM kline_search_index`)
 	if err != nil {
 		return 0, 0, err
 	}
 	defer rows.Close()
 	prep, err := dst.Prepare(`
-INSERT INTO kline_search_index(table_name,symbol,symbol_norm,variety,exchange,kind,min_time,max_time,bar_count,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?)
+INSERT INTO kline_search_index(table_name,symbol,symbol_norm,variety,kind,min_time,max_time,bar_count,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?)
 ON DUPLICATE KEY UPDATE
   symbol_norm=VALUES(symbol_norm),
   variety=VALUES(variety),
-  exchange=VALUES(exchange),
   min_time=VALUES(min_time),
   max_time=VALUES(max_time),
   bar_count=VALUES(bar_count),
@@ -296,13 +294,13 @@ ON DUPLICATE KEY UPDATE
 	defer prep.Close()
 	var r, w int64
 	for rows.Next() {
-		var tableName, symbol, symbolNorm, variety, exchange, kind, minTime, maxTime, updatedAt string
+		var tableName, symbol, symbolNorm, variety, kind, minTime, maxTime, updatedAt string
 		var barCount int64
-		if err := rows.Scan(&tableName, &symbol, &symbolNorm, &variety, &exchange, &kind, &minTime, &maxTime, &barCount, &updatedAt); err != nil {
+		if err := rows.Scan(&tableName, &symbol, &symbolNorm, &variety, &kind, &minTime, &maxTime, &barCount, &updatedAt); err != nil {
 			return r, w, err
 		}
 		r++
-		if _, err := prep.Exec(tableName, symbol, symbolNorm, variety, exchange, kind, minTime, maxTime, barCount, updatedAt); err != nil {
+		if _, err := prep.Exec(tableName, symbol, symbolNorm, variety, kind, minTime, maxTime, barCount, updatedAt); err != nil {
 			return r, w, err
 		}
 		w++

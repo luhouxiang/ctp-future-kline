@@ -56,9 +56,6 @@ func TestL9AsyncCalculatorComputesAndStores(t *testing.T) {
 	if bar.InstrumentID != "rbl9" {
 		t.Fatalf("l9 instrument_id = %q, want %q", bar.InstrumentID, "rbl9")
 	}
-	if bar.Exchange != "L9" {
-		t.Fatalf("l9 exchange = %q, want %q", bar.Exchange, "L9")
-	}
 	if !almostEqual(bar.Open, (100.0*200.0+200.0*100.0)/300.0) {
 		t.Fatalf("l9 open = %v", bar.Open)
 	}
@@ -194,8 +191,8 @@ func queryL9Bar(store *testkit.KlineStore, variety string, minute time.Time) (te
 	if err != nil {
 		return testkit.MinuteBar{}, err
 	}
-	query := fmt.Sprintf(`SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s" FROM "%s" WHERE "%s" = ? AND "%s" = ?`,
-		testkit.ColInstrumentID, testkit.ColExchange, testkit.ColOpen, testkit.ColHigh, testkit.ColLow, testkit.ColClose, testkit.ColVolume, testkit.ColOpenInterest, testkit.ColSettlement,
+	query := fmt.Sprintf(`SELECT "%s","%s","%s","%s","%s","%s","%s","%s" FROM "%s" WHERE "%s" = ? AND "%s" = ?`,
+		testkit.ColInstrumentID, testkit.ColOpen, testkit.ColHigh, testkit.ColLow, testkit.ColClose, testkit.ColVolume, testkit.ColOpenInterest, testkit.ColSettlement,
 		tableName,
 		testkit.ColTime, testkit.ColPeriod,
 	)
@@ -204,7 +201,6 @@ func queryL9Bar(store *testkit.KlineStore, variety string, minute time.Time) (te
 	var bar testkit.MinuteBar
 	if err := row.Scan(
 		&bar.InstrumentID,
-		&bar.Exchange,
 		&bar.Open,
 		&bar.High,
 		&bar.Low,

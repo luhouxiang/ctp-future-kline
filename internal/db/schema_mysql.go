@@ -187,7 +187,6 @@ func marketSchemaStatements(includeReplayDedup bool) []string {
   symbol VARCHAR(64) NOT NULL,
   symbol_norm VARCHAR(64) NOT NULL,
   variety VARCHAR(32) NOT NULL,
-  exchange VARCHAR(16) NOT NULL,
   kind VARCHAR(16) NOT NULL,
   min_time DATETIME NOT NULL,
   max_time DATETIME NOT NULL,

@@ -36,7 +36,7 @@ type StartRequest struct {
 	StartTime *time.Time `json:"start_time"`
 	// EndTime 指定回放结束时间，可为空表示不限制上界。
 	EndTime *time.Time `json:"end_time"`
-	// Mode 指定回放模式，例如 fast 或 realtime。
+	// Mode 指定回放模式，例如 kline 或 realtime。
 	Mode string `json:"mode"`
 	// Speed 指定回放速度倍率。
 	Speed float64 `json:"speed"`
@@ -46,9 +46,45 @@ type StartRequest struct {
 	TickDir string `json:"tick_dir"`
 	// FullReplay 表示开始前是否清空去重记录并做全量回放。
 	FullReplay bool `json:"full_replay"`
+	// Kline 指定 K线回放参数。仅 mode=kline 时使用。
+	Kline *KlineStartRequest `json:"kline,omitempty"`
 	// SharedMetaDSN 是 shared_meta 库 DSN，仅服务端内部注入用于交易时段过滤。
 	// 不通过 API 暴露给前端。
 	SharedMetaDSN string `json:"-"`
+}
+
+type KlineStartRequest struct {
+	Symbol             string    `json:"symbol"`
+	Type               string    `json:"type"`
+	Variety            string    `json:"variety"`
+	Timeframe          string    `json:"timeframe"`
+	AnchorAdjustedTime time.Time `json:"anchor_adjusted_time"`
+	SourceDataMode     string    `json:"source_data_mode"`
+	ChunkSize          int       `json:"chunk_size"`
+	IntervalMS         int       `json:"interval_ms"`
+	SpeedSlider        int       `json:"speed_slider"`
+}
+
+type KlineBar struct {
+	Symbol       string
+	Type         string
+	Variety      string
+	Exchange     string
+	Timeframe    string
+	AdjustedTime time.Time
+	DataTime     time.Time
+	Open         float64
+	High         float64
+	Low          float64
+	Close        float64
+	Volume       int64
+	OpenInterest float64
+}
+
+type KlineChunk struct {
+	Bars      []KlineBar
+	Exchange  string
+	Exhausted bool
 }
 
 // TaskSnapshot 是 replay 任务的可观测状态快照。
@@ -110,6 +146,10 @@ type TaskSnapshot struct {
 
 type ConsumerFunc func(ctx context.Context, ev bus.BusEvent) error
 type StartPrepareFunc func(ctx context.Context, req StartRequest) error
+type KlineReplayHandler interface {
+	LoadKlineChunk(ctx context.Context, req KlineStartRequest, afterAdjusted time.Time, limit int) (KlineChunk, error)
+	ConsumeKlineBar(ctx context.Context, taskID string, req KlineStartRequest, bar KlineBar) error
+}
 type TaskLifecycle interface {
 	OnTaskFinished(ctx context.Context, snap TaskSnapshot) error
 }
@@ -141,6 +181,8 @@ type Service struct {
 	consumers map[string]ConsumerFunc
 	// hooks 保存任务生命周期回调。
 	hooks map[string]TaskLifecycle
+	// kline 保存 K线回放读写处理器。
+	kline KlineReplayHandler
 	// seenFirstDispatch 用于记录首条分发日志是否已打印。
 	seenFirstDispatch map[string]struct{}
 }
@@ -177,6 +219,12 @@ func (s *Service) RegisterTaskLifecycle(id string, hook TaskLifecycle) {
 	s.mu.Unlock()
 }
 
+func (s *Service) RegisterKlineReplayHandler(handler KlineReplayHandler) {
+	s.mu.Lock()
+	s.kline = handler
+	s.mu.Unlock()
+}
+
 // Start 启动一次新的 replay 任务。
 // 如果当前已有运行中的任务，会直接拒绝。
 func (s *Service) Start(req StartRequest) (TaskSnapshot, error) {
@@ -191,9 +239,14 @@ func (s *Service) StartWithPrepare(req StartRequest, prepares []StartPrepareFunc
 	req = normalizeStartRequest(req)
 	mode := req.Mode
 	if mode == "" {
-		mode = "fast"
+		mode = "kline"
 	}
-	if mode != "fast" && mode != "realtime" {
+	if mode == "fast" {
+		logger.Info("legacy replay mode normalized", "from", "fast", "to", "kline")
+		mode = "kline"
+		req.Mode = mode
+	}
+	if mode != "kline" && mode != "realtime" {
 		return TaskSnapshot{}, fmt.Errorf("invalid replay mode: %s", mode)
 	}
 	speed := req.Speed
@@ -202,6 +255,14 @@ func (s *Service) StartWithPrepare(req StartRequest, prepares []StartPrepareFunc
 	}
 	if speed <= 0 {
 		return TaskSnapshot{}, fmt.Errorf("invalid replay speed: %v", speed)
+	}
+	if mode == "kline" {
+		if err := validateKlineStartRequest(req.Kline); err != nil {
+			return TaskSnapshot{}, err
+		}
+		req.Kline.IntervalMS = normalizeKlineIntervalMS(req.Kline.IntervalMS)
+		speed = float64(req.Kline.IntervalMS)
+		req.Speed = speed
 	}
 	logger.Info(
 		"replay service start requested",
@@ -216,6 +277,9 @@ func (s *Service) StartWithPrepare(req StartRequest, prepares []StartPrepareFunc
 
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if mode == "kline" && s.kline == nil {
+		return TaskSnapshot{}, fmt.Errorf("kline replay handler is not registered")
+	}
 	if s.activeID != "" && (s.snapshot.Status == StatusRunning || s.snapshot.Status == StatusPaused) {
 		logger.Info("replay service start rejected", "reason", "task_already_running", "active_task_id", s.activeID, "elapsed_ms", time.Since(startedAt).Milliseconds())
 		return TaskSnapshot{}, fmt.Errorf("replay task already running")
@@ -283,6 +347,35 @@ func ensureReplayTickCSVSource(values []string) []string {
 		}
 	}
 	return append(values, tickCSVSource)
+}
+
+func validateKlineStartRequest(req *KlineStartRequest) error {
+	if req == nil {
+		return fmt.Errorf("kline replay request is required")
+	}
+	if strings.TrimSpace(req.Symbol) == "" {
+		return fmt.Errorf("kline.symbol is required")
+	}
+	if strings.TrimSpace(req.Timeframe) == "" {
+		return fmt.Errorf("kline.timeframe is required")
+	}
+	if req.AnchorAdjustedTime.IsZero() {
+		return fmt.Errorf("kline.anchor_adjusted_time is required")
+	}
+	return nil
+}
+
+func normalizeKlineIntervalMS(ms int) int {
+	if ms <= 0 {
+		ms = 1000
+	}
+	if ms < 10 {
+		return 10
+	}
+	if ms > 60000 {
+		return 60000
+	}
+	return ms
 }
 
 func (s *Service) Pause() (TaskSnapshot, error) {
@@ -395,6 +488,11 @@ func (s *Service) run(ctx context.Context, taskID string, req StartRequest, mode
 	if req.TickDir != "" {
 		logger.Info("replay task entering tick_dir replay", "task_id", taskID, "tick_dir", req.TickDir)
 		s.runTickDir(ctx, taskID, req, mode, speed)
+		return
+	}
+	if mode == "kline" {
+		logger.Info("replay task entering kline replay", "task_id", taskID)
+		s.runKline(ctx, taskID, req)
 		return
 	}
 

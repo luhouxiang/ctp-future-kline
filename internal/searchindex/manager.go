@@ -26,8 +26,6 @@ type Item struct {
 	SymbolNorm string `json:"symbol_norm"`
 	// Variety 是品种代码。
 	Variety string `json:"variety"`
-	// Exchange 是交易所代码。
-	Exchange string `json:"exchange"`
 	// Kind 表示 contract 或 l9。
 	Kind string `json:"kind"`
 	// BarCount 是该记录对应的 K 线数量。
@@ -262,7 +260,7 @@ func lookupBySymbolDB(db *sql.DB, symbol string, kind string, variety string) (*
 	variety = normalizeVariety(variety)
 
 	query := `
-SELECT table_name, symbol, symbol_norm, variety, exchange, kind, bar_count, updated_at
+SELECT table_name, symbol, symbol_norm, variety, kind, bar_count, updated_at
 FROM kline_search_index
 WHERE symbol_norm = ? AND kind = ?
   AND (? = '' OR variety = ?)
@@ -275,7 +273,6 @@ LIMIT 1`
 		&it.Symbol,
 		&it.SymbolNorm,
 		&it.Variety,
-		&it.Exchange,
 		&it.Kind,
 		&it.BarCount,
 		&updatedS,
@@ -319,7 +316,7 @@ func lookupItemsDB(db *sql.DB, targets []Target) (map[string]Item, error) {
 		args = append(args, row.symbol, row.kind)
 	}
 	query := `
-SELECT table_name, symbol, symbol_norm, variety, exchange, kind, bar_count, updated_at
+SELECT table_name, symbol, symbol_norm, variety, kind, bar_count, updated_at
 FROM kline_search_index
 WHERE ` + strings.Join(whereParts, " OR ")
 	rows, err := db.Query(query, args...)
@@ -335,7 +332,6 @@ WHERE ` + strings.Join(whereParts, " OR ")
 			&item.Symbol,
 			&item.SymbolNorm,
 			&item.Variety,
-			&item.Exchange,
 			&item.Kind,
 			&item.BarCount,
 			&item.UpdatedAt,
@@ -356,7 +352,6 @@ func ensureSchema(tx *sql.Tx) error {
   symbol VARCHAR(64) NOT NULL,
   symbol_norm VARCHAR(64) NOT NULL,
   variety VARCHAR(32) NOT NULL,
-  exchange VARCHAR(16) NOT NULL,
   kind VARCHAR(16) NOT NULL,
   bar_count BIGINT NOT NULL,
   updated_at DATETIME NOT NULL,
@@ -416,9 +411,8 @@ ORDER BY table_name`)
 }
 
 type groupedRow struct {
-	symbol   string
-	exchange string
-	cnt      int64
+	symbol string
+	cnt    int64
 }
 
 func collectGroupedRows(tx *sql.Tx, tableName string, symbols []string) ([]groupedRow, error) {
@@ -428,7 +422,7 @@ func collectGroupedRows(tx *sql.Tx, tableName string, symbols []string) ([]group
 	)
 	if len(symbols) == 0 {
 		query = fmt.Sprintf(`
-SELECT lower("InstrumentID"), MAX("Exchange"), COUNT(1)
+SELECT lower("InstrumentID"), COUNT(1)
 FROM "%s"
 GROUP BY lower("InstrumentID")`, tableName)
 	} else {
@@ -439,7 +433,7 @@ GROUP BY lower("InstrumentID")`, tableName)
 			args = append(args, strings.ToLower(strings.TrimSpace(symbol)))
 		}
 		query = fmt.Sprintf(`
-SELECT lower("InstrumentID"), MAX("Exchange"), COUNT(1)
+SELECT lower("InstrumentID"), COUNT(1)
 FROM "%s"
 WHERE lower("InstrumentID") IN (%s)
 GROUP BY lower("InstrumentID")`, tableName, strings.Join(placeholders, ","))
@@ -453,7 +447,7 @@ GROUP BY lower("InstrumentID")`, tableName, strings.Join(placeholders, ","))
 	out := make([]groupedRow, 0, 64)
 	for rows.Next() {
 		var row groupedRow
-		if err := rows.Scan(&row.symbol, &row.exchange, &row.cnt); err != nil {
+		if err := rows.Scan(&row.symbol, &row.cnt); err != nil {
 			return nil, fmt.Errorf("scan grouped row from %s failed: %w", tableName, err)
 		}
 		out = append(out, row)
@@ -473,17 +467,15 @@ func upsertRows(tx *sql.Tx, tableName string, kind string, variety string, rows 
 		}
 		if _, err := tx.Exec(`
 INSERT INTO kline_search_index
-(table_name, symbol, symbol_norm, variety, exchange, kind, bar_count, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+(table_name, symbol, symbol_norm, variety, kind, bar_count, updated_at)
+VALUES (?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
-  exchange=VALUES(exchange),
   bar_count=VALUES(bar_count),
   updated_at=VALUES(updated_at)`,
 			tableName,
 			normSymbol,
 			normSymbol,
 			variety,
-			strings.ToUpper(strings.TrimSpace(row.exchange)),
 			kind,
 			row.cnt,
 			now.Format(timeLayout),

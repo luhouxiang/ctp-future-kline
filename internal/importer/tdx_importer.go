@@ -562,7 +562,7 @@ func (s *TDXImportSession) batchCompareAndWrite(db *sql.DB, fileName string, bar
 	var dupSet map[string]bool
 	err = withSQLiteBusyRetry(func() error {
 		var qErr error
-		dupSet, qErr = loadExistingTimeSet(db, tableName, storedInstrumentID, bars[0].Exchange, bars[0].Period, bars)
+		dupSet, qErr = loadExistingTimeSet(db, tableName, storedInstrumentID, bars[0].Period, bars)
 		return qErr
 	})
 	if err != nil {
@@ -937,7 +937,7 @@ func normalizeDay(day time.Time) time.Time {
 	return time.Date(day.Year(), day.Month(), day.Day(), 0, 0, 0, 0, time.Local)
 }
 
-func loadExistingTimeSet(db *sql.DB, tableName, instrumentID, exchange, period string, bars []quotes.MinuteBar) (map[string]bool, error) {
+func loadExistingTimeSet(db *sql.DB, tableName, instrumentID, period string, bars []quotes.MinuteBar) (map[string]bool, error) {
 	minT := bars[0].MinuteTime
 	maxT := bars[0].MinuteTime
 	for _, bar := range bars[1:] {
@@ -953,14 +953,12 @@ func loadExistingTimeSet(db *sql.DB, tableName, instrumentID, exchange, period s
 SELECT "%s"
 FROM "%s"
 WHERE "InstrumentID" = ?
-  AND "Exchange" = ?
   AND "Period" = ?
   AND "%s" >= ?
   AND "%s" <= ?`, timeColumn, tableName, timeColumn, timeColumn)
 	rows, err := db.Query(
 		query,
 		strings.ToLower(strings.TrimSpace(instrumentID)),
-		exchange,
 		period,
 		minT.Format("2006-01-02 15:04:00"),
 		maxT.Format("2006-01-02 15:04:00"),
@@ -990,7 +988,6 @@ func ensureKlineTable(db *sql.DB, tableName string) error {
 	stmt := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(32) NOT NULL,
-  "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -1002,11 +999,10 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" BIGINT NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
-  PRIMARY KEY ("%s", "%s", "%s", "%s")
+  PRIMARY KEY ("%s", "%s", "%s")
 )`,
 		tableName,
 		quotes.ColInstrumentID,
-		quotes.ColExchange,
 		quotes.ColTime,
 		quotes.ColAdjustedTime,
 		quotes.ColUpdateTime,
@@ -1018,7 +1014,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		quotes.ColVolume,
 		quotes.ColOpenInterest,
 		quotes.ColSettlement,
-		quotes.ColTime, quotes.ColInstrumentID, quotes.ColExchange, quotes.ColPeriod,
+		quotes.ColTime, quotes.ColInstrumentID, quotes.ColPeriod,
 	)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure kline table failed: %w", err)
@@ -1053,8 +1049,8 @@ func upsertBarsInTx(db *sql.DB, tableName string, bars []quotes.MinuteBar) error
 
 	stmt := fmt.Sprintf(`
 INSERT INTO "%s"
-("%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s")
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+("%s","%s","%s","%s","%s","%s","%s","%s","%s","%s","%s")
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   "%s" = VALUES("%s"),
   "%s" = VALUES("%s"),
@@ -1065,7 +1061,7 @@ ON DUPLICATE KEY UPDATE
   "%s" = VALUES("%s"),
   "%s" = VALUES("%s")`,
 		tableName,
-		quotes.ColInstrumentID, quotes.ColExchange, quotes.ColTime, quotes.ColAdjustedTime, quotes.ColPeriod, quotes.ColOpen, quotes.ColHigh, quotes.ColLow, quotes.ColClose, quotes.ColVolume, quotes.ColOpenInterest, quotes.ColSettlement,
+		quotes.ColInstrumentID, quotes.ColTime, quotes.ColAdjustedTime, quotes.ColPeriod, quotes.ColOpen, quotes.ColHigh, quotes.ColLow, quotes.ColClose, quotes.ColVolume, quotes.ColOpenInterest, quotes.ColSettlement,
 		quotes.ColAdjustedTime, quotes.ColAdjustedTime,
 		quotes.ColOpen, quotes.ColOpen,
 		quotes.ColHigh, quotes.ColHigh,
@@ -1088,7 +1084,6 @@ ON DUPLICATE KEY UPDATE
 		}
 		if _, err := prep.Exec(
 			storedInstrumentID,
-			bar.Exchange,
 			bar.MinuteTime.Format("2006-01-02 15:04:00"),
 			chooseAdjustedTime(bar).Format("2006-01-02 15:04:00"),
 			bar.Period,

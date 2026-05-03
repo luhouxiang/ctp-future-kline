@@ -1313,6 +1313,20 @@ func (s *Service) ConsumePaperMarketTick(tick PaperMarketTick) error {
 	})
 }
 
+func (s *Service) ConsumePaperMarketBar(bar PaperMarketBar) error {
+	if !s.paper {
+		return nil
+	}
+	marketTS := bar.AdjustedTime
+	if marketTS.IsZero() {
+		marketTS = bar.DataTime
+	}
+	if marketTS.IsZero() {
+		marketTS = time.Now()
+	}
+	return s.matchReplayBar(bar, marketTS)
+}
+
 func (s *Service) loadPendingOrders() error {
 	items, err := s.store.ListOpenOrders(s.accountID)
 	if err != nil {
@@ -1392,6 +1406,81 @@ func (s *Service) matchReplayTick(tick replayTick) error {
 			Volume:     order.VolumeTraded,
 			TradeTime:  now,
 			TradingDay: firstNonEmpty(strings.TrimSpace(tick.TradingDay), now.Format("20060102")),
+			ReceivedAt: now,
+		}
+		if err := s.store.UpsertOrder(order); err != nil {
+			return err
+		}
+		if err := s.store.AppendTrade(tradeRec); err != nil {
+			return err
+		}
+		delete(s.pending, order.CommandID)
+		filledOrders = append(filledOrders, order)
+		trades = append(trades, tradeRec)
+	}
+	if len(trades) == 0 {
+		return s.markReplayPaperToMarketLocked(now)
+	}
+	if _, _, err := s.recalculateReplayPaperStateLocked(now); err != nil {
+		return err
+	}
+	for i := range filledOrders {
+		s.broadcast("trade_order_update", filledOrders[i])
+		s.broadcast("trade_trade_update", trades[i])
+	}
+	return nil
+}
+
+func (s *Service) matchReplayBar(bar PaperMarketBar, now time.Time) error {
+	s.paperMu.Lock()
+	defer s.paperMu.Unlock()
+	s.rememberReplayQuoteLocked(replayTick{
+		InstrumentID: strings.TrimSpace(bar.Symbol),
+		ExchangeID:   strings.TrimSpace(bar.ExchangeID),
+		ReceivedAt:   now,
+		LastPrice:    bar.Close,
+	})
+	orders := pendingOrderSlice(s.pending)
+	sort.SliceStable(orders, func(i, j int) bool {
+		if orders[i].InsertedAt.Equal(orders[j].InsertedAt) {
+			return orders[i].CommandID < orders[j].CommandID
+		}
+		return orders[i].InsertedAt.Before(orders[j].InsertedAt)
+	})
+	if len(orders) == 0 {
+		return s.markReplayPaperToMarketLocked(now)
+	}
+	var filledOrders []OrderRecord
+	var trades []TradeRecord
+	for _, order := range orders {
+		if !strings.EqualFold(order.Symbol, bar.Symbol) {
+			continue
+		}
+		price, ok := marketableReplayBarPrice(order, bar)
+		if !ok {
+			continue
+		}
+		order.VolumeTraded = order.VolumeTotalOriginal - order.VolumeCanceled
+		if order.VolumeTraded < 0 {
+			order.VolumeTraded = 0
+		}
+		order.OrderStatus = "all_traded"
+		order.SubmitStatus = "accepted"
+		order.StatusMsg = "paper replay order filled by kline replay"
+		order.UpdatedAt = now
+		tradeRec := TradeRecord{
+			AccountID:  s.accountID,
+			TradeID:    order.CommandID + "-fill",
+			OrderRef:   order.OrderRef,
+			OrderSysID: order.OrderSysID,
+			ExchangeID: firstNonEmpty(order.ExchangeID, bar.ExchangeID),
+			Symbol:     order.Symbol,
+			Direction:  order.Direction,
+			OffsetFlag: order.OffsetFlag,
+			Price:      price,
+			Volume:     order.VolumeTraded,
+			TradeTime:  now,
+			TradingDay: now.Format("20060102"),
 			ReceivedAt: now,
 		}
 		if err := s.store.UpsertOrder(order); err != nil {
@@ -1774,6 +1863,20 @@ func marketableReplayPrice(order OrderRecord, tick replayTick) (float64, bool) {
 	case "sell":
 		if tick.BidPrice1 > 0 && order.LimitPrice <= tick.BidPrice1 {
 			return tick.BidPrice1, true
+		}
+	}
+	return 0, false
+}
+
+func marketableReplayBarPrice(order OrderRecord, bar PaperMarketBar) (float64, bool) {
+	switch order.Direction {
+	case "buy":
+		if bar.Low > 0 && order.LimitPrice >= bar.Low {
+			return order.LimitPrice, true
+		}
+	case "sell":
+		if bar.High > 0 && order.LimitPrice <= bar.High {
+			return order.LimitPrice, true
 		}
 	}
 	return 0, false

@@ -100,7 +100,7 @@ const replayForm = reactive({
   sourcesText: 'replay.tickcsv',
   start: '',
   end: '',
-  mode: 'realtime',
+  mode: 'kline',
   speed: 1,
   tickDir: 'flow/ticks',
   fromFile: '',
@@ -1808,7 +1808,7 @@ onUnmounted(() => {
         <input v-model="replayForm.end" :disabled="!replayEnabled" type="datetime-local" />
         <label>模式</label>
         <select v-model="replayForm.mode" :disabled="!replayEnabled">
-          <option value="fast">fast</option>
+          <option value="kline">kline</option>
           <option value="realtime">realtime</option>
         </select>
         <label>速度</label>

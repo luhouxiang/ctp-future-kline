@@ -690,8 +690,6 @@ func buildUpsertStatement(tableName string, tasks []persistTask) (string, []any,
 	b.WriteString(`" ("`)
 	b.WriteString(colInstrumentID)
 	b.WriteString(`","`)
-	b.WriteString(colExchange)
-	b.WriteString(`","`)
 	b.WriteString(colTime)
 	b.WriteString(`","`)
 	b.WriteString(colAdjustedTime)
@@ -713,12 +711,12 @@ func buildUpsertStatement(tableName string, tasks []persistTask) (string, []any,
 	b.WriteString(colSettlement)
 	b.WriteString(`") VALUES `)
 
-	args := make([]any, 0, len(tasks)*12)
+	args := make([]any, 0, len(tasks)*11)
 	for i, task := range tasks {
 		if i > 0 {
 			b.WriteString(",")
 		}
-		b.WriteString("(?,?,?,?,?,?,?,?,?,?,?,?)")
+		b.WriteString("(?,?,?,?,?,?,?,?,?,?,?)")
 		bar := task.Bar
 		storedInstrumentID := normalizeInstrumentIDForTable(bar.InstrumentID, tableName)
 		if storedInstrumentID == "" {
@@ -726,7 +724,6 @@ func buildUpsertStatement(tableName string, tasks []persistTask) (string, []any,
 		}
 		args = append(args,
 			storedInstrumentID,
-			bar.Exchange,
 			bar.MinuteTime.Format("2006-01-02 15:04:00"),
 			chooseAdjustedTime(bar).Format("2006-01-02 15:04:00"),
 			bar.Period,
@@ -779,7 +776,6 @@ func ensureMMTable(db *sql.DB, tableName string) error {
 	stmt := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(32) NOT NULL,
-  "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -791,11 +787,10 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" BIGINT NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
-  PRIMARY KEY ("%s", "%s", "%s", "%s")
+  PRIMARY KEY ("%s", "%s", "%s")
 )`,
 		tableName,
 		colInstrumentID,
-		colExchange,
 		colTime,
 		colAdjustedTime,
 		colUpdateTime,
@@ -807,7 +802,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		colVolume,
 		colOpenInterest,
 		colSettlement,
-		colTime, colInstrumentID, colExchange, colPeriod,
+		colTime, colInstrumentID, colPeriod,
 	)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("create mm table failed: %w", err)

@@ -16,7 +16,6 @@ import (
 
 const (
 	colInstrumentID = "InstrumentID"
-	colExchange     = "Exchange"
 	colDataTime     = "DataTime"
 	colAdjustedTime = "AdjustedTime"
 	colUpdateTime   = "UpdateTime"
@@ -587,11 +586,11 @@ func mergeContinuousAcrossMidnight(ranges []klineagg.SessionRange) []klineagg.Se
 
 func queryAllMinuteBars(db *sql.DB, srcTable, instrumentID string) ([]klineagg.MinuteBar, error) {
 	rows, err := db.Query(fmt.Sprintf(`
-SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s","%s"
+SELECT "%s","%s","%s","%s","%s","%s","%s","%s","%s"
 FROM "%s"
 WHERE "%s"=? AND "%s"='1m'
 ORDER BY "%s" ASC
-`, colInstrumentID, colExchange, colDataTime, colAdjustedTime, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, srcTable, colInstrumentID, colPeriod, colAdjustedTime), instrumentID)
+`, colInstrumentID, colDataTime, colAdjustedTime, colOpen, colHigh, colLow, colClose, colVolume, colOpenInterest, srcTable, colInstrumentID, colPeriod, colAdjustedTime), instrumentID)
 	if err != nil {
 		return nil, fmt.Errorf("query all minute bars failed: %w", err)
 	}
@@ -599,7 +598,7 @@ ORDER BY "%s" ASC
 	out := make([]klineagg.MinuteBar, 0, 8192)
 	for rows.Next() {
 		var b klineagg.MinuteBar
-		if err := rows.Scan(&b.InstrumentID, &b.Exchange, &b.DataTime, &b.AdjustedTime, &b.Open, &b.High, &b.Low, &b.Close, &b.Volume, &b.OpenInterest); err != nil {
+		if err := rows.Scan(&b.InstrumentID, &b.DataTime, &b.AdjustedTime, &b.Open, &b.High, &b.Low, &b.Close, &b.Volume, &b.OpenInterest); err != nil {
 			return nil, err
 		}
 		out = append(out, b)
@@ -623,8 +622,8 @@ func upsertMMBars(db *sql.DB, table string, bars []klineagg.AggBar) error {
 
 	stmt := fmt.Sprintf(`
 INSERT INTO "%s"
-("InstrumentID","Exchange","DataTime","AdjustedTime","Period","Open","High","Low","Close","Volume","OpenInterest","SettlementPrice")
-VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+("InstrumentID","DataTime","AdjustedTime","Period","Open","High","Low","Close","Volume","OpenInterest","SettlementPrice")
+VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON DUPLICATE KEY UPDATE
   "AdjustedTime" = VALUES("AdjustedTime"),
   "Open" = VALUES("Open"),
@@ -644,7 +643,6 @@ ON DUPLICATE KEY UPDATE
 	for _, b := range bars {
 		if _, err := prep.Exec(
 			strings.ToLower(strings.TrimSpace(b.InstrumentID)),
-			b.Exchange,
 			b.DataTime.Format("2006-01-02 15:04:00"),
 			b.AdjustedTime.Format("2006-01-02 15:04:00"),
 			b.Period,
@@ -666,7 +664,6 @@ func ensureMMKlineTable(db *sql.DB, table string) error {
 	stmt := fmt.Sprintf(`
 CREATE TABLE IF NOT EXISTS "%s" (
   "%s" VARCHAR(32) NOT NULL,
-  "%s" VARCHAR(16) NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL,
   "%s" DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -678,11 +675,10 @@ CREATE TABLE IF NOT EXISTS "%s" (
   "%s" BIGINT NOT NULL,
   "%s" DOUBLE NOT NULL,
   "%s" DOUBLE NOT NULL,
-  PRIMARY KEY ("%s", "%s", "%s", "%s")
+  PRIMARY KEY ("%s", "%s", "%s")
 )`,
 		table,
 		colInstrumentID,
-		colExchange,
 		colDataTime,
 		colAdjustedTime,
 		colUpdateTime,
@@ -694,7 +690,7 @@ CREATE TABLE IF NOT EXISTS "%s" (
 		colVolume,
 		colOpenInterest,
 		colSettlement,
-		colDataTime, colInstrumentID, colExchange, colPeriod,
+		colDataTime, colInstrumentID, colPeriod,
 	)
 	if _, err := db.Exec(stmt); err != nil {
 		return fmt.Errorf("ensure mm kline table failed: %w", err)

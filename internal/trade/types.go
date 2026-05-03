@@ -228,6 +228,18 @@ type PaperMarketTick struct {
 	AskPrice1 float64 `json:"ask_price1"`
 }
 
+type PaperMarketBar struct {
+	Symbol       string    `json:"symbol"`
+	ExchangeID   string    `json:"exchange_id"`
+	Timeframe    string    `json:"timeframe"`
+	AdjustedTime time.Time `json:"adjusted_time"`
+	DataTime     time.Time `json:"data_time"`
+	Open         float64   `json:"open"`
+	High         float64   `json:"high"`
+	Low          float64   `json:"low"`
+	Close        float64   `json:"close"`
+}
+
 type CancelOrderRequest struct {
 	// AccountID 是目标账户标识。
 	AccountID string `json:"account_id"`

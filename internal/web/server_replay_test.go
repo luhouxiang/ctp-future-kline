@@ -49,7 +49,7 @@ func TestHandleReplayStartResetsReplayPaperTradeState(t *testing.T) {
 		cfg: config.AppConfig{
 			CTP: config.CTPConfig{
 				FlowPath:           t.TempDir(),
-				ReplayDefaultMode:  "fast",
+				ReplayDefaultMode:  "realtime",
 				ReplayDefaultSpeed: 1,
 			},
 		},
@@ -66,7 +66,7 @@ func TestHandleReplayStartResetsReplayPaperTradeState(t *testing.T) {
 		"2026-03-01 09:00:00.000,rb2505,SHFE,20260303,20260301,09:00:00,100.1,1,10,99,100,100.2,0",
 	})
 
-	body := bytes.NewBufferString(`{"mode":"fast","tick_dir":"` + filepath.ToSlash(tickDir) + `"}`)
+	body := bytes.NewBufferString(`{"mode":"realtime","speed":1000,"tick_dir":"` + filepath.ToSlash(tickDir) + `"}`)
 	req := httptest.NewRequest(http.MethodPost, "/api/replay/start", body)
 	rr := httptest.NewRecorder()
 	srv.handleReplayStart(rr, req)
@@ -171,9 +171,6 @@ func TestReplayTickDirSearchFindsCSVContract(t *testing.T) {
 	}
 	if items[0].Symbol != "ag2610" || items[0].Type != "contract" || items[0].Variety != "ag" {
 		t.Fatalf("unexpected item: %+v", items[0])
-	}
-	if items[0].Exchange != "SHFE" {
-		t.Fatalf("exchange = %q, want SHFE", items[0].Exchange)
 	}
 }
 

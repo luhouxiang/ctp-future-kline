@@ -14,6 +14,7 @@ const props = defineProps({
   channelDebug: { type: Boolean, default: false },
   reversalSettings: { type: Object, default: () => ({}) },
   lightweightOnly: { type: Boolean, default: false },
+  replayKlineMode: { type: Boolean, default: false },
 })
 
 const emit = defineEmits([
@@ -27,6 +28,7 @@ const emit = defineEmits([
   'toggle-reversal',
   'set-reversal-settings',
   'recalc-reversal',
+  'open-kline-replay',
 ])
 
 const frames = ['1m', '5m', '15m', '30m', '1h', '1d']
@@ -77,6 +79,12 @@ function applyReversalSettings(force = false) {
     <div class="tv-brand">{{ props.symbol || '--' }} • {{ props.type }} <small>{{ props.variety }}</small></div>
     <div class="tv-group tv-timeframe-group">
       <button v-for="f in frames" :key="f" class="tv-btn" :class="{ active: props.timeframe === f }" @click="emit('set-timeframe', f)">{{ f }}</button>
+      <button
+        v-if="props.replayKlineMode"
+        class="tv-btn tv-kline-replay-btn"
+        title="复盘训练"
+        @click="emit('open-kline-replay', $event)"
+      >▶</button>
     </div>
     <div class="tv-toolbar-spacer"></div>
     <div class="tv-group tv-main-actions">
