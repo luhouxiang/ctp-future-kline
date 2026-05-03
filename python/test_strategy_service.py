@@ -56,7 +56,7 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
             self.strategy.on_bar(bar_req(close=close, idx=i))
 
     def state(self):
-        return self.strategy.states[("inst-1", "rb2601")]
+        return self.strategy.states[("live", "inst-1", "rb2601")]
 
     def test_not_enough_bars_keeps_waiting(self):
         self.warmup(18)
@@ -133,6 +133,43 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(state.state, WAIT_BREAK_BELOW_MA20)
         self.assertTrue(state.reset_requires_full_break)
         self.assertIsNone(state.touch_open)
+
+    def test_replay_state_does_not_pollute_live_state(self):
+        self.warmup()
+        req = bar_req(open_=100, high=100, low=99, close=99, idx=21)
+        req["mode"] = "replay"
+
+        self.strategy.on_replay_bar(req)
+
+        self.assertEqual(self.strategy.states[("replay", "inst-1", "rb2601")].state, WAIT_BREAK_BELOW_MA20)
+        self.assertEqual(self.strategy.states[("live", "inst-1", "rb2601")].state, WAIT_BREAK_BELOW_MA20)
+
+    def test_start_instance_applies_warmup_bars(self):
+        warmup = [
+            {
+                "symbol": "rb2601",
+                "data_time": f"2026-01-01T09:{i:02d}:00+08:00",
+                "open": 100,
+                "high": 100,
+                "low": 100,
+                "close": 100,
+            }
+            for i in range(1, 21)
+        ]
+        self.strategy.start_instance({
+            "instance_id": "replay-1",
+            "strategy_id": "ma20.pullback_short",
+            "mode": "replay",
+            "symbols": ["rb2601"],
+            "params": {"ma_period": 20, "max_wait_bars": 6, "warmup_bars": warmup},
+        })
+
+        state = self.strategy.states[("replay", "replay-1", "rb2601")]
+        self.assertEqual(len(state.closes), 20)
+        req = bar_req(instance_id="replay-1", open_=100, high=100, low=99, close=99, idx=21)
+        req["mode"] = "replay"
+        out = self.strategy.on_replay_bar(req)
+        self.assertEqual(out["trace"]["step_key"], BROKEN_BELOW_MA20)
 
 
 if __name__ == "__main__":

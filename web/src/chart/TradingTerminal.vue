@@ -766,8 +766,9 @@ async function startStrategyFromAnchor(anchor, definition) {
       ? JSON.parse(JSON.stringify(definition.default_params))
       : {}
     const instanceID = `chart-${Date.now()}`
-    const mode = dataMode.value === 'replay' ? 'replay' : 'paper'
+    const mode = replayKlineMode.value || dataMode.value === 'replay' ? 'replay' : 'paper'
     const displayTime = formatAnchorTime(anchor.data_time || anchor.adjusted_time || anchor.plot_time)
+    const warmupBars = paneRef.value?.getWarmupBarsBeforeAnchor?.(anchor, 20) || []
     const instance = {
       instance_id: instanceID,
       strategy_id: strategyID,
@@ -781,6 +782,8 @@ async function startStrategyFromAnchor(anchor, definition) {
         chart_anchor: anchor,
         chart_start_time: displayTime,
         start_source: 'chart_context_menu',
+        warmup_bars: warmupBars,
+        warmup_count: warmupBars.length,
       },
     }
     const saveResp = await fetch('/api/strategy/instances', {

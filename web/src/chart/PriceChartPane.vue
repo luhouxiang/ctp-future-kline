@@ -2252,6 +2252,42 @@ function getSelectedBarAnchor() {
   return buildBarAnchor(selectedBarIndex.value);
 }
 
+function buildStrategyWarmupBar(bar) {
+  if (!bar) return null;
+  return {
+    symbol:
+      state.resolvedSymbol ||
+      String(props.scope?.symbol || "")
+        .trim()
+        .toLowerCase(),
+    variety: String(props.scope?.variety || "").trim().toLowerCase(),
+    instrument_id:
+      state.resolvedSymbol ||
+      String(props.scope?.symbol || "")
+        .trim()
+        .toLowerCase(),
+    period: String(props.scope?.timeframe || "1m").trim().toLowerCase(),
+    data_time: getActualDataTime(bar),
+    adjusted_time: getAdjustedTime(bar),
+    open: Number(bar.open),
+    high: Number(bar.high),
+    low: Number(bar.low),
+    close: Number(bar.close),
+    volume: Number(bar.volume),
+    open_interest: Number(bar.open_interest),
+  };
+}
+
+function getWarmupBarsBeforeAnchor(anchor, count = 20) {
+  const anchorIndex = Number(anchor?.index);
+  if (!Number.isFinite(anchorIndex) || anchorIndex <= 0) return [];
+  const start = Math.max(0, Math.floor(anchorIndex) - Math.max(1, Number(count) || 20));
+  return state.bars
+    .slice(start, Math.floor(anchorIndex))
+    .map((bar) => buildStrategyWarmupBar(bar))
+    .filter(Boolean);
+}
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -2533,6 +2569,7 @@ defineExpose({
   onDeleteSelected,
   reload: loadInitialChunk,
   openKlineReplayPanelFromToolbar,
+  getWarmupBarsBeforeAnchor,
   reloadRecentWindow,
   applyRealtimeBarUpdate,
   applyQuoteSynthesis,

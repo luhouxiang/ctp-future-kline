@@ -28,6 +28,8 @@ web/node_modules/
 # Dependency directories (remove the comment below to include it)
 # vendor/
 
+python/__pycache__/
+
 # Go workspace file
 go.work
 go.work.sum
