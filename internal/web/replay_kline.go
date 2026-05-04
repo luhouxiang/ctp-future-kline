@@ -11,6 +11,7 @@ import (
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/quotes"
 	"ctp-future-kline/internal/replay"
+	"ctp-future-kline/internal/strategy"
 	"ctp-future-kline/internal/trade"
 )
 
@@ -105,6 +106,20 @@ func (s *Server) ConsumeKlineBar(ctx context.Context, taskID string, req replay.
 			return err
 		}
 	}
+	strategy.PublishReplayBar(strategy.BarEvent{
+		Variety:      sub.Variety,
+		InstrumentID: sub.Symbol,
+		Exchange:     bar.Exchange,
+		DataTime:     bar.DataTime,
+		AdjustedTime: bar.AdjustedTime,
+		Period:       sub.Timeframe,
+		Open:         bar.Open,
+		High:         bar.High,
+		Low:          bar.Low,
+		Close:        bar.Close,
+		Volume:       bar.Volume,
+		OpenInterest: bar.OpenInterest,
+	})
 	// logger.Debug("kline replay bar consumed", "task_id", taskID, "symbol", sub.Symbol, "timeframe", sub.Timeframe, "adjusted_time", bar.AdjustedTime, "close", bar.Close)
 	return nil
 }

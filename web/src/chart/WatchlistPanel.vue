@@ -30,6 +30,7 @@ const emit = defineEmits([
   'stop-line-orders',
   'strategy-trace-focus',
   'strategy-instance-stop',
+  'strategy-run-click',
   'channel-action',
   'channel-settings',
   'reversal-action',
@@ -305,14 +306,23 @@ const ma20Steps = [
   { key: 'DONE', label: '已触发/已完成', index: 5 },
 ]
 
+const ma20WeakSteps = [
+  { key: 'WAIT_MA_READY', label: '等待 MA20/MA60/MA120', index: 1 },
+  { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 2 },
+  { key: 'TREND_STRUCTURE_FILTER', label: '趋势/结构过滤', index: 3 },
+  { key: 'WAIT_PULLBACK_TOUCH_MA20', label: '等待弱反触碰 MA20', index: 4 },
+  { key: 'WAIT_BREAK_REACTION_LOW', label: '等待跌破反抽低点', index: 5 },
+  { key: 'SHORT_SIGNAL', label: '做空信号', index: 6 },
+]
+
 const strategyStepRows = computed(() => {
   const trace = latestStrategyTrace.value || {}
   const currentIndex = Number(trace.step_index || 0)
   const currentKey = String(trace.step_key || '')
   const strategyID = String(trace.strategy_id || runningStrategyInstances.value[0]?.strategy_id || '')
-  const base = strategyID === 'ma20.pullback_short' || !strategyID
-    ? ma20Steps
-    : [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
+  let base = [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
+  if (strategyID === 'ma20.weak_pullback_short' || strategyID.startsWith('ma20.weak_pullback_short.')) base = ma20WeakSteps
+  else if (strategyID === 'ma20.pullback_short' || !strategyID) base = ma20Steps
   return base.map((step) => {
     let state = 'waiting'
     if (currentIndex > step.index || String(trace.status || '') === 'done') state = 'done'
@@ -329,6 +339,12 @@ const strategyTraceRows = computed(() => (
     statusLabel: traceStatusLabel(row?.status),
     checks: Array.isArray(row?.checks) ? row.checks : [],
   }))
+))
+
+const strategyBacktestRows = computed(() => (
+  (Array.isArray(props.strategy?.backtests) ? props.strategy.backtests : [])
+    .filter((row) => String(row?.strategy_id || '').startsWith('ma20.weak_pullback_short'))
+    .slice(0, 6)
 ))
 
 function formatTraceTime(value) {
@@ -381,6 +397,21 @@ function stepStateLabel(value) {
   if (v === 'passed' || v === 'allowed' || v === 'simulated_submitted') return '满足'
   if (v === 'failed' || v === 'blocked') return '阻断'
   return '等待'
+}
+
+function formatBacktestSummary(summary) {
+  const stats = summary && typeof summary === 'object' ? summary.stats || {} : {}
+  const rows = Object.entries(stats)
+  if (!rows.length) return '--'
+  return rows.map(([algo, item]) => {
+    const success = Number(item?.success || 0)
+    const signals = Number(item?.signals || 0)
+    const signalRate = Number(item?.signal_success_rate || 0)
+    const formationRate = Number(item?.signal_formation_rate || 0)
+    const rateText = Number.isFinite(signalRate) ? `${(signalRate * 100).toFixed(1)}%` : '--'
+    const formationText = Number.isFinite(formationRate) ? `${(formationRate * 100).toFixed(1)}%` : '--'
+    return `${algo}: ${success}/${signals} 成功率${rateText} 成形${formationText}`
+  }).join(' | ')
 }
 </script>
 
@@ -488,7 +519,10 @@ function stepStateLabel(value) {
 
     <div v-else-if="props.open && props.activeTab === 'strategy'" class="tv-watchlist-body tv-strategy-tab">
       <div class="tv-quote-card">
-        <div class="tv-channel-settings-head">策略运行</div>
+        <div class="tv-channel-settings-head">
+          <span>策略运行</span>
+          <button type="button" class="tv-strategy-run-btn" @click.stop="emit('strategy-run-click', $event)">运行策略</button>
+        </div>
         <div class="tv-quote-strip">
           <span class="tv-quote-strip-label">连接</span>
           <span class="tv-quote-strip-value">{{ props.strategy?.status?.connected ? '已连接' : '未连接' }}</span>
@@ -557,6 +591,17 @@ function stepStateLabel(value) {
           </div>
         </div>
         <div v-if="!strategyInstances.length" class="tv-object-empty">暂无策略实例</div>
+      </div>
+
+      <div class="tv-quote-card">
+        <div class="tv-channel-settings-head">回放报告</div>
+        <div class="tv-strategy-backtest-list">
+          <div v-for="item in strategyBacktestRows" :key="item.run_id" class="tv-strategy-backtest-row">
+            <strong>{{ item.symbol || 'all' }} · {{ item.timeframe || '--' }}</strong>
+            <small>{{ formatBacktestSummary(item.summary) }}</small>
+          </div>
+        </div>
+        <div v-if="!strategyBacktestRows.length" class="tv-object-empty">暂无回放报告</div>
       </div>
 
       <div class="tv-quote-card">
@@ -968,6 +1013,15 @@ function stepStateLabel(value) {
   border: 1px solid rgba(216, 75, 69, 0.55);
   background: transparent;
   color: #ff7a73;
+  cursor: pointer;
+}
+
+.tv-strategy-run-btn {
+  min-height: 24px;
+  padding: 0 8px;
+  border: 1px solid rgba(56, 189, 248, 0.45);
+  background: rgba(14, 116, 144, 0.24);
+  color: #e0f2fe;
   cursor: pointer;
 }
 

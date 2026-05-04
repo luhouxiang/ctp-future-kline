@@ -4,6 +4,7 @@ package strategy
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"ctp-future-kline/internal/config"
+	dbx "ctp-future-kline/internal/db"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/queuewatch"
 )
@@ -34,6 +36,8 @@ type Manager struct {
 	instances   map[string]StrategyInstance
 	queueHandle *queuewatch.QueueHandle
 	queueCap    int
+
+	backtestMarketDSN string
 }
 
 func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Registry) (*Manager, error) {
@@ -70,6 +74,12 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 	}
 	SetDefaultSink(m)
 	return m, nil
+}
+
+func (m *Manager) SetBacktestMarketDSN(dsn string) {
+	m.mu.Lock()
+	m.backtestMarketDSN = strings.TrimSpace(dsn)
+	m.mu.Unlock()
 }
 
 func (m *Manager) Close() error {
@@ -411,6 +421,9 @@ func (m *Manager) OrdersStatus() OrdersStatus {
 }
 
 func (m *Manager) RunBacktest(req BacktestRequest) (StrategyRun, error) {
+	if shouldRunLocalMA20Backtest(req) {
+		return m.runLocalMA20Backtest(req)
+	}
 	m.mu.RLock()
 	client := m.client
 	m.mu.RUnlock()
@@ -459,6 +472,268 @@ func (m *Manager) RunBacktest(req BacktestRequest) (StrategyRun, error) {
 	}
 	m.broadcast("strategy_backtest_done", run)
 	return run, nil
+}
+
+func shouldRunLocalMA20Backtest(req BacktestRequest) bool {
+	if IsMA20WeakStrategyID(req.Instance.StrategyID) {
+		return true
+	}
+	if strings.EqualFold(strings.TrimSpace(ma20ParamString(req.Parameters, "engine", "")), "go_ma20") {
+		return true
+	}
+	return false
+}
+
+func (m *Manager) runLocalMA20Backtest(req BacktestRequest) (StrategyRun, error) {
+	if strings.TrimSpace(req.RunID) == "" {
+		req.RunID = mustRunID("backtest")
+	}
+	run := StrategyRun{
+		RunID:      req.RunID,
+		InstanceID: req.Instance.InstanceID,
+		StrategyID: firstNonEmpty(req.Instance.StrategyID, MA20WeakStrategyID),
+		RunType:    RunTypeBacktest,
+		Status:     "running",
+		Symbol:     req.Symbol,
+		Timeframe:  firstNonEmpty(req.Timeframe, "5m"),
+		StartedAt:  time.Now(),
+		Summary:    map[string]any{},
+	}
+	if err := m.store.SaveRun(run); err != nil {
+		return StrategyRun{}, err
+	}
+	m.mu.RLock()
+	marketDSN := strings.TrimSpace(m.backtestMarketDSN)
+	m.mu.RUnlock()
+	if marketDSN == "" {
+		run.Status = InstanceStatusError
+		run.LastError = "market realtime DSN is not configured"
+		finished := time.Now()
+		run.FinishedAt = &finished
+		_ = m.store.SaveRun(run)
+		return run, fmt.Errorf("%s", run.LastError)
+	}
+	db, err := dbx.Open(marketDSN)
+	if err != nil {
+		run.Status = InstanceStatusError
+		run.LastError = err.Error()
+		finished := time.Now()
+		run.FinishedAt = &finished
+		_ = m.store.SaveRun(run)
+		return run, err
+	}
+	defer db.Close()
+	resp, err := runLocalMA20BacktestWithDB(context.Background(), db, req)
+	if err != nil {
+		run.Status = InstanceStatusError
+		run.LastError = err.Error()
+		finished := time.Now()
+		run.FinishedAt = &finished
+		_ = m.store.SaveRun(run)
+		return run, err
+	}
+	resp.RunID = req.RunID
+	outputPath, err := m.writeBacktestOutput(req.RunID, resp)
+	if err != nil {
+		return run, err
+	}
+	run.Status = resp.Status
+	run.OutputPath = outputPath
+	run.Summary = resp.Summary
+	finished := time.Now()
+	run.FinishedAt = &finished
+	if err := m.store.SaveRun(run); err != nil {
+		return StrategyRun{}, err
+	}
+	m.broadcast("strategy_backtest_done", run)
+	return run, nil
+}
+
+func runLocalMA20BacktestWithDB(ctx context.Context, db *sql.DB, req BacktestRequest) (BacktestResponse, error) {
+	cfg := DefaultMA20BacktestConfig()
+	cfg.Period = firstNonEmpty(req.Timeframe, cfg.Period)
+	cfg.Tables = ma20BacktestTablesFromRequest(req)
+	cfg.Algorithms = ma20ParamStringList(req.Parameters, "algorithms", cfg.Algorithms)
+	if _, ok := req.Parameters["algorithms"]; !ok {
+		if algo := MA20AlgorithmForStrategyID(req.Instance.StrategyID); algo != "" {
+			cfg.Algorithms = []string{algo}
+		}
+	}
+	cfg.ObservationBars = ma20ParamInt(req.Parameters, "observation_bars", cfg.ObservationBars)
+	cfg.ProfitATRMultiple = ma20ParamFloat(req.Parameters, "profit_atr_multiple", cfg.ProfitATRMultiple)
+	cfg.AdverseATRMultiple = ma20ParamFloat(req.Parameters, "adverse_atr_multiple", cfg.AdverseATRMultiple)
+	cfg.StructureWaitBars = ma20ParamInt(req.Parameters, "structure_wait_bars", cfg.StructureWaitBars)
+	cfg.TouchWaitBars = ma20ParamInt(req.Parameters, "touch_wait_bars", cfg.TouchWaitBars)
+	cfg.TriggerWaitBars = ma20ParamInt(req.Parameters, "trigger_wait_bars", cfg.TriggerWaitBars)
+	cfg.SwingLookbackBars = ma20ParamInt(req.Parameters, "swing_lookback_bars", cfg.SwingLookbackBars)
+	cfg.SlopeLookbackBars = ma20ParamInt(req.Parameters, "slope_lookback_bars", cfg.SlopeLookbackBars)
+	cfg.ReportAttemptLimit = ma20ParamInt(req.Parameters, "report_attempt_limit", cfg.ReportAttemptLimit)
+	if start, ok, err := parseBacktestOptionalTime(req.StartTime); err != nil {
+		return BacktestResponse{}, err
+	} else if ok {
+		cfg.StartTime = start
+	}
+	if end, ok, err := parseBacktestOptionalTime(req.EndTime); err != nil {
+		return BacktestResponse{}, err
+	} else if ok {
+		cfg.EndTime = end
+	}
+	return RunMA20Backtest(ctx, db, cfg)
+}
+
+func ma20BacktestTablesFromRequest(req BacktestRequest) []string {
+	if items := ma20ParamStringList(req.Parameters, "tables", nil); len(items) > 0 {
+		return items
+	}
+	symbol := strings.ToLower(strings.TrimSpace(req.Symbol))
+	if symbol == "" || symbol == "all" || symbol == "*" {
+		return append([]string(nil), DefaultMA20BacktestTables...)
+	}
+	variety := symbol
+	if strings.HasPrefix(variety, "future_kline_l9_mm_") {
+		return []string{variety}
+	}
+	if strings.HasSuffix(variety, "l9") {
+		variety = strings.TrimSuffix(variety, "l9")
+	} else if extracted := leadingLetters(variety); extracted != "" {
+		variety = extracted
+	}
+	if variety == "" {
+		return append([]string(nil), DefaultMA20BacktestTables...)
+	}
+	return []string{"future_kline_l9_mm_" + variety}
+}
+
+func leadingLetters(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	var b strings.Builder
+	for _, r := range value {
+		if r >= 'a' && r <= 'z' {
+			b.WriteRune(r)
+			continue
+		}
+		break
+	}
+	return b.String()
+}
+
+func ma20ParamStringList(params map[string]any, key string, fallback []string) []string {
+	if params == nil {
+		return fallback
+	}
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	switch v := raw.(type) {
+	case []string:
+		return sanitizeMA20List(v)
+	case []any:
+		items := make([]string, 0, len(v))
+		for _, item := range v {
+			items = append(items, fmt.Sprint(item))
+		}
+		return sanitizeMA20List(items)
+	case string:
+		return sanitizeMA20List(strings.Split(v, ","))
+	default:
+		return fallback
+	}
+}
+
+func ma20ParamInt(params map[string]any, key string, fallback int) int {
+	if params == nil {
+		return fallback
+	}
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	switch v := raw.(type) {
+	case int:
+		return v
+	case int64:
+		return int(v)
+	case float64:
+		return int(v)
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil {
+			return int(n)
+		}
+	case string:
+		var out int
+		if _, err := fmt.Sscanf(strings.TrimSpace(v), "%d", &out); err == nil {
+			return out
+		}
+	}
+	return fallback
+}
+
+func ma20ParamString(params map[string]any, key string, fallback string) string {
+	if params == nil {
+		return fallback
+	}
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	return strings.TrimSpace(fmt.Sprint(raw))
+}
+
+func ma20ParamFloat(params map[string]any, key string, fallback float64) float64 {
+	if params == nil {
+		return fallback
+	}
+	raw, ok := params[key]
+	if !ok {
+		return fallback
+	}
+	switch v := raw.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case json.Number:
+		n, err := v.Float64()
+		if err == nil {
+			return n
+		}
+	case string:
+		var out float64
+		if _, err := fmt.Sscanf(strings.TrimSpace(v), "%f", &out); err == nil {
+			return out
+		}
+	}
+	return fallback
+}
+
+func parseBacktestOptionalTime(raw string) (time.Time, bool, error) {
+	value := strings.TrimSpace(raw)
+	if value == "" {
+		return time.Time{}, false, nil
+	}
+	layouts := []string{
+		time.RFC3339Nano,
+		time.RFC3339,
+		"2006-01-02 15:04:05",
+		"2006-01-02 15:04",
+	}
+	value = strings.ReplaceAll(value, "T", " ")
+	for _, layout := range layouts {
+		candidate := value
+		if layout == time.RFC3339Nano || layout == time.RFC3339 {
+			candidate = raw
+		}
+		if ts, err := time.ParseInLocation(layout, strings.TrimSpace(candidate), time.Local); err == nil {
+			return ts, true, nil
+		}
+	}
+	return time.Time{}, false, fmt.Errorf("invalid backtest time: %s", raw)
 }
 
 func (m *Manager) RunParameterSweep(req ParameterSweepRequest) (StrategyRun, error) {

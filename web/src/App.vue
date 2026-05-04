@@ -198,7 +198,7 @@ const tradeForm = reactive({
 const backtestForm = reactive({
   instance_id: '',
   symbol: '',
-  timeframe: '1m',
+  timeframe: '5m',
   start_time: '',
   end_time: '',
 })
@@ -903,6 +903,18 @@ async function runBacktest() {
   }
   addLog('回测任务已提交')
   await fetchStrategyBundle()
+}
+
+function formatBacktestSummary(summary) {
+  const stats = summary && typeof summary === 'object' ? summary.stats || {} : {}
+  const rows = Object.entries(stats)
+  if (!rows.length) return '--'
+  return rows.map(([algo, item]) => {
+    const signals = Number(item?.signals || 0)
+    const success = Number(item?.success || 0)
+    const rate = Number(item?.signal_success_rate || 0)
+    return `${algo}: ${success}/${signals} ${Number.isFinite(rate) ? (rate * 100).toFixed(1) : '0.0'}%`
+  }).join(' | ')
 }
 
 async function startReplay() {
@@ -2005,7 +2017,7 @@ onUnmounted(() => {
       <h4>最近回测</h4>
       <div class="log-box">
         <div v-for="item in strategyState.backtests" :key="item.run_id">
-          {{ item.started_at || '--' }} | {{ item.run_id }} | {{ item.symbol }} | {{ item.status }} | {{ item.output_path || '--' }}
+          {{ item.started_at || '--' }} | {{ item.run_id }} | {{ item.symbol || 'all' }} | {{ item.status }} | {{ formatBacktestSummary(item.summary) }} | {{ item.output_path || '--' }}
         </div>
       </div>
     </div>

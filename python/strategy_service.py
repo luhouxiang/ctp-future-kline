@@ -90,6 +90,16 @@ WAIT_BREAK_TOUCH_OPEN = "WAIT_BREAK_TOUCH_OPEN"
 # 策略流程已完成：已经触发 SHORT 信号，后续不再重复触发。
 DONE = "DONE"
 
+# MA20 弱反弹做空策略步骤：bar 驱动，不再依赖 tick 入场。
+TREND_STRUCTURE_FILTER = "TREND_STRUCTURE_FILTER"
+WAIT_PULLBACK_TOUCH_MA20 = "WAIT_PULLBACK_TOUCH_MA20"
+WAIT_BREAK_REACTION_LOW = "WAIT_BREAK_REACTION_LOW"
+SHORT_SIGNAL = "SHORT_SIGNAL"
+MA20_WEAK_STRATEGY_ID = "ma20.weak_pullback_short"
+MA20_WEAK_BASELINE_STRATEGY_ID = "ma20.weak_pullback_short.baseline"
+MA20_WEAK_HARD_FILTER_STRATEGY_ID = "ma20.weak_pullback_short.hard_filter"
+MA20_WEAK_SCORE_FILTER_STRATEGY_ID = "ma20.weak_pullback_short.score_filter"
+
 
 # -----------------------------------------------------------------------------
 # 基础类型转换与请求字段读取工具
@@ -426,6 +436,32 @@ class PullbackShortState:
     reset_requires_full_break: bool = False
 
 
+@dataclass
+class WeakPullbackShortState:
+    """State for the automated weak MA20 pullback short strategy."""
+
+    state: str = WAIT_BREAK_BELOW_MA20
+    opens: list[float] = field(default_factory=list)
+    highs: list[float] = field(default_factory=list)
+    lows: list[float] = field(default_factory=list)
+    closes: list[float] = field(default_factory=list)
+    last_bar_ts: float | None = None
+    prev_close: float | None = None
+    prev_ma20: float | None = None
+    break_time: str = ""
+    break_index: int = -1
+    bars_since_break: int = 0
+    reaction_low: float | None = None
+    touch_open: float | None = None
+    touch_high: float | None = None
+    touch_ma20: float | None = None
+    touch_time: str = ""
+    trigger_wait_bars: int = 0
+    regime: str = ""
+    bullish_pause_score: float = 0.0
+    bearish_failure_score: float = 0.0
+
+
 # -----------------------------------------------------------------------------
 # MA20 反抽做空策略
 # -----------------------------------------------------------------------------
@@ -459,8 +495,10 @@ class MA20PullbackShortStrategy(Strategy):
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
-    def __init__(self):
+    def __init__(self, definition=None):
         """初始化状态容器与锁。"""
+        if definition is not None:
+            self.definition = definition
         # states 保存每个 (mode, instance_id, symbol) 对应的 PullbackShortState。
         self.states = {}
         # gRPC server 使用线程池处理请求，因此策略状态读写需要加锁。
@@ -690,10 +728,11 @@ class MA20PullbackShortStrategy(Strategy):
 
         # 如果已经完成，则不再重复触发信号，只继续维护 prev_close/prev_ma。
         if state.state == DONE:
+            self._reset_after_failure(state)
             state.prev_close = close
             state.prev_ma = ma20
-            trace = self._bar_trace(request, state, DONE, "已触发/已完成", 5, "done", "strategy already done", [], ma20, ma_period)
-            return _no_signal(request, "strategy already done", self._base_metrics(state, ma20, ma_period), trace)
+            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ma_label}", 2, "waiting", "ready for next attempt", [], ma20, ma_period)
+            return _no_signal(request, "ready for next attempt", self._base_metrics(state, ma20, ma_period), trace)
 
         # 默认 trace 信息。后续每个状态分支会按实际情况覆盖。
         step_key = state.state
@@ -762,7 +801,47 @@ class MA20PullbackShortStrategy(Strategy):
                 _check(f"未重新站上{ma_label}", not stood_above, close, ma20, close - ma20, "重新站上则形态失败"),
                 _check("等待未超时", state.wait_bars < max_wait_bars, state.wait_bars, max_wait_bars, wait_remaining),
                 _check("触碰K开盘价有效", state.touch_open is not None, state.touch_open, "not null"),
+                _check("K线跌破触碰K开盘价", state.touch_open is not None and low <= state.touch_open, low, state.touch_open),
             ]
+            if state.touch_open is not None and low <= state.touch_open:
+                state.state = DONE
+                metrics = self._base_metrics(state, ma20, ma_period)
+                metrics.update(
+                    {
+                        "signal": "SHORT",
+                        "touch_open": state.touch_open,
+                        "touch_high": state.touch_high,
+                        "touch_ma20": state.touch_ma20,
+                        "touch_time": state.touch_time,
+                        "trigger_price": state.touch_open,
+                        "entry_price": state.touch_open,
+                    }
+                )
+                trace = _trace(
+                    request,
+                    "bar",
+                    DONE,
+                    "做空信号",
+                    5,
+                    "passed",
+                    "SHORT: bar broke below MA touch bar open",
+                    checks,
+                    metrics,
+                    {"target_position": -1, "confidence": 0.8, "signal": "SHORT"},
+                )
+                state.prev_close = close
+                state.prev_ma = ma20
+                return {
+                    "no_signal": False,
+                    "instance_id": _instance_id(request),
+                    "symbol": request.get("symbol", ""),
+                    "event_time": request.get("event_time", ""),
+                    "target_position": -1,
+                    "confidence": 0.8,
+                    "reason": "SHORT: bar broke below MA touch bar open",
+                    "metrics": metrics,
+                    "trace": trace,
+                }
             if stood_above:
                 # 价格重新站上 MA：形态失败，重置状态机。
                 self._reset_after_failure(state)
@@ -861,6 +940,505 @@ class MA20PullbackShortStrategy(Strategy):
         return self.on_bar(request)
 
 
+class MA20WeakBaselineStrategy(MA20PullbackShortStrategy):
+    """The baseline MA20 break-touch-break strategy as a selectable variant."""
+
+    def __init__(self):
+        definition = dict(MA20PullbackShortStrategy.definition)
+        definition.update({
+            "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
+            "display_name": "MA20 Weak Pullback Baseline",
+            "default_params": {"ma_period": 20, "max_wait_bars": 6, "algorithm": "baseline"},
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+        super().__init__(definition=definition)
+
+
+class MA20WeakPullbackShortStrategy(Strategy):
+    """Automated MA20 weak pullback short strategy.
+
+    The strategy rejects strong uptrend pullbacks first, then requires structure
+    break before waiting for a weak MA20 touch and a break of the reaction low.
+    It is bar-driven so historical replay and backtests can reproduce entries.
+    """
+
+    definition = {
+        "strategy_id": MA20_WEAK_STRATEGY_ID,
+        "display_name": "MA20 Weak Pullback Short",
+        "entry_script": "python/strategy_service.py",
+        "version": "1.0.0",
+        "default_params": {
+            "ma20_period": 20,
+            "ma60_period": 60,
+            "ma120_period": 120,
+            "atr_period": 14,
+            "swing_lookback_bars": 20,
+            "slope_lookback_bars": 5,
+            "structure_wait_bars": 3,
+            "touch_wait_bars": 12,
+            "trigger_wait_bars": 6,
+            "use_score_filter": True,
+        },
+        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+    }
+
+    def __init__(self, definition=None, use_score_filter=None):
+        if definition is not None:
+            self.definition = definition
+        if use_score_filter is not None:
+            default_params = dict(self.definition.get("default_params") or {})
+            default_params["use_score_filter"] = bool(use_score_filter)
+            self.definition = {**self.definition, "default_params": default_params}
+        self.states = {}
+        self._lock = RLock()
+
+    def start_instance(self, instance):
+        instance_id = instance.get("instance_id", "")
+        symbols = instance.get("symbols") or [""]
+        mode = "replay" if str(instance.get("mode") or "").strip().lower() == "replay" else "live"
+        with self._lock:
+            for symbol in symbols:
+                self.states[(mode, instance_id, str(symbol))] = WeakPullbackShortState()
+        self._apply_warmup_bars(instance, (instance.get("params") or {}).get("warmup_bars") or [], mode)
+
+    def stop_instance(self, instance_id):
+        with self._lock:
+            for key in list(self.states):
+                if len(key) >= 2 and key[1] == instance_id:
+                    del self.states[key]
+
+    def _state_for(self, request):
+        key = (_mode_key(request), _instance_id(request), request.get("symbol", ""))
+        if key not in self.states:
+            self.states[key] = WeakPullbackShortState()
+        return self.states[key]
+
+    def _settings(self, request):
+        params = _params(request)
+        return {
+            "ma20": max(2, _int(params.get("ma20_period"), _int(params.get("ma_period"), 20))),
+            "ma60": max(3, _int(params.get("ma60_period"), 60)),
+            "ma120": max(4, _int(params.get("ma120_period"), 120)),
+            "atr": max(2, _int(params.get("atr_period"), 14)),
+            "swing": max(2, _int(params.get("swing_lookback_bars"), 20)),
+            "slope": max(1, _int(params.get("slope_lookback_bars"), 5)),
+            "structure_wait": max(1, _int(params.get("structure_wait_bars"), 3)),
+            "touch_wait": max(1, _int(params.get("touch_wait_bars"), 12)),
+            "trigger_wait": max(1, _int(params.get("trigger_wait_bars"), 6)),
+            "use_score_filter": bool(params.get("use_score_filter", True)),
+        }
+
+    def _apply_warmup_bars(self, instance, bars, mode):
+        instance_id = instance.get("instance_id", "")
+        params = instance.get("params") or {}
+        for idx, bar in enumerate(bars):
+            try:
+                symbol = str(bar.get("symbol") or (instance.get("symbols") or [""])[0])
+                req = {
+                    "instance": {
+                        "instance_id": instance_id,
+                        "strategy_id": self.definition["strategy_id"],
+                        "timeframe": instance.get("timeframe", ""),
+                        "params": params,
+                    },
+                    "symbol": symbol,
+                    "mode": mode,
+                    "event_time": bar.get("data_time") or bar.get("event_time") or f"warmup-{idx}",
+                    "bar": bar,
+                }
+                self._on_bar_locked(req)
+            except Exception as exc:
+                logger.warning("weak pullback warmup bar ignored: %s", exc)
+
+    def _sma(self, values, period):
+        if len(values) < period:
+            return None
+        return sum(values[-period:]) / period
+
+    def _slope(self, values, period, lookback):
+        if len(values) < period + lookback:
+            return 0.0
+        now = sum(values[-period:]) / period
+        prev = sum(values[-period - lookback:-lookback]) / period
+        return (now - prev) / lookback
+
+    def _atr(self, state, period):
+        if len(state.closes) < period + 1:
+            return None
+        trs = []
+        start = len(state.closes) - period
+        for idx in range(start, len(state.closes)):
+            prev_close = state.closes[idx - 1] if idx > 0 else state.closes[idx]
+            trs.append(max(
+                state.highs[idx] - state.lows[idx],
+                abs(state.highs[idx] - prev_close),
+                abs(state.lows[idx] - prev_close),
+            ))
+        return sum(trs) / len(trs)
+
+    def _last_swing_low(self, state, lookback):
+        if len(state.lows) < 2:
+            return None
+        prior = state.lows[:-1]
+        return min(prior[-lookback:]) if prior else None
+
+    def _indicators(self, state, settings):
+        ma20 = self._sma(state.closes, settings["ma20"])
+        ma60 = self._sma(state.closes, settings["ma60"])
+        ma120 = self._sma(state.closes, settings["ma120"])
+        return {
+            "ma20": ma20,
+            "ma60": ma60,
+            "ma120": ma120,
+            "ma20_slope": self._slope(state.closes, settings["ma20"], settings["slope"]),
+            "ma60_slope": self._slope(state.closes, settings["ma60"], settings["slope"]),
+            "ma120_slope": self._slope(state.closes, settings["ma120"], settings["slope"]),
+            "atr14": self._atr(state, settings["atr"]),
+            "last_swing_low": self._last_swing_low(state, settings["swing"]),
+        }
+
+    def _trim(self, state, settings):
+        keep = max(settings["ma120"] + settings["slope"] + 2, settings["swing"] + 2, settings["atr"] + 2)
+        for name in ("opens", "highs", "lows", "closes"):
+            values = getattr(state, name)
+            if len(values) > keep:
+                setattr(state, name, values[-keep:])
+
+    def _base_metrics(self, state, ind=None):
+        ind = ind or {}
+        return {
+            "signal": "",
+            "state": state.state,
+            "regime": state.regime,
+            "ma20": ind.get("ma20"),
+            "ma60": ind.get("ma60"),
+            "ma120": ind.get("ma120"),
+            "ma20_slope": ind.get("ma20_slope"),
+            "ma60_slope": ind.get("ma60_slope"),
+            "ma120_slope": ind.get("ma120_slope"),
+            "atr14": ind.get("atr14"),
+            "last_swing_low": ind.get("last_swing_low"),
+            "reaction_low": state.reaction_low,
+            "touch_open": state.touch_open,
+            "touch_high": state.touch_high,
+            "touch_ma20": state.touch_ma20,
+            "touch_time": state.touch_time,
+            "bullish_pause_score": state.bullish_pause_score,
+            "bearish_failure_score": state.bearish_failure_score,
+            "bars_since_break": state.bars_since_break,
+            "trigger_wait_bars": state.trigger_wait_bars,
+            "step_total": 6,
+        }
+
+    def _bar_trace(self, request, state, key, label, index, status, reason, checks, ind=None, preview=None):
+        return _trace(request, "bar", key, label, index, status, reason, checks, self._base_metrics(state, ind), preview)
+
+    def _reset(self, state):
+        state.state = WAIT_BREAK_BELOW_MA20
+        state.break_time = ""
+        state.break_index = -1
+        state.bars_since_break = 0
+        state.reaction_low = None
+        state.touch_open = None
+        state.touch_high = None
+        state.touch_ma20 = None
+        state.touch_time = ""
+        state.trigger_wait_bars = 0
+        state.regime = ""
+        state.bullish_pause_score = 0.0
+        state.bearish_failure_score = 0.0
+
+    def _strong_uptrend(self, close, ind):
+        ma20, ma60, ma120 = ind.get("ma20"), ind.get("ma60"), ind.get("ma120")
+        return (
+            ma20 is not None and ma60 is not None and ma120 is not None
+            and ma20 > ma60 > ma120
+            and ind.get("ma60_slope", 0) > 0
+            and ind.get("ma120_slope", 0) > 0
+            and close > ma60
+        )
+
+    def _structure_broken(self, close, ind):
+        last_swing_low = ind.get("last_swing_low")
+        return last_swing_low is not None and close < last_swing_low
+
+    def _classify_regime(self, close, ind):
+        if self._structure_broken(close, ind) and ind.get("ma20_slope", 0) < 0:
+            return "BEARISH_REVERSAL_CANDIDATE"
+        ma60 = ind.get("ma60")
+        if ma60 is not None and close < ma60 and ind.get("ma20_slope", 0) < 0 and ind.get("ma60_slope", 0) <= 0:
+            return "WEAK_BEARISH_CANDIDATE"
+        return "UNCLEAR"
+
+    def _scores(self, state, open_price, low, close, ind):
+        bull = 0.0
+        bear = 0.0
+        if self._strong_uptrend(close, ind):
+            bull += 2
+        ma20, ma60, ma120 = ind.get("ma20"), ind.get("ma60"), ind.get("ma120")
+        if ma20 is not None and ma60 is not None and ma120 is not None and ma20 > ma60 > ma120:
+            bull += 1
+        structure = self._structure_broken(close, ind)
+        if structure:
+            bear += 2
+        else:
+            bull += 2
+        atr = ind.get("atr14") or 0
+        if ma20 is not None and atr > 0:
+            break_strength = ma20 - close
+            if break_strength < 0.5 * atr:
+                bull += 1
+            else:
+                bear += 1
+        if state.bars_since_break <= 3 and ma20 is not None and close > ma20:
+            bull += 1
+        if ind.get("ma20_slope", 0) < 0:
+            bear += 1
+        if ind.get("ma60_slope", 0) <= 0:
+            bear += 1
+        if ma20 is not None and close < ma20:
+            bear += 1
+        if state.reaction_low is not None and low <= state.reaction_low:
+            bear += 2
+        if close > open_price:
+            bull += 1
+        elif close < open_price:
+            bear += 1
+        state.bullish_pause_score = bull
+        state.bearish_failure_score = bear
+        return bull, bear
+
+    def _handle_structure_filter(self, request, state, open_price, low, close, ind, settings):
+        strong_up = self._strong_uptrend(close, ind)
+        structure = self._structure_broken(close, ind)
+        bull, bear = self._scores(state, open_price, low, close, ind)
+        checks = [
+            _check("不是强上涨回撤", not (strong_up and not structure), close, ind.get("ma60")),
+            _check("跌破最近结构低点", structure, close, ind.get("last_swing_low")),
+            _check("结构等待未超时", state.bars_since_break <= settings["structure_wait"], state.bars_since_break, settings["structure_wait"]),
+        ]
+        if strong_up and not structure:
+            reason = "strong uptrend pullback, ignore MA20 break"
+            self._reset(state)
+            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤", 3, "failed", reason, checks, ind)
+            return _no_signal(request, reason, self._base_metrics(state, ind), trace)
+        if not structure:
+            if close > ind.get("ma20"):
+                reason = "BULLISH_PAUSE: fast reclaim above MA20"
+                self._reset(state)
+                trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "快速收回 MA20", 3, "failed", reason, checks, ind)
+                return _no_signal(request, reason, self._base_metrics(state, ind), trace)
+            if state.bars_since_break >= settings["structure_wait"]:
+                reason = "structure break not confirmed"
+                self._reset(state)
+                trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "结构破坏未确认", 3, "failed", reason, checks, ind)
+                return _no_signal(request, reason, self._base_metrics(state, ind), trace)
+            state.state = TREND_STRUCTURE_FILTER
+            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "等待破坏上涨结构", 3, "waiting", "waiting for swing low break", checks, ind)
+            return _no_signal(request, "waiting for swing low break", self._base_metrics(state, ind), trace)
+        regime = self._classify_regime(close, ind)
+        state.regime = regime
+        checks.append(_check("属于弱势或转空候选", regime in ("BEARISH_REVERSAL_CANDIDATE", "WEAK_BEARISH_CANDIDATE"), regime, "bearish candidate"))
+        if regime not in ("BEARISH_REVERSAL_CANDIDATE", "WEAK_BEARISH_CANDIDATE"):
+            reason = "not bearish regime"
+            self._reset(state)
+            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤", 3, "failed", reason, checks, ind)
+            return _no_signal(request, reason, self._base_metrics(state, ind), trace)
+        state.state = WAIT_PULLBACK_TOUCH_MA20
+        trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤通过", 3, "passed", regime, checks, ind)
+        return _no_signal(request, regime, self._base_metrics(state, ind), trace)
+
+    def on_bar(self, request):
+        with self._lock:
+            return self._on_bar_locked(request)
+
+    def _on_bar_locked(self, request):
+        bar = request.get("bar") or {}
+        if not bar:
+            return _no_signal(request, "no bar")
+        _require_fields(bar, ("open", "high", "low", "close"))
+        state = self._state_for(request)
+        settings = self._settings(request)
+        open_price = _float(bar.get("open"))
+        high = _float(bar.get("high"))
+        low = _float(bar.get("low"))
+        close = _float(bar.get("close"))
+        data_time = bar.get("data_time") or request.get("event_time", "")
+        data_ts = _event_ts(data_time)
+        if data_ts is not None and state.last_bar_ts is not None and data_ts <= state.last_bar_ts:
+            return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state))
+        if data_ts is not None:
+            state.last_bar_ts = data_ts
+
+        previous_ma20 = self._sma(state.closes, settings["ma20"])
+        previous_close = state.prev_close
+        state.opens.append(open_price)
+        state.highs.append(high)
+        state.lows.append(low)
+        state.closes.append(close)
+        self._trim(state, settings)
+        ind = self._indicators(state, settings)
+        ma20 = ind.get("ma20")
+        if ind.get("ma120") is None or ma20 is None:
+            state.prev_close = close
+            state.prev_ma20 = ma20
+            checks = [_check("MA120样本数量", len(state.closes) >= settings["ma120"], len(state.closes), settings["ma120"])]
+            trace = self._bar_trace(request, state, "WAIT_MA_READY", "等待 MA20/MA60/MA120 数据足够", 1, "waiting", "waiting for enough bars", checks, ind)
+            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ind), trace)
+
+        def finish(out):
+            state.prev_close = close
+            state.prev_ma20 = ma20
+            return out
+
+        if state.state == DONE:
+            self._reset(state)
+            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 2, "waiting", "ready for next attempt", [], ind)
+            return finish(_no_signal(request, "ready for next attempt", self._base_metrics(state, ind), trace))
+
+        if state.state == WAIT_BREAK_BELOW_MA20:
+            cross_break = previous_close is not None and previous_ma20 is not None and previous_close >= previous_ma20 and close < ma20
+            checks = [
+                _check("从上向下跌破MA20", cross_break, close, ma20, close - ma20),
+                _check("上一根收盘在MA20上方", previous_close is not None and previous_ma20 is not None and previous_close >= previous_ma20, previous_close, previous_ma20),
+            ]
+            if not cross_break:
+                trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 2, "waiting", "waiting for MA20 cross break", checks, ind)
+                return finish(_no_signal(request, "waiting for MA20 cross break", self._base_metrics(state, ind), trace))
+            state.break_time = data_time
+            state.break_index = len(state.closes) - 1
+            state.bars_since_break = 1
+            state.reaction_low = low
+            out = self._handle_structure_filter(request, state, open_price, low, close, ind, settings)
+            return finish(out)
+
+        if state.state == TREND_STRUCTURE_FILTER:
+            state.bars_since_break += 1
+            state.reaction_low = low if state.reaction_low is None else min(state.reaction_low, low)
+            out = self._handle_structure_filter(request, state, open_price, low, close, ind, settings)
+            return finish(out)
+
+        if state.state == WAIT_PULLBACK_TOUCH_MA20:
+            state.bars_since_break += 1
+            state.reaction_low = low if state.reaction_low is None else min(state.reaction_low, low)
+            stood_above = open_price > ma20 and close > ma20
+            wait_used = max(0, state.bars_since_break - settings["structure_wait"])
+            checks = [
+                _check("未重新站上MA20", not stood_above, close, ma20, close - ma20),
+                _check("反抽等待未超时", wait_used <= settings["touch_wait"], wait_used, settings["touch_wait"]),
+                _check("最高价触碰MA20", high >= ma20, high, ma20, high - ma20),
+            ]
+            if stood_above:
+                reason = "reset: stood above MA20 before weak pullback"
+                self._reset(state)
+                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 4, "failed", reason, checks, ind)
+                return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
+            if wait_used > settings["touch_wait"]:
+                reason = "weak pullback touch timeout"
+                self._reset(state)
+                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 4, "failed", reason, checks, ind)
+                return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
+            if high >= ma20:
+                state.state = WAIT_BREAK_REACTION_LOW
+                state.touch_open = open_price
+                state.touch_high = high
+                state.touch_ma20 = ma20
+                state.touch_time = data_time
+                state.trigger_wait_bars = 0
+                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "弱反触碰 MA20", 4, "passed", "weak pullback touched MA20", checks, ind)
+                return finish(_no_signal(request, "weak pullback touched MA20", self._base_metrics(state, ind), trace))
+            trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 4, "waiting", "waiting for weak pullback touch", checks, ind)
+            return finish(_no_signal(request, "waiting for weak pullback touch", self._base_metrics(state, ind), trace))
+
+        if state.state == WAIT_BREAK_REACTION_LOW:
+            state.trigger_wait_bars += 1
+            stood_above = open_price > ma20 and close > ma20
+            bull, bear = self._scores(state, open_price, low, close, ind)
+            checks = [
+                _check("未重新站上MA20", not stood_above, close, ma20, close - ma20),
+                _check("触发等待未超时", state.trigger_wait_bars <= settings["trigger_wait"], state.trigger_wait_bars, settings["trigger_wait"]),
+                _check("跌破反抽低点", state.reaction_low is not None and low <= state.reaction_low, low, state.reaction_low),
+                _check("空头评分不低于多头停顿", (not settings["use_score_filter"]) or bear >= bull, bear, bull),
+            ]
+            if stood_above:
+                reason = "reset: stood above MA20 before reaction low break"
+                self._reset(state)
+                trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 5, "failed", reason, checks, ind)
+                return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
+            if state.trigger_wait_bars > settings["trigger_wait"]:
+                reason = "reaction low break timeout"
+                self._reset(state)
+                trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 5, "failed", reason, checks, ind)
+                return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
+            if state.reaction_low is not None and low <= state.reaction_low:
+                if settings["use_score_filter"] and bull > bear:
+                    reason = "bullish pause score exceeds bearish failure score"
+                    self._reset(state)
+                    trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "评分过滤", 5, "failed", reason, checks, ind)
+                    return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
+                state.state = DONE
+                metrics = self._base_metrics(state, ind)
+                metrics.update({
+                    "signal": "SHORT",
+                    "entry_price": state.reaction_low,
+                    "trigger_price": state.reaction_low,
+                    "reaction_low": state.reaction_low,
+                })
+                trace = _trace(
+                    request,
+                    "bar",
+                    SHORT_SIGNAL,
+                    "做空信号",
+                    6,
+                    "passed",
+                    "SHORT: broke weak pullback reaction low",
+                    checks,
+                    metrics,
+                    {"target_position": -1, "confidence": 0.82, "signal": "SHORT"},
+                )
+                return finish({
+                    "no_signal": False,
+                    "instance_id": _instance_id(request),
+                    "symbol": request.get("symbol", ""),
+                    "event_time": request.get("event_time", ""),
+                    "target_position": -1,
+                    "confidence": 0.82,
+                    "reason": "SHORT: broke weak pullback reaction low",
+                    "metrics": metrics,
+                    "trace": trace,
+                })
+            trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 5, "waiting", "waiting for reaction low break", checks, ind)
+            return finish(_no_signal(request, "waiting for reaction low break", self._base_metrics(state, ind), trace))
+
+        return finish(_no_signal(request, "unknown state", self._base_metrics(state, ind)))
+
+    def on_tick(self, request):
+        state = self._state_for(request)
+        return _no_signal(request, "bar driven strategy ignores ticks", self._base_metrics(state))
+
+    def on_replay_bar(self, request):
+        return self.on_bar(request)
+
+
+class MA20WeakPullbackVariantStrategy(MA20WeakPullbackShortStrategy):
+    """Hard/score filtered weak pullback variants exposed as separate strategies."""
+
+    def __init__(self, strategy_id, display_name, algorithm, use_score_filter):
+        definition = dict(MA20WeakPullbackShortStrategy.definition)
+        default_params = dict(definition.get("default_params") or {})
+        default_params.update({
+            "algorithm": algorithm,
+            "use_score_filter": bool(use_score_filter),
+        })
+        definition.update({
+            "strategy_id": strategy_id,
+            "display_name": display_name,
+            "default_params": default_params,
+            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        })
+        super().__init__(definition=definition, use_score_filter=use_score_filter)
+
+
 # -----------------------------------------------------------------------------
 # 策略服务门面：把 gRPC 方法映射到具体策略
 # -----------------------------------------------------------------------------
@@ -876,6 +1454,20 @@ class StrategyService:
         self.strategies = {
             "sample.momentum": SampleMomentumStrategy(),
             "ma20.pullback_short": MA20PullbackShortStrategy(),
+            MA20_WEAK_STRATEGY_ID: MA20WeakPullbackShortStrategy(),
+            MA20_WEAK_BASELINE_STRATEGY_ID: MA20WeakBaselineStrategy(),
+            MA20_WEAK_HARD_FILTER_STRATEGY_ID: MA20WeakPullbackVariantStrategy(
+                MA20_WEAK_HARD_FILTER_STRATEGY_ID,
+                "MA20 Weak Pullback Hard Filter",
+                "hard_filter",
+                False,
+            ),
+            MA20_WEAK_SCORE_FILTER_STRATEGY_ID: MA20WeakPullbackVariantStrategy(
+                MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
+                "MA20 Weak Pullback Score Filter",
+                "score_filter",
+                True,
+            ),
         }
 
     def Ping(self, request, context):

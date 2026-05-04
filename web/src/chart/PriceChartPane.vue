@@ -51,6 +51,7 @@ const props = defineProps({
     type: Object,
     default: () => ({ settings: {}, decisions: [], selected_id: "" }),
   },
+  strategyTraces: { type: Array, default: () => [] },
   reversalState: {
     type: Object,
     default: () => ({ settings: {}, results: { lines: [], events: [] }, persistVersion: 0 }),
@@ -65,6 +66,7 @@ const emit = defineEmits([
   "chart-context-menu",
   "kline-replay-date-change",
   "latest-bar-change",
+  "kline-replay-finished",
 ]);
 
 const state = reactive({
@@ -172,6 +174,8 @@ let loadRequestSeq = 0;
 let klineReplayPanelDrag = null;
 let klineReplayStatusTimer = null;
 let klineReplayActionSeq = 0;
+let lastKlineReplayTaskID = "";
+let reportedKlineReplayTaskID = "";
 
 const drawState = reactive({
   activeTool: "cursor",
@@ -2252,6 +2256,10 @@ function getSelectedBarAnchor() {
   return buildBarAnchor(selectedBarIndex.value);
 }
 
+function getLatestBarAnchor() {
+  return buildBarAnchor(state.bars.length - 1);
+}
+
 function buildStrategyWarmupBar(bar) {
   if (!bar) return null;
   return {
@@ -2383,7 +2391,16 @@ async function updateRunningKlineReplaySpeed(intervalMs) {
 function applyKlineReplayTaskStatus(task) {
   const status = String(task?.status || "").trim().toLowerCase();
   const mode = String(task?.mode || "").trim().toLowerCase();
+  const taskID = String(task?.task_id || "");
+  if (taskID) lastKlineReplayTaskID = taskID;
   klineReplayPanel.running = mode === "kline" && (status === "running" || status === "paused");
+  if (mode === "kline" && status === "done" && taskID && taskID !== reportedKlineReplayTaskID) {
+    reportedKlineReplayTaskID = taskID;
+    emit("kline-replay-finished", {
+      task,
+      anchor: getLatestBarAnchor(),
+    });
+  }
 }
 
 async function refreshKlineReplayStatus() {
@@ -2481,6 +2498,8 @@ async function startKlineReplayFromPanel() {
   klineReplayPanel.running = true;
   klineReplayPanel.loading = true;
   klineReplayPanel.error = "";
+  reportedKlineReplayTaskID = "";
+  lastKlineReplayTaskID = "";
   ensureKlineReplayStatusPolling();
   try {
     const resp = await fetch("/api/replay/start", {
@@ -2569,6 +2588,7 @@ defineExpose({
   onDeleteSelected,
   reload: loadInitialChunk,
   openKlineReplayPanelFromToolbar,
+  getLatestBarAnchor,
   getWarmupBarsBeforeAnchor,
   reloadRecentWindow,
   applyRealtimeBarUpdate,
@@ -2715,6 +2735,112 @@ const reversalOverlayData = computed(() => {
     .filter((x) => !!x);
   return { lines: outLines, events: outEvents };
 });
+
+const strategyOverlayData = computed(() => {
+  void viewVersion.value;
+  if (!seriesRefs.candle) return [];
+  const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  const traces = Array.isArray(props.strategyTraces) ? props.strategyTraces : [];
+  return traces
+    .filter((row) => {
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const strategyID = String(row?.strategy_id || "");
+      return strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short";
+    })
+    .slice(0, 160)
+    .map((row, idx) => {
+      const time = strategyTraceTime(row);
+      const x = mapTimeToXWithFallback(time);
+      if (x === null) return null;
+      const bar = findNearestBarByDisplayTime(time);
+      const price = strategyTracePrice(row, bar);
+      const y = Number(seriesRefs.candle.priceToCoordinate(Number(price)));
+      if (!Number.isFinite(y)) return null;
+      const kind = strategyTraceKind(row);
+      return {
+        id: String(row?.trace_id || `${row?.instance_id || ""}-${row?.event_time || ""}-${idx}`),
+        x,
+        y,
+        kind,
+        label: strategyTraceLabel(row, kind),
+        status: String(row?.status || ""),
+      };
+    })
+    .filter((x) => !!x);
+});
+
+function strategyTraceTime(row) {
+  const raw = String(row?.event_time || "");
+  const parsed = Date.parse(raw);
+  if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+  return Number(row?.metrics?.adjusted_time || row?.metrics?.data_time || 0);
+}
+
+function findNearestBarByDisplayTime(time) {
+  const ts = Number(time || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return null;
+  let best = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const bar of state.bars || []) {
+    const t = Number(getDisplayTime(bar) || 0);
+    const delta = Math.abs(t - ts);
+    if (delta < bestDelta) {
+      best = bar;
+      bestDelta = delta;
+    }
+  }
+  return best;
+}
+
+function strategyTraceMetric(row, names) {
+  const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  for (const name of names) {
+    const v = Number(metrics[name]);
+    if (Number.isFinite(v) && v > 0) return v;
+  }
+  return 0;
+}
+
+function strategyTracePrice(row, bar) {
+  const key = String(row?.step_key || "");
+  if (key === "SHORT_SIGNAL" || key === "DONE" || key === "signal") {
+    return strategyTraceMetric(row, ["entry_price", "trigger_price", "reaction_low", "touch_open"]) || Number(bar?.low || bar?.close || 0);
+  }
+  if (key === "WAIT_PULLBACK_TOUCH_MA20" || key === "WAIT_BREAK_TOUCH_OPEN") {
+    return strategyTraceMetric(row, ["touch_high", "touch_ma20", "ma20"]) || Number(bar?.high || bar?.close || 0);
+  }
+  if (key === "TREND_STRUCTURE_FILTER") {
+    return strategyTraceMetric(row, ["last_swing_low", "ma20"]) || Number(bar?.low || bar?.close || 0);
+  }
+  return strategyTraceMetric(row, ["ma20", "reaction_low"]) || Number(bar?.close || 0);
+}
+
+function strategyTraceKind(row) {
+  const key = String(row?.step_key || "");
+  const status = String(row?.status || "");
+  const reason = String(row?.reason || "");
+  if (key === "SHORT_SIGNAL" || key === "DONE" || key === "signal") return "short";
+  if (key === "SIGNAL_RESULT" && status === "passed") return "success";
+  if (key === "SIGNAL_RESULT" || status === "failed" || reason.includes("BULLISH") || reason.includes("strong uptrend")) return "blocked";
+  if (key === "WAIT_PULLBACK_TOUCH_MA20" || key === "WAIT_BREAK_TOUCH_OPEN") return "touch";
+  if (key === "TREND_STRUCTURE_FILTER") return "filter";
+  return "setup";
+}
+
+function strategyTraceLabel(row, kind) {
+  if (kind === "short") return "SHORT";
+  if (kind === "success") return "OK";
+  if (kind === "blocked") return "X";
+  const stepIndex = Number(row?.step_index || 0);
+  const stepTotal = Number(row?.step_total || 0);
+  if (Number.isFinite(stepIndex) && stepIndex > 0 && Number.isFinite(stepTotal) && stepTotal > 0) {
+    return `${stepIndex}/${stepTotal}`;
+  }
+  if (kind === "touch") return "T";
+  if (kind === "filter") return "F";
+  return "B";
+}
 
 const reversalDebugRows = computed(() => {
   void viewVersion.value;
@@ -3766,6 +3892,14 @@ onUnmounted(() => {
             </template>
           </svg>
         </div>
+        <div class="strategy-overlay-layer">
+          <svg :width="overlaySize.width" :height="overlaySize.height">
+            <template v-for="item in strategyOverlayData" :key="item.id">
+              <circle :class="['strategy-marker-dot', item.kind]" :cx="item.x" :cy="item.y" r="4.5" />
+              <text :class="['strategy-marker-label', item.kind]" :x="item.x + 6" :y="item.y - 6">{{ item.label }}</text>
+            </template>
+          </svg>
+        </div>
         <div
           ref="overlayRef"
           class="draw-overlay"
@@ -4135,5 +4269,50 @@ onUnmounted(() => {
   margin-top: 6px;
   color: #b91c1c;
   font-size: 12px;
+}
+
+.strategy-overlay-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 7;
+}
+
+.strategy-marker-dot {
+  stroke: #0b1320;
+  stroke-width: 1.5;
+}
+
+.strategy-marker-dot.setup {
+  fill: #9ca3af;
+}
+
+.strategy-marker-dot.filter {
+  fill: #f59e0b;
+}
+
+.strategy-marker-dot.touch {
+  fill: #38bdf8;
+}
+
+.strategy-marker-dot.short {
+  fill: #ef4444;
+}
+
+.strategy-marker-dot.success {
+  fill: #22c55e;
+}
+
+.strategy-marker-dot.blocked {
+  fill: #f97316;
+}
+
+.strategy-marker-label {
+  font-size: 10px;
+  font-weight: 700;
+  fill: #f8fafc;
+  paint-order: stroke;
+  stroke: rgba(11, 19, 32, 0.9);
+  stroke-width: 2px;
 }
 </style>

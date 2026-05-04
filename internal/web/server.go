@@ -230,6 +230,7 @@ func NewServer(cfg config.AppConfig) *Server {
 		if err != nil {
 			logger.Error("init strategy manager failed", "error", err)
 		} else {
+			manager.SetBacktestMarketDSN(realtimeDSN)
 			s.strategy = manager
 		}
 	}
@@ -2297,7 +2298,13 @@ func (s *Server) handleStrategyBacktestByID(w http.ResponseWriter, r *http.Reque
 	if manager == nil {
 		return
 	}
-	runID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/strategy/backtests/"))
+	path := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/api/strategy/backtests/"))
+	wantResult := false
+	if strings.HasSuffix(path, "/result") {
+		wantResult = true
+		path = strings.TrimSuffix(path, "/result")
+	}
+	runID := strings.TrimSpace(path)
 	if runID == "" {
 		http.Error(w, "run id is required", http.StatusBadRequest)
 		return
@@ -2307,7 +2314,32 @@ func (s *Server) handleStrategyBacktestByID(w http.ResponseWriter, r *http.Reque
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
+	if wantResult || strings.EqualFold(r.URL.Query().Get("result"), "1") || strings.EqualFold(r.URL.Query().Get("include_result"), "true") {
+		result, err := loadStrategyBacktestResultFile(run.OutputPath)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusNotFound)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"run": run, "result": result})
+		return
+	}
 	writeJSON(w, http.StatusOK, run)
+}
+
+func loadStrategyBacktestResultFile(path string) (map[string]any, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return nil, fmt.Errorf("backtest result path is empty")
+	}
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("read backtest result failed: %w", err)
+	}
+	var out map[string]any
+	if err := json.Unmarshal(body, &out); err != nil {
+		return nil, fmt.Errorf("parse backtest result failed: %w", err)
+	}
+	return out, nil
 }
 
 func (s *Server) handleStrategyOptimize(w http.ResponseWriter, r *http.Request) {

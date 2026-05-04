@@ -16,6 +16,7 @@ import (
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/config"
 	"ctp-future-kline/internal/replay"
+	"ctp-future-kline/internal/strategy"
 	"ctp-future-kline/internal/testmysql"
 	"ctp-future-kline/internal/trade"
 
@@ -155,6 +156,48 @@ func TestHandleTradeTerminalReturnsAggregatedSnapshot(t *testing.T) {
 	}
 }
 
+func TestConsumeKlineBarPublishesReplayBarToStrategy(t *testing.T) {
+	sink := &captureStrategySink{}
+	strategy.SetDefaultSink(sink)
+	t.Cleanup(func() { strategy.SetDefaultSink(nil) })
+
+	srv := &Server{}
+	barTime := time.Date(2026, 4, 30, 9, 35, 0, 0, time.Local)
+	err := srv.ConsumeKlineBar(
+		httptest.NewRequest(http.MethodPost, "/", nil).Context(),
+		"task-1",
+		replay.KlineStartRequest{Symbol: "srl9", Type: "l9", Variety: "sr", Timeframe: "5m"},
+		replay.KlineBar{
+			Symbol:       "srl9",
+			Type:         "l9",
+			Variety:      "sr",
+			Exchange:     "CZCE",
+			Timeframe:    "5m",
+			AdjustedTime: barTime,
+			DataTime:     barTime,
+			Open:         100,
+			High:         101,
+			Low:          99,
+			Close:        100.5,
+			Volume:       12,
+			OpenInterest: 34,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ConsumeKlineBar failed: %v", err)
+	}
+	if len(sink.replayBars) != 1 {
+		t.Fatalf("replay bars = %d, want 1", len(sink.replayBars))
+	}
+	got := sink.replayBars[0]
+	if got.InstrumentID != "srl9" || got.Variety != "sr" || got.Period != "5m" {
+		t.Fatalf("unexpected replay bar identity: %+v", got)
+	}
+	if got.Open != 100 || got.High != 101 || got.Low != 99 || got.Close != 100.5 {
+		t.Fatalf("unexpected replay bar prices: %+v", got)
+	}
+}
+
 func TestReplayTickDirSearchFindsCSVContract(t *testing.T) {
 	tickDir := filepath.Join(t.TempDir(), "ticks")
 	if err := os.MkdirAll(tickDir, 0o755); err != nil {
@@ -219,3 +262,14 @@ func tradeTestConfig() config.TradeConfig {
 }
 
 func boolPtrWeb(v bool) *bool { return &v }
+
+type captureStrategySink struct {
+	replayBars []strategy.BarEvent
+}
+
+func (s *captureStrategySink) HandleRealtimeTick(strategy.TickEvent) {}
+func (s *captureStrategySink) HandleRealtimeBar(strategy.BarEvent)   {}
+func (s *captureStrategySink) HandleReplayTick(strategy.TickEvent)   {}
+func (s *captureStrategySink) HandleReplayBar(ev strategy.BarEvent) {
+	s.replayBars = append(s.replayBars, ev)
+}

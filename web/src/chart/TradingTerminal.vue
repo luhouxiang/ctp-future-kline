@@ -45,14 +45,21 @@ const strategyDefinitions = ref([])
 const strategyInstances = ref([])
 const strategyStatus = ref({})
 const strategyTraces = ref([])
+const strategyBacktests = ref([])
 const strategyStarting = ref(false)
+const ma20ReplayReportRunning = ref(false)
+const ma20ReplayReportTaskID = ref("")
 const strategyContextMenu = reactive({
   open: false,
   x: 0,
   y: 0,
   anchor: null,
   loading: false,
+  selectedDefinition: null,
+  paramsText: '',
+  error: '',
 })
+const latestReplayBarAnchor = ref(null)
 const selectedDrawingId = ref('')
 const saveStatus = ref('idle')
 const activeTool = ref('cursor')
@@ -566,10 +573,11 @@ async function fetchStrategyDefinitions() {
 
 async function fetchStrategyRuntime() {
   try {
-    const [statusResp, instancesResp, tracesResp] = await Promise.all([
+    const [statusResp, instancesResp, tracesResp, backtestsResp] = await Promise.all([
       fetch('/api/strategy/status'),
       fetch('/api/strategy/instances'),
       fetch(`/api/strategy/traces?${new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()}`),
+      fetch('/api/strategy/backtests'),
     ])
     if (statusResp.ok) {
       const data = await statusResp.json()
@@ -582,6 +590,10 @@ async function fetchStrategyRuntime() {
     if (tracesResp.ok) {
       const data = await tracesResp.json()
       strategyTraces.value = Array.isArray(data.items) ? data.items : []
+    }
+    if (backtestsResp.ok) {
+      const data = await backtestsResp.json()
+      strategyBacktests.value = Array.isArray(data.items) ? data.items : []
     }
   } catch {
     // strategy subsystem may be disabled
@@ -723,11 +735,14 @@ function closeStrategyContextMenu() {
   strategyContextMenu.open = false
   strategyContextMenu.anchor = null
   strategyContextMenu.loading = false
+  strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.paramsText = ''
+  strategyContextMenu.error = ''
 }
 
 function strategyContextMenuStyle() {
-  const width = 240
-  const height = 240
+  const width = 320
+  const height = 560
   const maxX = Math.max(8, window.innerWidth - width - 8)
   const maxY = Math.max(8, window.innerHeight - height - 8)
   return {
@@ -737,6 +752,7 @@ function strategyContextMenuStyle() {
 }
 
 async function onChartContextMenu(payload) {
+  payload?.event?.stopPropagation?.()
   const anchor = payload?.anchor
   if (!anchor) return
   strategyContextMenu.x = Number(payload.x || 0)
@@ -744,10 +760,124 @@ async function onChartContextMenu(payload) {
   strategyContextMenu.anchor = anchor
   strategyContextMenu.open = true
   strategyContextMenu.loading = true
+  strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.paramsText = ''
+  strategyContextMenu.error = ''
   try {
     if (!strategyDefinitions.value.length) await fetchStrategyDefinitions()
+    const preferred = strategyDefinitions.value.find((item) => item.strategy_id === 'ma20.weak_pullback_short.score_filter')
+      || strategyDefinitions.value.find((item) => item.strategy_id === 'ma20.weak_pullback_short')
+      || strategyDefinitions.value[0]
+    if (preferred) selectStrategyDefinition(preferred)
   } finally {
     strategyContextMenu.loading = false
+  }
+}
+
+async function openStrategyRunMenu(evt) {
+  evt?.stopPropagation?.()
+  evt?.preventDefault?.()
+  const anchor = latestReplayBarAnchor.value || paneRef.value?.getLatestBarAnchor?.() || paneRef.value?.getSelectedBarAnchor?.()
+  if (!anchor) {
+    window.alert('当前图表没有可用K线')
+    return
+  }
+  const rect = evt?.currentTarget?.getBoundingClientRect?.()
+  await onChartContextMenu({
+    event: evt,
+    x: rect ? rect.left : window.innerWidth - 280,
+    y: rect ? rect.bottom + 8 : 80,
+    anchor,
+  })
+}
+
+function selectStrategyDefinition(definition) {
+  strategyContextMenu.selectedDefinition = definition || null
+  const defaultParams = definition?.default_params && typeof definition.default_params === 'object'
+    ? definition.default_params
+    : {}
+  strategyContextMenu.paramsText = JSON.stringify(defaultParams, null, 2)
+  strategyContextMenu.error = ''
+}
+
+function parseStrategyParamsText() {
+  const raw = String(strategyContextMenu.paramsText || '').trim()
+  if (!raw) return {}
+  const parsed = JSON.parse(raw)
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('参数必须是 JSON 对象')
+  }
+  return parsed
+}
+
+function strategyWarmupCount(strategyID, params) {
+  const id = String(strategyID || '')
+  if (id === 'ma20.weak_pullback_short' || id.startsWith('ma20.weak_pullback_short.')) {
+    const ma120 = Number(params?.ma120_period || 120)
+    const slope = Number(params?.slope_lookback_bars || 5)
+    return Math.max(140, ma120 + slope + 20)
+  }
+  return 40
+}
+
+function replayTaskTime(task, keys) {
+  for (const key of keys) {
+    const raw = task?.[key]
+    if (!raw) continue
+    const date = new Date(raw)
+    if (!Number.isNaN(date.getTime())) return date.toISOString()
+  }
+  return ''
+}
+
+async function runMA20ReplayReport(payload) {
+  const task = payload?.task || {}
+  const taskID = String(task?.task_id || '')
+  if (!taskID || ma20ReplayReportTaskID.value === taskID || ma20ReplayReportRunning.value) return
+  ma20ReplayReportTaskID.value = taskID
+  ma20ReplayReportRunning.value = true
+  try {
+    const symbol = String(scope.symbol || '').trim().toLowerCase()
+    const timeframe = String(scope.timeframe || '5m').trim().toLowerCase()
+    const reportTimeframe = timeframe === '5m' ? timeframe : '5m'
+    if (!symbol) return
+    const startTime = replayTaskTime(task, ['first_sim_time', 'start_time'])
+    const endTime = replayTaskTime(task, ['current_sim_time', 'finished_at', 'end_time'])
+    const instanceID = `ma20-replay-report-${taskID}`
+    const resp = await fetch('/api/strategy/backtests', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        instance: {
+          instance_id: instanceID,
+          strategy_id: 'ma20.weak_pullback_short',
+          display_name: `MA20三算法回放报告@${symbol}`,
+          mode: 'backtest',
+          symbols: [symbol],
+          timeframe: reportTimeframe,
+          params: {
+            engine: 'go_ma20',
+            algorithms: ['baseline', 'hard_filter', 'score_filter'],
+            report_attempt_limit: 500,
+          },
+        },
+        symbol,
+        timeframe: reportTimeframe,
+        start_time: startTime,
+        end_time: endTime,
+        parameters: {
+          engine: 'go_ma20',
+          algorithms: ['baseline', 'hard_filter', 'score_filter'],
+          report_attempt_limit: 500,
+        },
+      }),
+    })
+    if (!resp.ok) throw new Error(await resp.text())
+    await fetchStrategyRuntime()
+  } catch (err) {
+    console.warn('[strategy] MA20 replay report failed', err)
+  } finally {
+    ma20ReplayReportRunning.value = false
   }
 }
 
@@ -761,14 +891,15 @@ async function startStrategyFromAnchor(anchor, definition) {
   if (!strategyID) return
   strategyStarting.value = true
   try {
-    closeStrategyContextMenu()
     const defaultParams = definition?.default_params && typeof definition.default_params === 'object'
       ? JSON.parse(JSON.stringify(definition.default_params))
       : {}
+    const userParams = parseStrategyParamsText()
+    const mergedParams = { ...defaultParams, ...userParams }
     const instanceID = `chart-${Date.now()}`
     const mode = replayKlineMode.value || dataMode.value === 'replay' ? 'replay' : 'paper'
     const displayTime = formatAnchorTime(anchor.data_time || anchor.adjusted_time || anchor.plot_time)
-    const warmupBars = paneRef.value?.getWarmupBarsBeforeAnchor?.(anchor, 20) || []
+    const warmupBars = paneRef.value?.getWarmupBarsBeforeAnchor?.(anchor, strategyWarmupCount(strategyID, mergedParams)) || []
     const instance = {
       instance_id: instanceID,
       strategy_id: strategyID,
@@ -778,7 +909,7 @@ async function startStrategyFromAnchor(anchor, definition) {
       symbols: [scope.symbol],
       timeframe: scope.timeframe || '1m',
       params: {
-        ...defaultParams,
+        ...mergedParams,
         chart_anchor: anchor,
         chart_start_time: displayTime,
         start_source: 'chart_context_menu',
@@ -799,7 +930,9 @@ async function startStrategyFromAnchor(anchor, definition) {
     activeRightTab.value = 'strategy'
     layout.panes.right_watchlist_open = true
     await fetchStrategyRuntime()
+    closeStrategyContextMenu()
   } catch (err) {
+    strategyContextMenu.error = err instanceof Error ? err.message : String(err)
     showTradeError('图表启动策略', err)
   } finally {
     strategyStarting.value = false
@@ -1327,6 +1460,7 @@ function openKlineReplayPanel(evt) {
 
 function onLatestBarChange(bar) {
   if (!replayKlineMode.value) return
+  latestReplayBarAnchor.value = bar || null
   const close = pickQuoteNumber(bar?.close)
   if (close <= 0) return
   const adjusted = Number(bar?.adjusted_time || 0)
@@ -1510,6 +1644,10 @@ function connectChartWS() {
     }
     if (msg?.type === 'strategy_signal' && msg.data) {
       void fetchStrategyRuntime().catch(() => {})
+      return
+    }
+    if (msg?.type === 'strategy_backtest_done' && msg.data) {
+      strategyBacktests.value = [msg.data, ...strategyBacktests.value.filter((x) => String(x?.run_id || '') !== String(msg.data?.run_id || ''))].slice(0, 20)
       return
     }
     if (
@@ -1848,6 +1986,7 @@ onUnmounted(() => {
           :show-channel-debug="channelDebug"
           :channel-state="channelState"
           :reversal-state="reversalState"
+          :strategy-traces="strategyTraces"
           @set-drawings="onSetDrawings"
           @select-drawing="onSelectDrawing"
           @channel-view-change="onChannelViewChange"
@@ -1855,6 +1994,7 @@ onUnmounted(() => {
           @chart-context-menu="onChartContextMenu"
           @kline-replay-date-change="onKlineReplayDateChange"
           @latest-bar-change="onLatestBarChange"
+          @kline-replay-finished="runMA20ReplayReport"
         />
       </div>
 
@@ -1877,7 +2017,8 @@ onUnmounted(() => {
           :strategy="{
             status: strategyStatus,
             instances: strategyInstances,
-            traces: strategyTraces
+            traces: strategyTraces,
+            backtests: strategyBacktests
           }"
           :channels="channelState"
           :reversal="{
@@ -1898,6 +2039,7 @@ onUnmounted(() => {
           @stop-line-orders="stopLineOrders"
           @strategy-trace-focus="onStrategyTraceFocus"
           @strategy-instance-stop="stopStrategyInstance"
+          @strategy-run-click="openStrategyRunMenu"
           @channel-action="onChannelAction"
           @channel-settings="onChannelSettings"
           @reversal-action="onReversalAction"
@@ -1955,18 +2097,125 @@ onUnmounted(() => {
         <small>{{ formatAnchorTime(strategyContextMenu.anchor?.data_time || strategyContextMenu.anchor?.adjusted_time || strategyContextMenu.anchor?.plot_time) }}</small>
       </div>
       <div v-if="strategyContextMenu.loading" class="tv-strategy-context-empty">加载策略...</div>
-      <button
-        v-for="def in strategyDefinitions"
-        v-else
-        :key="def.strategy_id"
-        class="tv-strategy-context-item"
-        :disabled="strategyStarting"
-        @click="startStrategyFromAnchor(strategyContextMenu.anchor, def)"
-      >
-        <span>{{ def.display_name || def.strategy_id }}</span>
-        <small>{{ def.strategy_id }}</small>
-      </button>
+      <template v-else>
+        <button
+          v-for="def in strategyDefinitions"
+          :key="def.strategy_id"
+          class="tv-strategy-context-item"
+          :class="{ active: strategyContextMenu.selectedDefinition?.strategy_id === def.strategy_id }"
+          :disabled="strategyStarting"
+          @click="selectStrategyDefinition(def)"
+        >
+          <span>{{ def.display_name || def.strategy_id }}</span>
+          <small>{{ def.strategy_id }}</small>
+        </button>
+        <div v-if="strategyContextMenu.selectedDefinition" class="tv-strategy-param-editor">
+          <label>参数 JSON</label>
+          <textarea v-model="strategyContextMenu.paramsText" rows="8" spellcheck="false"></textarea>
+          <p v-if="strategyContextMenu.error" class="tv-strategy-context-error">{{ strategyContextMenu.error }}</p>
+          <button
+            type="button"
+            class="tv-strategy-context-start"
+            :disabled="strategyStarting"
+            @click="startStrategyFromAnchor(strategyContextMenu.anchor, strategyContextMenu.selectedDefinition)"
+          >
+            {{ strategyStarting ? '启动中...' : '启动策略' }}
+          </button>
+        </div>
+      </template>
       <div v-if="!strategyContextMenu.loading && !strategyDefinitions.length" class="tv-strategy-context-empty">暂无可用策略</div>
     </div>
   </div>
 </template>
+
+<style scoped>
+.tv-strategy-context-menu {
+  position: fixed;
+  z-index: 80;
+  width: 320px;
+  max-height: min(680px, calc(100vh - 16px));
+  overflow: auto;
+  display: grid;
+  gap: 6px;
+  padding: 10px;
+  border: 1px solid rgba(100, 116, 139, 0.42);
+  background: rgba(15, 23, 42, 0.98);
+  color: #e2e8f0;
+  box-shadow: 0 18px 46px rgba(0, 0, 0, 0.38);
+}
+
+.tv-strategy-context-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.tv-strategy-context-head small,
+.tv-strategy-context-item small {
+  color: rgba(203, 213, 225, 0.62);
+  font-weight: 400;
+}
+
+.tv-strategy-context-item {
+  display: grid;
+  gap: 2px;
+  width: 100%;
+  padding: 8px;
+  border: 1px solid rgba(100, 116, 139, 0.28);
+  background: rgba(30, 41, 59, 0.72);
+  color: #e2e8f0;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tv-strategy-context-item.active {
+  border-color: rgba(56, 189, 248, 0.72);
+  background: rgba(14, 116, 144, 0.28);
+}
+
+.tv-strategy-param-editor {
+  display: grid;
+  gap: 6px;
+  padding-top: 4px;
+}
+
+.tv-strategy-param-editor label {
+  font-size: 12px;
+  color: rgba(226, 232, 240, 0.76);
+}
+
+.tv-strategy-param-editor textarea {
+  width: 100%;
+  min-height: 152px;
+  resize: vertical;
+  border: 1px solid rgba(100, 116, 139, 0.36);
+  background: rgba(2, 6, 23, 0.72);
+  color: #e2e8f0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.45;
+  padding: 8px;
+}
+
+.tv-strategy-context-start {
+  min-height: 30px;
+  border: 1px solid rgba(56, 189, 248, 0.55);
+  background: rgba(14, 116, 144, 0.38);
+  color: #e0f2fe;
+  cursor: pointer;
+}
+
+.tv-strategy-context-empty,
+.tv-strategy-context-error {
+  margin: 0;
+  color: rgba(203, 213, 225, 0.68);
+  font-size: 12px;
+}
+
+.tv-strategy-context-error {
+  color: #fca5a5;
+}
+</style>
