@@ -30,7 +30,6 @@
       "program": "${workspaceFolder}",
       "cwd": "${workspaceFolder}",
       "preLaunchTask": "go: build debug",
-
       "buildFlags": [
         "-v",
         "-x",
@@ -46,7 +45,6 @@
       "console": "internalConsole",
       "outputMode": "remote",
       "internalConsoleOptions": "openOnSessionStart",
-
       "presentation": {
         "order": 2
       }
@@ -82,6 +80,30 @@
       "presentation": {
         "order": 4
       }
+    },
+    {
+      "name": "策略调试",
+      "type": "debugpy",
+      "request": "launch",
+      "cwd": "${workspaceFolder}",
+      "program": "${workspaceFolder}/python/strategy_service.py",
+      "console": "internalConsole",
+      "justMyCode": true,
+      "redirectOutput": true,
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}"
+      },
+      "presentation": {
+        "order": 5
+      },
+      "args": [
+        "--addr",
+        "127.0.0.1:50051",
+        "--log-file",
+        "flow/strategy_logs/strategy_service.log",
+        "--log-level",
+        "INFO"
+      ]
     }
   ],
   "compounds": [

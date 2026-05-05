@@ -59,7 +59,7 @@ func newShardFileWriter(baseDir string, shardID int, status *RuntimeStatusCenter
 			Criticality: "best_effort",
 			Capacity:    queueCfg.FilePerShardCapacity,
 			LossPolicy:  "best_effort",
-			BasisText:   fmt.Sprintf("?? shard ? tick ???????? %d?", queueCfg.FilePerShardCapacity),
+			BasisText:   fmt.Sprintf("file writer shards for tick events, capacity %d", queueCfg.FilePerShardCapacity),
 		})
 		w.queueHandle.ObserveDepth(len(w.in))
 	}

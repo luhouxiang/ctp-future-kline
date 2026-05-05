@@ -19,7 +19,12 @@ func NewStore(dsn string) (*Store, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &Store{db: db}, nil
+	store := &Store{db: db}
+	if err := store.ensureStrategyInstanceColumns(); err != nil {
+		_ = db.Close()
+		return nil, err
+	}
+	return store, nil
 }
 
 func (s *Store) Close() error {
@@ -27,6 +32,22 @@ func (s *Store) Close() error {
 		return nil
 	}
 	return s.db.Close()
+}
+
+func (s *Store) ensureStrategyInstanceColumns() error {
+	if s == nil || s.db == nil {
+		return nil
+	}
+	hasLastStartedAt, err := dbx.TableHasColumn(s.db, "strategy_instances", "last_started_at")
+	if err != nil {
+		return err
+	}
+	if !hasLastStartedAt {
+		if _, err := s.db.Exec(`ALTER TABLE strategy_instances ADD COLUMN last_started_at DATETIME NULL AFTER last_signal_at`); err != nil {
+			return fmt.Errorf("add strategy_instances.last_started_at failed: %w", err)
+		}
+	}
+	return nil
 }
 
 func (s *Store) UpsertDefinition(def StrategyDefinition) error {
@@ -84,8 +105,8 @@ func (s *Store) SaveInstance(inst StrategyInstance) error {
 	}
 	inst.UpdatedAt = now
 	_, err = s.db.Exec(`
-INSERT INTO strategy_instances(instance_id,strategy_id,display_name,mode,status,account_id,symbols_json,timeframe,params_json,last_signal_at,last_target_position,last_error,updated_at,created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+INSERT INTO strategy_instances(instance_id,strategy_id,display_name,mode,status,account_id,symbols_json,timeframe,params_json,last_signal_at,last_started_at,last_target_position,last_error,updated_at,created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON DUPLICATE KEY UPDATE
 strategy_id=VALUES(strategy_id),
 display_name=VALUES(display_name),
@@ -96,15 +117,16 @@ symbols_json=VALUES(symbols_json),
 timeframe=VALUES(timeframe),
 params_json=VALUES(params_json),
 last_signal_at=VALUES(last_signal_at),
+last_started_at=VALUES(last_started_at),
 last_target_position=VALUES(last_target_position),
 last_error=VALUES(last_error),
 updated_at=VALUES(updated_at)
-`, inst.InstanceID, inst.StrategyID, inst.DisplayName, inst.Mode, inst.Status, inst.AccountID, string(symbols), inst.Timeframe, string(params), inst.LastSignalAt, inst.LastTargetPosition, inst.LastError, inst.UpdatedAt, inst.CreatedAt)
+`, inst.InstanceID, inst.StrategyID, inst.DisplayName, inst.Mode, inst.Status, inst.AccountID, string(symbols), inst.Timeframe, string(params), inst.LastSignalAt, inst.LastStartedAt, inst.LastTargetPosition, inst.LastError, inst.UpdatedAt, inst.CreatedAt)
 	return err
 }
 
 func (s *Store) ListInstances() ([]StrategyInstance, error) {
-	rows, err := s.db.Query(`SELECT instance_id,strategy_id,display_name,mode,status,account_id,symbols_json,timeframe,params_json,last_signal_at,last_target_position,last_error,updated_at,created_at FROM strategy_instances ORDER BY created_at DESC`)
+	rows, err := s.db.Query(`SELECT instance_id,strategy_id,display_name,mode,status,account_id,symbols_json,timeframe,params_json,last_signal_at,last_started_at,last_target_position,last_error,updated_at,created_at FROM strategy_instances ORDER BY COALESCE(last_started_at, created_at) DESC, created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -115,8 +137,9 @@ func (s *Store) ListInstances() ([]StrategyInstance, error) {
 		var symbolsRaw string
 		var paramsRaw string
 		var lastSignal sql.NullTime
+		var lastStarted sql.NullTime
 		var lastError sql.NullString
-		if err := rows.Scan(&item.InstanceID, &item.StrategyID, &item.DisplayName, &item.Mode, &item.Status, &item.AccountID, &symbolsRaw, &item.Timeframe, &paramsRaw, &lastSignal, &item.LastTargetPosition, &lastError, &item.UpdatedAt, &item.CreatedAt); err != nil {
+		if err := rows.Scan(&item.InstanceID, &item.StrategyID, &item.DisplayName, &item.Mode, &item.Status, &item.AccountID, &symbolsRaw, &item.Timeframe, &paramsRaw, &lastSignal, &lastStarted, &item.LastTargetPosition, &lastError, &item.UpdatedAt, &item.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(symbolsRaw), &item.Symbols)
@@ -124,6 +147,10 @@ func (s *Store) ListInstances() ([]StrategyInstance, error) {
 		if lastSignal.Valid {
 			ts := lastSignal.Time
 			item.LastSignalAt = &ts
+		}
+		if lastStarted.Valid {
+			ts := lastStarted.Time
+			item.LastStartedAt = &ts
 		}
 		if lastError.Valid {
 			item.LastError = lastError.String
@@ -138,9 +165,10 @@ func (s *Store) GetInstance(instanceID string) (StrategyInstance, error) {
 	var symbolsRaw string
 	var paramsRaw string
 	var lastSignal sql.NullTime
+	var lastStarted sql.NullTime
 	var lastError sql.NullString
-	err := s.db.QueryRow(`SELECT instance_id,strategy_id,display_name,mode,status,account_id,symbols_json,timeframe,params_json,last_signal_at,last_target_position,last_error,updated_at,created_at FROM strategy_instances WHERE instance_id=?`, instanceID).
-		Scan(&item.InstanceID, &item.StrategyID, &item.DisplayName, &item.Mode, &item.Status, &item.AccountID, &symbolsRaw, &item.Timeframe, &paramsRaw, &lastSignal, &item.LastTargetPosition, &lastError, &item.UpdatedAt, &item.CreatedAt)
+	err := s.db.QueryRow(`SELECT instance_id,strategy_id,display_name,mode,status,account_id,symbols_json,timeframe,params_json,last_signal_at,last_started_at,last_target_position,last_error,updated_at,created_at FROM strategy_instances WHERE instance_id=?`, instanceID).
+		Scan(&item.InstanceID, &item.StrategyID, &item.DisplayName, &item.Mode, &item.Status, &item.AccountID, &symbolsRaw, &item.Timeframe, &paramsRaw, &lastSignal, &lastStarted, &item.LastTargetPosition, &lastError, &item.UpdatedAt, &item.CreatedAt)
 	if err != nil {
 		return item, err
 	}
@@ -149,6 +177,10 @@ func (s *Store) GetInstance(instanceID string) (StrategyInstance, error) {
 	if lastSignal.Valid {
 		ts := lastSignal.Time
 		item.LastSignalAt = &ts
+	}
+	if lastStarted.Valid {
+		ts := lastStarted.Time
+		item.LastStartedAt = &ts
 	}
 	if lastError.Valid {
 		item.LastError = lastError.String

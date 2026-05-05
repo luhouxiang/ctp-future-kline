@@ -50,6 +50,22 @@ button.secondary {
   background: #5a6f86;
 }
 
+button.success {
+  background: #2d8a57;
+}
+
+button.success:disabled {
+  background: #2d8a57;
+}
+
+button.danger {
+  background: #c83d3d;
+}
+
+button.danger:disabled {
+  background: #c83d3d;
+}
+
 input {
   border: 1px solid #c8d6e4;
   border-radius: 8px;
@@ -220,6 +236,16 @@ select {
 
 .query-table td button {
   padding: 6px 10px;
+}
+
+.strategy-service-actions {
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+
+.strategy-instance-actions {
+  display: flex;
+  gap: 8px;
 }
 
 .replay-form-grid {

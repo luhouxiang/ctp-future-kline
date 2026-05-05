@@ -33,6 +33,8 @@ type ManagerStatus struct {
 	LastError string `json:"last_error"`
 	// LastHealthAt 是最近一次健康检查成功时间。
 	LastHealthAt time.Time `json:"last_health_at"`
+	// LastRestartAt 是最近一次启动或重启 Python 策略服务时间。
+	LastRestartAt time.Time `json:"last_restart_at"`
 	// UpdatedAt 是状态更新时间。
 	UpdatedAt time.Time `json:"updated_at"`
 	// Definitions 是已同步到本地的策略定义数量。
@@ -69,6 +71,7 @@ type StrategyInstance struct {
 	Timeframe          string         `json:"timeframe"`
 	Params             map[string]any `json:"params"`
 	LastSignalAt       *time.Time     `json:"last_signal_at,omitempty"`
+	LastStartedAt      *time.Time     `json:"last_started_at,omitempty"`
 	LastTargetPosition float64        `json:"last_target_position"`
 	LastError          string         `json:"last_error,omitempty"`
 	UpdatedAt          time.Time      `json:"updated_at"`

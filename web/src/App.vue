@@ -135,6 +135,7 @@ const strategyStatus = reactive({
   python_entry: '',
   last_error: '',
   last_health_at: '',
+  last_restart_at: '',
   definitions: 0,
   instances: 0,
   running_count: 0,
@@ -217,6 +218,8 @@ const searchState = reactive({
   rebuildingAll: false,
   rowBusy: {},
 })
+
+const strategyServiceBusy = ref(false)
 
 const KLINE_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d']
 
@@ -525,6 +528,20 @@ function applyStrategyStatus(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return
   Object.assign(strategyStatus, snapshot)
 }
+
+const sortedStrategyInstances = computed(() => {
+  const items = Array.isArray(strategyState.instances) ? [...strategyState.instances] : []
+  const toTime = (value) => {
+    const ts = value ? new Date(value).getTime() : 0
+    return Number.isFinite(ts) ? ts : 0
+  }
+  items.sort((a, b) => {
+    const diff = toTime(b.last_started_at || b.created_at) - toTime(a.last_started_at || a.created_at)
+    if (diff !== 0) return diff
+    return String(a.instance_id || '').localeCompare(String(b.instance_id || ''))
+  })
+  return items
+})
 
 function applyTradeStatus(snapshot) {
   if (!snapshot || typeof snapshot !== 'object') return
@@ -876,6 +893,35 @@ async function stopStrategyInstance(instanceId) {
   }
   addLog(`策略实例已停止: ${instanceId}`)
   await fetchStrategyBundle()
+}
+
+async function toggleStrategyService() {
+  if (strategyServiceBusy.value) return
+  strategyServiceBusy.value = true
+  const action = strategyStatus.process_running ? 'stop' : 'start'
+  try {
+    const resp = await fetch(`/api/strategy/${action}`, { method: 'POST' })
+    const data = await resp.json().catch(() => ({}))
+    if (!resp.ok) {
+      addLog(`策略服务${action === 'start' ? '启动' : '停止'}失败: ${data?.error || data?.message || `http ${resp.status}`}`)
+      await fetchStrategyBundle()
+      return
+    }
+    if (data?.status) {
+      applyStrategyStatus(data.status)
+    }
+    if (action === 'start') {
+      addLog(`策略服务已启动: ${formatDisplayDateTime(data?.status?.last_restart_at || new Date())}`)
+    } else {
+      addLog('策略服务已停止')
+    }
+    await fetchStrategyBundle()
+  } catch (err) {
+    addLog(`策略服务${action === 'start' ? '启动' : '停止'}失败: ${err?.message || err}`)
+    await fetchStrategyBundle()
+  } finally {
+    strategyServiceBusy.value = false
+  }
 }
 
 async function runBacktest() {
@@ -1890,12 +1936,27 @@ onUnmounted(() => {
     <div class="panel">
       <h3>策略管理</h3>
       <p v-if="!strategyEnabled" class="error-text">策略子系统未启用</p>
+      <div class="row strategy-service-actions">
+        <button
+          :class="strategyStatus.process_running ? 'danger' : 'success'"
+          :disabled="!strategyEnabled || strategyServiceBusy"
+          @click="toggleStrategyService"
+        >
+          {{
+            strategyServiceBusy
+              ? (strategyStatus.process_running ? '停止中...' : '启动中...')
+              : (strategyStatus.process_running ? '停止策略服务' : '启动策略服务')
+          }}
+        </button>
+        <span>最近重启: {{ formatDisplayDateTime(strategyStatus.last_restart_at) }}</span>
+      </div>
       <div class="status-grid">
         <div class="status-item">启用: {{ strategyStatus.enabled ? '是' : '否' }}</div>
         <div class="status-item">Python 进程: {{ strategyStatus.process_running ? '运行中' : '未运行' }}</div>
         <div class="status-item">gRPC 连接: {{ strategyStatus.connected ? '已连接' : '未连接' }}</div>
         <div class="status-item">gRPC 地址: {{ strategyStatus.grpc_addr || '--' }}</div>
         <div class="status-item">Python 入口: {{ strategyStatus.python_entry || '--' }}</div>
+        <div class="status-item">最近重启: {{ formatDisplayDateTime(strategyStatus.last_restart_at) }}</div>
         <div class="status-item">策略定义数: {{ strategyStatus.definitions || 0 }}</div>
         <div class="status-item">实例数: {{ strategyStatus.instances || 0 }}</div>
         <div class="status-item">运行中实例: {{ strategyStatus.running_count || 0 }}</div>
@@ -1944,26 +2005,40 @@ onUnmounted(() => {
             <th>状态</th>
             <th>合约</th>
             <th>周期</th>
+            <th>最近启动时间</th>
             <th>目标仓位</th>
             <th>操作</th>
           </tr>
         </thead>
         <tbody>
-          <tr v-for="item in strategyState.instances" :key="item.instance_id">
+          <tr v-for="item in sortedStrategyInstances" :key="item.instance_id">
             <td>{{ item.display_name || item.instance_id }}</td>
             <td>{{ item.strategy_id }}</td>
             <td>{{ item.mode }}</td>
             <td>{{ item.status }}</td>
             <td>{{ (item.symbols || []).join(', ') || '--' }}</td>
             <td>{{ item.timeframe || '--' }}</td>
+            <td>{{ formatDisplayDateTime(item.last_started_at || item.created_at) }}</td>
             <td>{{ item.last_target_position ?? '--' }}</td>
-            <td>
-              <button class="secondary" @click="startStrategyInstance(item.instance_id)">启动</button>
-              <button class="secondary" @click="stopStrategyInstance(item.instance_id)">停止</button>
+            <td class="strategy-instance-actions">
+              <button
+                class="secondary"
+                :disabled="item.status === 'running'"
+                @click="startStrategyInstance(item.instance_id)"
+              >
+                启动
+              </button>
+              <button
+                :class="item.status === 'running' ? 'danger' : 'secondary'"
+                :disabled="item.status !== 'running'"
+                @click="stopStrategyInstance(item.instance_id)"
+              >
+                停止
+              </button>
             </td>
           </tr>
-          <tr v-if="strategyState.instances.length === 0">
-            <td colspan="8">无策略实例</td>
+          <tr v-if="sortedStrategyInstances.length === 0">
+            <td colspan="9">无策略实例</td>
           </tr>
         </tbody>
       </table>

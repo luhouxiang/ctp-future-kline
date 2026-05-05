@@ -286,6 +286,7 @@ func tradeSchemaStatements() []string {
   timeframe VARCHAR(32) NOT NULL,
   params_json JSON NOT NULL,
   last_signal_at DATETIME NULL,
+  last_started_at DATETIME NULL,
   last_target_position DOUBLE NOT NULL DEFAULT 0,
   last_error TEXT NULL,
   updated_at DATETIME NOT NULL,

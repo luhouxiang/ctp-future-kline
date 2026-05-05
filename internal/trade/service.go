@@ -159,7 +159,7 @@ func NewService(cfg config.TradeConfig, ctpCfg config.CTPConfig, dsn string, reg
 			Criticality: "best_effort",
 			Capacity:    queueCfg.TradeEventCapacity,
 			LossPolicy:  "best_effort",
-			BasisText:   "??????? Web????????????????",
+			BasisText:   "trade Web event subscribers",
 		})
 	}
 	if ctpCfg.IsBusEnabled() {

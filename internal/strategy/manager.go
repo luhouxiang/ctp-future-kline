@@ -21,6 +21,12 @@ import (
 	"ctp-future-kline/internal/queuewatch"
 )
 
+type strategyServiceProcessInfo struct {
+	ProcessID    int    `json:"ProcessId"`
+	CreationDate string `json:"CreationDate"`
+	CommandLine  string `json:"CommandLine"`
+}
+
 type Manager struct {
 	cfg   config.StrategyConfig
 	store *Store
@@ -37,6 +43,7 @@ type Manager struct {
 	instances   map[string]StrategyInstance
 	queueHandle *queuewatch.QueueHandle
 	queueCap    int
+	lastRestart time.Time
 
 	backtestMarketDSN string
 }
@@ -65,7 +72,7 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 			Criticality: "best_effort",
 			Capacity:    queueCfg.StrategyEventCapacity,
 			LossPolicy:  "best_effort",
-			BasisText:   "????/??????? Web???????????????",
+			BasisText:   "strategy Web event subscribers",
 		})
 	}
 	if items, err := store.ListInstances(); err == nil {
@@ -106,20 +113,7 @@ func (m *Manager) Start() error {
 		return nil
 	}
 	if m.cfg.IsAutoStart() {
-		if err := m.startProcessLocked(); err != nil {
-			m.setError(err)
-			return err
-		}
-		time.Sleep(500 * time.Millisecond)
-		m.mu.RLock()
-		processRunning := m.cmd != nil && m.cmd.Process != nil
-		m.mu.RUnlock()
-		if !processRunning {
-			err := fmt.Errorf("python strategy service exited immediately; check grpc_addr=%s and strategy log", m.cfg.GRPCAddr)
-			m.setError(err)
-			return err
-		}
-		if err := m.connectWithRetry(5 * time.Second); err != nil {
+		if err := m.ensureServiceStarted(false); err != nil {
 			m.setError(err)
 			return err
 		}
@@ -131,6 +125,87 @@ func (m *Manager) Start() error {
 	if err := m.syncDefinitions(); err != nil {
 		logger.Warn("strategy definition sync failed", "error", err)
 	}
+	return nil
+}
+
+func (m *Manager) RestartService() error {
+	if m == nil || !m.cfg.IsEnabled() {
+		return nil
+	}
+	if !m.cfg.IsAutoStart() {
+		return fmt.Errorf("strategy auto_start is disabled")
+	}
+	runningIDs := make([]string, 0, 8)
+	if items, err := m.store.ListInstances(); err == nil {
+		for _, item := range items {
+			if item.Status == InstanceStatusRunning {
+				runningIDs = append(runningIDs, item.InstanceID)
+			}
+		}
+	}
+	if err := m.restartServiceLocked(true); err != nil {
+		m.setError(err)
+		return err
+	}
+	for _, instanceID := range runningIDs {
+		if err := m.StartInstance(instanceID); err != nil {
+			logger.Warn("restart strategy instance after service restart failed", "instance_id", instanceID, "error", err)
+		}
+	}
+	m.broadcast("strategy_status_update", m.Status())
+	return nil
+}
+
+func (m *Manager) StartService() error {
+	if m == nil || !m.cfg.IsEnabled() {
+		return nil
+	}
+	if !m.cfg.IsAutoStart() {
+		return fmt.Errorf("strategy auto_start is disabled")
+	}
+	m.mu.RLock()
+	alreadyRunning := m.cmd != nil && m.cmd.Process != nil && m.connReady
+	m.mu.RUnlock()
+	if alreadyRunning {
+		return nil
+	}
+	if err := m.ensureServiceStarted(true); err != nil {
+		m.setError(err)
+		return err
+	}
+	m.broadcast("strategy_status_update", m.Status())
+	return nil
+}
+
+func (m *Manager) StopService() error {
+	if m == nil || !m.cfg.IsEnabled() {
+		return nil
+	}
+	if !m.cfg.IsAutoStart() {
+		return fmt.Errorf("strategy auto_start is disabled")
+	}
+	items, err := m.store.ListInstances()
+	if err != nil {
+		return err
+	}
+	for _, item := range items {
+		if item.Status != InstanceStatusRunning {
+			continue
+		}
+		item.Status = InstanceStatusStopped
+		item.LastError = ""
+		if saveErr := m.store.SaveInstance(item); saveErr != nil {
+			return saveErr
+		}
+		m.mu.Lock()
+		m.instances[item.InstanceID] = item
+		m.mu.Unlock()
+	}
+	if err := m.stopManagedProcess(); err != nil {
+		m.setError(err)
+		return err
+	}
+	m.broadcast("strategy_status_update", m.Status())
 	return nil
 }
 
@@ -182,9 +257,6 @@ func (m *Manager) startProcessLocked() error {
 	if workdir == "" {
 		workdir = "."
 	}
-	if err := stopExistingPythonStrategyService(entry, m.cfg.GRPCAddr); err != nil {
-		return err
-	}
 	logPath := filepath.Join(workdir, "flow", "strategy_logs", "strategy_service.log")
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
 		return fmt.Errorf("create strategy log directory failed: %w", err)
@@ -208,6 +280,7 @@ func (m *Manager) startProcessLocked() error {
 		return fmt.Errorf("start python strategy service failed: %w", err)
 	}
 	m.cmd = cmd
+	m.lastRestart = time.Now()
 	logger.Info("python strategy service process started", "pid", cmd.Process.Pid)
 	go func() {
 		defer logFile.Close()
@@ -222,6 +295,123 @@ func (m *Manager) startProcessLocked() error {
 		m.mu.Unlock()
 	}()
 	return nil
+}
+
+func (m *Manager) restartServiceLocked(explicit bool) error {
+	if err := m.stopManagedProcess(); err != nil {
+		return err
+	}
+	if explicit {
+		logger.Info("restarting python strategy service", "grpc_addr", m.cfg.GRPCAddr)
+	}
+	if err := m.startProcessLocked(); err != nil {
+		return err
+	}
+	time.Sleep(500 * time.Millisecond)
+	m.mu.RLock()
+	processRunning := m.cmd != nil && m.cmd.Process != nil
+	m.mu.RUnlock()
+	if !processRunning {
+		return fmt.Errorf("python strategy service exited immediately; check grpc_addr=%s and strategy log", m.cfg.GRPCAddr)
+	}
+	if err := m.connectWithRetry(5 * time.Second); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) ensureServiceStarted(logAlreadyRunning bool) error {
+	entry := strings.TrimSpace(m.cfg.PythonEntry)
+	if entry == "" {
+		entry = filepath.Join("python", "strategy_service.py")
+	}
+	if info, ok, err := findExistingPythonStrategyService(entry, m.cfg.GRPCAddr); err != nil {
+		logger.Warn("probe existing python strategy service failed", "error", err, "grpc_addr", m.cfg.GRPCAddr)
+	} else if ok {
+		fields := []any{"pid", info.ProcessID, "grpc_addr", m.cfg.GRPCAddr}
+		if startedAt := parseWMICreationTime(info.CreationDate); !startedAt.IsZero() {
+			fields = append(fields, "started_at", startedAt.Format(time.RFC3339))
+		}
+		if logAlreadyRunning {
+			logger.Info("python strategy service already running", fields...)
+		} else {
+			logger.Info("python strategy service already running on startup", fields...)
+		}
+		return m.connectWithRetry(5 * time.Second)
+	}
+	if err := m.startProcessLocked(); err != nil {
+		return err
+	}
+	time.Sleep(500 * time.Millisecond)
+	m.mu.RLock()
+	processRunning := m.cmd != nil && m.cmd.Process != nil
+	m.mu.RUnlock()
+	if !processRunning {
+		return fmt.Errorf("python strategy service exited immediately; check grpc_addr=%s and strategy log", m.cfg.GRPCAddr)
+	}
+	return m.connectWithRetry(5 * time.Second)
+}
+
+func (m *Manager) stopManagedProcess() error {
+	m.mu.Lock()
+	connClose := m.connClose
+	cmd := m.cmd
+	m.connClose = nil
+	m.client = nil
+	m.connReady = false
+	m.mu.Unlock()
+	if connClose != nil {
+		_ = connClose()
+	}
+	if cmd != nil && cmd.Process != nil {
+		logger.Info("stopping managed python strategy service", "pid", cmd.Process.Pid)
+		if err := cmd.Process.Kill(); err != nil && !strings.Contains(strings.ToLower(err.Error()), "process has already exited") {
+			return fmt.Errorf("stop managed python strategy service failed: %w", err)
+		}
+	}
+	entry := strings.TrimSpace(m.cfg.PythonEntry)
+	if entry == "" {
+		entry = filepath.Join("python", "strategy_service.py")
+	}
+	if err := stopExistingPythonStrategyService(entry, m.cfg.GRPCAddr); err != nil {
+		return err
+	}
+	return nil
+}
+
+func findExistingPythonStrategyService(entry string, grpcAddr string) (strategyServiceProcessInfo, bool, error) {
+	scriptName := strings.ToLower(strings.TrimSpace(filepath.Base(entry)))
+	if scriptName == "" {
+		scriptName = "strategy_service.py"
+	}
+	addrText := strings.TrimSpace(grpcAddr)
+	ps := fmt.Sprintf(`$item = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like '*%s*' -and $_.CommandLine -like '*--addr %s*' } | Sort-Object CreationDate | Select-Object -First 1 ProcessId,CreationDate,CommandLine; if ($null -eq $item) { '' } else { $item | ConvertTo-Json -Compress }`, scriptName, addrText)
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return strategyServiceProcessInfo{}, false, fmt.Errorf("probe existing python strategy service failed: %w", err)
+	}
+	raw := strings.TrimSpace(string(out))
+	if raw == "" {
+		return strategyServiceProcessInfo{}, false, nil
+	}
+	var info strategyServiceProcessInfo
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		return strategyServiceProcessInfo{}, false, fmt.Errorf("decode existing python strategy service info failed: %w", err)
+	}
+	return info, info.ProcessID > 0, nil
+}
+
+func parseWMICreationTime(value string) time.Time {
+	raw := strings.TrimSpace(value)
+	if len(raw) < 14 {
+		return time.Time{}
+	}
+	ts, err := time.Parse("20060102150405", raw[:14])
+	if err != nil {
+		return time.Time{}
+	}
+	return ts
 }
 
 func stopExistingPythonStrategyService(entry string, grpcAddr string) error {
@@ -328,12 +518,13 @@ func (m *Manager) Status() ManagerStatus {
 	}
 	return ManagerStatus{
 		Enabled:          m.cfg.IsEnabled(),
-		ProcessRunning:   m.cmd != nil,
+		ProcessRunning:   m.cmd != nil || m.connReady,
 		Connected:        m.connReady,
 		GRPCAddr:         m.cfg.GRPCAddr,
 		PythonEntry:      m.cfg.PythonEntry,
 		LastError:        m.lastError,
 		LastHealthAt:     m.lastHealth,
+		LastRestartAt:    m.lastRestart,
 		UpdatedAt:        time.Now(),
 		Definitions:      defs,
 		Instances:        insts,
@@ -448,6 +639,28 @@ func (m *Manager) ListInstances() ([]StrategyInstance, error) {
 }
 
 func (m *Manager) SaveInstance(inst StrategyInstance) error {
+	if strings.TrimSpace(inst.InstanceID) != "" {
+		if existing, err := m.store.GetInstance(inst.InstanceID); err == nil {
+			if inst.CreatedAt.IsZero() {
+				inst.CreatedAt = existing.CreatedAt
+			}
+			if inst.LastSignalAt == nil {
+				inst.LastSignalAt = existing.LastSignalAt
+			}
+			if inst.LastStartedAt == nil {
+				inst.LastStartedAt = existing.LastStartedAt
+			}
+			if inst.LastTargetPosition == 0 {
+				inst.LastTargetPosition = existing.LastTargetPosition
+			}
+			if strings.TrimSpace(inst.Status) == "" {
+				inst.Status = existing.Status
+			}
+			if strings.TrimSpace(inst.LastError) == "" {
+				inst.LastError = existing.LastError
+			}
+		}
+	}
 	if strings.TrimSpace(inst.InstanceID) == "" {
 		inst.InstanceID = mustRunID("inst")
 	}
@@ -480,6 +693,8 @@ func (m *Manager) StartInstance(instanceID string) error {
 	}
 	inst.Status = InstanceStatusRunning
 	inst.LastError = ""
+	now := time.Now()
+	inst.LastStartedAt = &now
 	if err := m.store.SaveInstance(inst); err != nil {
 		return err
 	}

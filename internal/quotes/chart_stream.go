@@ -203,7 +203,7 @@ func NewChartStream(dsn string, registry *queuewatch.Registry) (*ChartStream, er
 			Criticality: "best_effort",
 			Capacity:    queueCfg.ChartSubscriberCapacity,
 			LossPolicy:  "latest_only",
-			BasisText:   "?????????????????????????",
+			BasisText:   "chart stream subscribers",
 		})
 	}
 	return stream, nil

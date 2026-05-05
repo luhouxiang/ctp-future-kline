@@ -70,7 +70,7 @@ func newL9AsyncCalculator(store *klineStore, metaDB *sql.DB, status *RuntimeStat
 			Criticality: "critical",
 			Capacity:    queueCfg.L9TaskCapacity,
 			LossPolicy:  "spill_to_disk",
-			BasisText:   "L9 ???????????????????????????",
+			BasisText:   "L9 async quote subscribers",
 		})
 		spool, err := queuewatch.NewJSONSpool[l9Task](queueCfg.SpoolDir, c.queueHandle.Name())
 		if err != nil {

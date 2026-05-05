@@ -48,7 +48,7 @@ func newMarketDataSideEffects(status *RuntimeStatusCenter, onTick func(tickEvent
 			Criticality: "best_effort",
 			Capacity:    queueCfg.SideEffectTickCapacity,
 			LossPolicy:  "best_effort",
-			BasisText:   "tick ???????????/????????????",
+			BasisText:   "tick side effects and subscribers",
 		})
 		s.barQueue = registry.Register(queuewatch.QueueSpec{
 			Name:        "side_effect_bar",
@@ -56,7 +56,7 @@ func newMarketDataSideEffects(status *RuntimeStatusCenter, onTick func(tickEvent
 			Criticality: "best_effort",
 			Capacity:    queueCfg.SideEffectBarCapacity,
 			LossPolicy:  "best_effort",
-			BasisText:   "bar ???????????/????????????",
+			BasisText:   "bar side effects and subscribers",
 		})
 	}
 	if onTick != nil {

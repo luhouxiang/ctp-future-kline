@@ -382,6 +382,9 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/chart/drawings", s.handleChartDrawings)
 	mux.HandleFunc("/api/chart/drawings/", s.handleChartDrawingsByID)
 	mux.HandleFunc("/api/strategy/status", s.handleStrategyStatus)
+	mux.HandleFunc("/api/strategy/start", s.handleStrategyStart)
+	mux.HandleFunc("/api/strategy/stop", s.handleStrategyStop)
+	mux.HandleFunc("/api/strategy/restart", s.handleStrategyRestart)
 	mux.HandleFunc("/api/strategy/definitions", s.handleStrategyDefinitions)
 	mux.HandleFunc("/api/strategy/instances", s.handleStrategyInstances)
 	mux.HandleFunc("/api/strategy/instances/", s.handleStrategyInstanceAction)
@@ -2140,6 +2143,54 @@ func (s *Server) handleStrategyStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": manager.Status()})
+}
+
+func (s *Server) handleStrategyRestart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	if err := manager.RestartService(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": manager.Status()})
+}
+
+func (s *Server) handleStrategyStart(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	if err := manager.StartService(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": manager.Status()})
+}
+
+func (s *Server) handleStrategyStop(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	if err := manager.StopService(); err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": manager.Status()})
 }
 
 func (s *Server) handleStrategyDefinitions(w http.ResponseWriter, r *http.Request) {

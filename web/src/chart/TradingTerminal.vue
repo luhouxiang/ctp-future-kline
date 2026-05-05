@@ -13,6 +13,7 @@ import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis
 const paneRef = ref(null)
 const owner = ref('admin')
 const lightweightOnly = true
+const TRADE_WINDOW_PREF_KEY = 'chart_trade_window_prefs_v1'
 
 const scope = reactive({
   symbol: '',
@@ -140,6 +141,8 @@ const tradeForm = reactive({
 })
 let tradeWindowDrag = null
 let tradeWindowResize = null
+let tradeWindowPrefsLoaded = false
+let tradeWindowPrefsExist = false
 const replayKlineMode = computed(() => appMode.value === 'replay_paper' && replayMode.value === 'kline')
 const DRAWING_TYPE_LABELS = {
   trendline: '趋势线',
@@ -193,6 +196,56 @@ function applyLightweightDefaults(layoutData = {}) {
   selectedDrawingId.value = ''
   quoteSnapshot.value = {}
   quoteTicks.value = []
+}
+
+function loadTradeWindowPrefs() {
+  tradeWindowPrefsLoaded = true
+  tradeWindowPrefsExist = false
+  try {
+    const raw = localStorage.getItem(TRADE_WINDOW_PREF_KEY)
+    if (!raw) return false
+    const data = JSON.parse(raw)
+    if (!data || typeof data !== 'object') return false
+    tradeWindowPrefsExist = true
+    tradeWindow.visible = !!data.visible
+    if (Number.isFinite(Number(data.x))) tradeWindow.x = Math.max(0, Math.round(Number(data.x)))
+    if (Number.isFinite(Number(data.y))) tradeWindow.y = Math.max(0, Math.round(Number(data.y)))
+    if (Number.isFinite(Number(data.width))) tradeWindow.width = Math.max(MIN_TRADE_WINDOW_WIDTH, Math.round(Number(data.width)))
+    if (Number.isFinite(Number(data.height))) tradeWindow.height = Math.max(MIN_TRADE_WINDOW_HEIGHT, Math.round(Number(data.height)))
+    if (typeof data.activeTab === 'string' && data.activeTab.trim()) tradeWindow.activeTab = data.activeTab.trim()
+    tradeWindow.symbolLocked = !!data.symbolLocked
+    return true
+  } catch {
+    return false
+  }
+}
+
+function saveTradeWindowPrefs() {
+  if (!tradeWindowPrefsLoaded) return
+  try {
+    localStorage.setItem(TRADE_WINDOW_PREF_KEY, JSON.stringify({
+      visible: !!tradeWindow.visible,
+      x: Math.round(Number(tradeWindow.x) || 0),
+      y: Math.round(Number(tradeWindow.y) || 0),
+      width: Math.round(Number(tradeWindow.width) || MIN_TRADE_WINDOW_WIDTH),
+      height: Math.round(Number(tradeWindow.height) || MIN_TRADE_WINDOW_HEIGHT),
+      activeTab: String(tradeWindow.activeTab || 'positions'),
+      symbolLocked: !!tradeWindow.symbolLocked,
+    }))
+  } catch {
+    // ignore
+  }
+}
+
+function applyInitialTradeWindowVisibility() {
+  const hasPrefs = loadTradeWindowPrefs()
+  if (autoOpenTradeWindow.value) {
+    tradeWindow.visible = true
+    return
+  }
+  if (!hasPrefs && replayKlineMode.value) {
+    tradeWindow.visible = false
+  }
 }
 
 const keyboardSprite = reactive({
@@ -513,11 +566,13 @@ function openTradeWindow(forceSync = true) {
     tradeWindow.visible = true
   }
   syncTradeFormWithScope(forceSync)
+  saveTradeWindowPrefs()
   void fetchTradeTerminal().catch(() => {})
 }
 
 function closeTradeWindow() {
   tradeWindow.visible = false
+  saveTradeWindowPrefs()
 }
 
 async function fetchTradeTerminal() {
@@ -1382,6 +1437,7 @@ function stopTradeWindowDrag() {
   tradeWindowDrag = null
   tradeWindow.resizing = false
   tradeWindowResize = null
+  saveTradeWindowPrefs()
 }
 
 function isSpriteKey(evt) {
@@ -1945,6 +2001,13 @@ watch(
 )
 
 watch(
+  () => [tradeWindow.visible, tradeWindow.activeTab, tradeWindow.symbolLocked],
+  () => {
+    saveTradeWindowPrefs()
+  },
+)
+
+watch(
   () => keyboardSprite.query,
   () => {
     if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
@@ -1991,6 +2054,7 @@ onMounted(async () => {
   } catch {
     dataMode.value = 'realtime'
   }
+  applyInitialTradeWindowVisibility()
   await fetchWatchlist()
   await fetchLineOrders()
   await fetchStrategyDefinitions()
@@ -2010,10 +2074,11 @@ onMounted(async () => {
   beforeUnloadHandler = () => {
     closeChartWS()
     flushSaveOnUnload()
+    saveTradeWindowPrefs()
     if (saveTimer) clearTimeout(saveTimer)
   }
   window.addEventListener('beforeunload', beforeUnloadHandler)
-  if (autoOpenTradeWindow.value) {
+  if (tradeWindow.visible || autoOpenTradeWindow.value) {
     setTimeout(() => openTradeWindow(true), 30)
   }
 })
@@ -2070,6 +2135,7 @@ onUnmounted(() => {
           ref="paneRef"
           :scope="scope"
           :data-mode="dataMode"
+          :replay-kline-mode="replayKlineMode"
           :theme="layout.theme"
           :active-tool="activeTool"
           :drawings="drawings"
