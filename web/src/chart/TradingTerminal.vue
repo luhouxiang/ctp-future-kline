@@ -46,6 +46,7 @@ const strategyInstances = ref([])
 const strategyStatus = ref({})
 const strategyTraces = ref([])
 const strategyBacktests = ref([])
+const selectedStrategyInstanceId = ref('')
 const strategyStarting = ref(false)
 const ma20ReplayReportRunning = ref(false)
 const ma20ReplayReportTaskID = ref("")
@@ -418,13 +419,7 @@ function onSelectWatch(item) {
   if (!tradeWindow.symbolLocked) {
     tradeForm.symbol = scope.symbol
   }
-  const qs = new URLSearchParams({
-    symbol: scope.symbol,
-    type: scope.type,
-    variety: scope.variety,
-    timeframe: scope.timeframe,
-  })
-  history.replaceState({}, '', `/chart?${qs.toString()}`)
+  syncBrowserScopeQuery()
 }
 
 function resetKeyboardSprite() {
@@ -598,15 +593,100 @@ async function fetchStrategyRuntime() {
   } catch {
     // strategy subsystem may be disabled
   }
+  syncSelectedStrategyInstance()
 }
 
 function pushStrategyTrace(item) {
   if (!item || typeof item !== 'object') return
   const symbol = String(item.symbol || '').trim().toLowerCase()
   if (currentTradeSymbol() && symbol && symbol !== currentTradeSymbol().toLowerCase()) return
+  const timeframe = String(item.timeframe || '').trim().toLowerCase()
+  const currentTimeframe = String(scope.timeframe || '').trim().toLowerCase()
+  if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return
   const id = String(item.trace_id || `${item.instance_id}-${item.event_time}-${item.event_type}`)
   const next = [item, ...strategyTraces.value.filter((x) => String(x.trace_id || `${x.instance_id}-${x.event_time}-${x.event_type}`) !== id)]
   strategyTraces.value = next.slice(0, 100)
+  syncSelectedStrategyInstance()
+}
+
+function normalizeStrategySymbolList(item) {
+  if (Array.isArray(item?.symbols)) return item.symbols.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+  if (typeof item?.symbol === 'string') {
+    const v = String(item.symbol || '').trim().toLowerCase()
+    return v ? [v] : []
+  }
+  return []
+}
+
+function strategyInstanceMatchesCurrentScope(item) {
+  const currentSymbol = currentTradeSymbol().toLowerCase()
+  const currentTimeframe = String(scope.timeframe || '').trim().toLowerCase()
+  if (!currentSymbol || !currentTimeframe || !item) return false
+  const symbols = normalizeStrategySymbolList(item)
+  const itemTimeframe = String(item.timeframe || '').trim().toLowerCase()
+  return (!symbols.length || symbols.includes(currentSymbol)) && (!itemTimeframe || itemTimeframe === currentTimeframe)
+}
+
+function currentScopeStrategyInstances() {
+  return (Array.isArray(strategyInstances.value) ? strategyInstances.value : []).filter(strategyInstanceMatchesCurrentScope)
+}
+
+function currentScopeRunningStrategyInstances() {
+  return currentScopeStrategyInstances().filter((item) => String(item?.status || '') === 'running')
+}
+
+function syncSelectedStrategyInstance(preferredInstanceID = '') {
+  const currentItems = currentScopeStrategyInstances()
+  const preferred = String(preferredInstanceID || selectedStrategyInstanceId.value || '').trim()
+  if (preferred && currentItems.some((item) => String(item.instance_id || '') === preferred)) {
+    selectedStrategyInstanceId.value = preferred
+    return
+  }
+  const running = currentItems.find((item) => String(item?.status || '') === 'running')
+  if (running) {
+    selectedStrategyInstanceId.value = String(running.instance_id || '')
+    return
+  }
+  selectedStrategyInstanceId.value = currentItems[0] ? String(currentItems[0].instance_id || '') : ''
+}
+
+function syncBrowserScopeQuery() {
+  const qs = new URLSearchParams({
+    symbol: String(scope.symbol || '').trim(),
+    type: String(scope.type || '').trim(),
+    variety: String(scope.variety || '').trim(),
+    timeframe: String(scope.timeframe || '1m').trim(),
+  })
+  if (scope.end) qs.set('end', scope.end)
+  if (autoOpenTradeWindow.value) qs.set('open_trade', '1')
+  history.replaceState({}, '', `/chart?${qs.toString()}`)
+}
+
+async function restartStrategyInstance(instanceID) {
+  const id = String(instanceID || '').trim()
+  if (!id) return
+  const resp = await fetch(`/api/strategy/instances/${encodeURIComponent(id)}/start`, {
+    method: 'POST',
+  })
+  if (!resp.ok) throw new Error(await resp.text())
+}
+
+async function restartMatchingStrategyInstancesForCurrentScope() {
+  const running = currentScopeRunningStrategyInstances()
+  if (!running.length) {
+    await syncChartScopeAndReload()
+    return
+  }
+  const ids = running.map((item) => String(item.instance_id || '').trim()).filter(Boolean)
+  for (const id of ids) {
+    await stopStrategyInstance(id)
+  }
+  await syncChartScopeAndReload()
+  for (const id of ids) {
+    await restartStrategyInstance(id)
+  }
+  await fetchStrategyRuntime()
+  syncSelectedStrategyInstance(ids[0] || '')
 }
 
 function updateTradeFormField(field, value) {
@@ -851,7 +931,7 @@ async function runMA20ReplayReport(payload) {
         instance: {
           instance_id: instanceID,
           strategy_id: 'ma20.weak_pullback_short',
-          display_name: `MA20三算法回放报告@${symbol}`,
+          display_name: `MA20三算法回放报告@${symbol}-${reportTimeframe}`,
           mode: 'backtest',
           symbols: [symbol],
           timeframe: reportTimeframe,
@@ -896,18 +976,21 @@ async function startStrategyFromAnchor(anchor, definition) {
       : {}
     const userParams = parseStrategyParamsText()
     const mergedParams = { ...defaultParams, ...userParams }
-    const instanceID = `chart-${Date.now()}`
-    const mode = replayKlineMode.value || dataMode.value === 'replay' ? 'replay' : 'paper'
+    const instanceID = `chart-${String(scope.symbol || 'symbol').trim().toLowerCase()}-${String(scope.timeframe || '1m').trim().toLowerCase()}-${Date.now()}`
+    const mode = replayKlineMode.value || dataMode.value === 'replay' || paneRef.value?.isKlineReplayRunning?.() ? 'replay' : 'paper'
     const displayTime = formatAnchorTime(anchor.data_time || anchor.adjusted_time || anchor.plot_time)
-    const warmupBars = paneRef.value?.getWarmupBarsBeforeAnchor?.(anchor, strategyWarmupCount(strategyID, mergedParams)) || []
+    const timeframeText = String(scope.timeframe || '1m').trim()
+    const warmupTarget = strategyWarmupCount(strategyID, mergedParams)
+    const warmupBars = await (paneRef.value?.ensureWarmupBarsBeforeAnchor?.(anchor, warmupTarget)
+      || Promise.resolve(paneRef.value?.getWarmupBarsBeforeAnchor?.(anchor, warmupTarget) || []))
     const instance = {
       instance_id: instanceID,
       strategy_id: strategyID,
-      display_name: `${definition?.display_name || strategyID}@${scope.symbol}-${displayTime}`,
+      display_name: `${definition?.display_name || strategyID}@${scope.symbol}-${timeframeText}-${displayTime}`,
       mode,
       account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || mode,
       symbols: [scope.symbol],
-      timeframe: scope.timeframe || '1m',
+      timeframe: timeframeText || '1m',
       params: {
         ...mergedParams,
         chart_anchor: anchor,
@@ -915,6 +998,7 @@ async function startStrategyFromAnchor(anchor, definition) {
         start_source: 'chart_context_menu',
         warmup_bars: warmupBars,
         warmup_count: warmupBars.length,
+        warmup_target: warmupTarget,
       },
     }
     const saveResp = await fetch('/api/strategy/instances', {
@@ -930,6 +1014,7 @@ async function startStrategyFromAnchor(anchor, definition) {
     activeRightTab.value = 'strategy'
     layout.panes.right_watchlist_open = true
     await fetchStrategyRuntime()
+    syncSelectedStrategyInstance(instanceID)
     closeStrategyContextMenu()
   } catch (err) {
     strategyContextMenu.error = err instanceof Error ? err.message : String(err)
@@ -1443,6 +1528,7 @@ function onSetTimeframe(v) {  // K线顶部按钮切换周期时会把周期传�
     scope.end = formatScopeEndTime(replayKlineAdjustedTime.value)
   }
   scope.timeframe = v
+  syncBrowserScopeQuery()
 }
 
 async function onKlineReplayDateChange(payload) {
@@ -1451,7 +1537,8 @@ async function onKlineReplayDateChange(payload) {
   scope.end = end
   const ts = Date.parse(end.replace(' ', 'T'))
   if (Number.isFinite(ts)) replayKlineAdjustedTime.value = Math.floor(ts / 1000)
-  await syncChartScopeAndReload()
+  syncBrowserScopeQuery()
+  await restartMatchingStrategyInstancesForCurrentScope()
 }
 
 function openKlineReplayPanel(evt) {
@@ -1459,8 +1546,8 @@ function openKlineReplayPanel(evt) {
 }
 
 function onLatestBarChange(bar) {
-  if (!replayKlineMode.value) return
   latestReplayBarAnchor.value = bar || null
+  if (!replayKlineMode.value) return
   const close = pickQuoteNumber(bar?.close)
   if (close <= 0) return
   const adjusted = Number(bar?.adjusted_time || 0)
@@ -1635,6 +1722,7 @@ function connectChartWS() {
     }
     if (msg?.type === 'strategy_trace_update' && msg.data) {
       pushStrategyTrace(msg.data)
+      syncSelectedStrategyInstance()
       return
     }
     if (msg?.type === 'strategy_status_update' && msg.data) {
@@ -1770,6 +1858,10 @@ function onStrategyTraceFocus(trace) {
   const ts = Date.parse(String(trace?.event_time || ''))
   if (!Number.isFinite(ts)) return
   paneRef.value?.focusTimeOnCandle?.(Math.floor(ts / 1000))
+}
+
+function onStrategyInstanceSelect(instanceID) {
+  syncSelectedStrategyInstance(instanceID)
 }
 
 const bodyStyle = computed(() => {
@@ -2010,6 +2102,7 @@ onUnmounted(() => {
           :open="layout.panes.right_watchlist_open"
           :items="watchlist"
           :current="scope.symbol"
+          :current-timeframe="scope.timeframe"
           :quote-snapshot="quoteSnapshot"
           :quote-ticks="quoteTicks"
           :drawings="objectTreeRows"
@@ -2020,6 +2113,7 @@ onUnmounted(() => {
             traces: strategyTraces,
             backtests: strategyBacktests
           }"
+          :selected-strategy-instance-id="selectedStrategyInstanceId"
           :channels="channelState"
           :reversal="{
             settings: reversalState.settings,
@@ -2038,6 +2132,7 @@ onUnmounted(() => {
           @disable-line-order="disableLineOrder"
           @stop-line-orders="stopLineOrders"
           @strategy-trace-focus="onStrategyTraceFocus"
+          @strategy-instance-select="onStrategyInstanceSelect"
           @strategy-instance-stop="stopStrategyInstance"
           @strategy-run-click="openStrategyRunMenu"
           @channel-action="onChannelAction"

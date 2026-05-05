@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -72,6 +73,9 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 			m.instances[item.InstanceID] = item
 		}
 	}
+	if err := m.ensureLocalDefinitions(); err != nil {
+		logger.Warn("seed local strategy definitions failed", "error", err)
+	}
 	SetDefaultSink(m)
 	return m, nil
 }
@@ -102,15 +106,22 @@ func (m *Manager) Start() error {
 		return nil
 	}
 	if m.cfg.IsAutoStart() {
-		if err := m.connect(); err != nil {
-			if err := m.startProcessLocked(); err != nil {
-				m.setError(err)
-				return err
-			}
-			if err := m.connectWithRetry(5 * time.Second); err != nil {
-				m.setError(err)
-				return err
-			}
+		if err := m.startProcessLocked(); err != nil {
+			m.setError(err)
+			return err
+		}
+		time.Sleep(500 * time.Millisecond)
+		m.mu.RLock()
+		processRunning := m.cmd != nil && m.cmd.Process != nil
+		m.mu.RUnlock()
+		if !processRunning {
+			err := fmt.Errorf("python strategy service exited immediately; check grpc_addr=%s and strategy log", m.cfg.GRPCAddr)
+			m.setError(err)
+			return err
+		}
+		if err := m.connectWithRetry(5 * time.Second); err != nil {
+			m.setError(err)
+			return err
 		}
 	} else if err := m.connectWithRetry(0); err != nil {
 		m.setError(err)
@@ -171,15 +182,35 @@ func (m *Manager) startProcessLocked() error {
 	if workdir == "" {
 		workdir = "."
 	}
-	cmd := exec.Command("python", entry, "--addr", m.cfg.GRPCAddr)
+	if err := stopExistingPythonStrategyService(entry, m.cfg.GRPCAddr); err != nil {
+		return err
+	}
+	logPath := filepath.Join(workdir, "flow", "strategy_logs", "strategy_service.log")
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o755); err != nil {
+		return fmt.Errorf("create strategy log directory failed: %w", err)
+	}
+	logFile, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("open strategy log file failed: %w", err)
+	}
+	cmd := exec.Command("python", entry, "--addr", m.cfg.GRPCAddr, "--log-file", logPath)
 	cmd.Dir = workdir
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
+	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
+	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
+	logger.Info("starting python strategy service",
+		"entry", entry,
+		"workdir", workdir,
+		"grpc_addr", m.cfg.GRPCAddr,
+		"log_file", logPath,
+	)
 	if err := cmd.Start(); err != nil {
+		_ = logFile.Close()
 		return fmt.Errorf("start python strategy service failed: %w", err)
 	}
 	m.cmd = cmd
+	logger.Info("python strategy service process started", "pid", cmd.Process.Pid)
 	go func() {
+		defer logFile.Close()
 		err := cmd.Wait()
 		if err != nil {
 			m.setError(fmt.Errorf("python strategy process exited: %w", err))
@@ -190,6 +221,27 @@ func (m *Manager) startProcessLocked() error {
 		}
 		m.mu.Unlock()
 	}()
+	return nil
+}
+
+func stopExistingPythonStrategyService(entry string, grpcAddr string) error {
+	scriptName := strings.ToLower(strings.TrimSpace(filepath.Base(entry)))
+	if scriptName == "" {
+		scriptName = "strategy_service.py"
+	}
+	addrText := strings.TrimSpace(grpcAddr)
+	ps := fmt.Sprintf(`$items = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like '*%s*' -and $_.CommandLine -like '*--addr %s*' }; if (-not $items) { 'no existing python strategy service'; exit 0 }; foreach ($item in $items) { 'stopping pid=' + $item.ProcessId + ' cmd=' + $item.CommandLine; Stop-Process -Id $item.ProcessId -Force; 'stopped pid=' + $item.ProcessId }`, scriptName, addrText)
+	logger.Info("stop existing python strategy service command", "shell", "powershell", "command", ps)
+	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
+	out, err := cmd.CombinedOutput()
+	result := strings.TrimSpace(string(out))
+	if result == "" {
+		result = "<empty>"
+	}
+	logger.Info("stop existing python strategy service result", "result", result)
+	if err != nil {
+		return fmt.Errorf("stop existing python strategy service failed: %w", err)
+	}
 	return nil
 }
 
@@ -293,10 +345,92 @@ func (m *Manager) Status() ManagerStatus {
 }
 
 func (m *Manager) ListDefinitions() ([]StrategyDefinition, error) {
+	if err := m.ensureLocalDefinitions(); err != nil {
+		logger.Warn("ensure local strategy definitions failed", "error", err)
+	}
 	if err := m.syncDefinitions(); err != nil {
 		logger.Warn("strategy definition sync skipped", "error", err)
 	}
 	return m.store.ListDefinitions()
+}
+
+func (m *Manager) ensureLocalDefinitions() error {
+	for _, item := range localStrategyDefinitions() {
+		if item.UpdatedAt.IsZero() {
+			item.UpdatedAt = time.Now()
+		}
+		if err := m.store.UpsertDefinition(item); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func localStrategyDefinitions() []StrategyDefinition {
+	now := time.Now()
+	return []StrategyDefinition{
+		{
+			StrategyID:  MA20WeakBaselineStrategyID,
+			DisplayName: "MA20 Weak Pullback Baseline",
+			EntryScript: "python/ma20_weak_pullback_baseline.py",
+			Version:     "1.0.0",
+			DefaultParams: map[string]any{
+				"ma_period":            20,
+				"max_wait_bars":        6,
+				"observation_bars":     24,
+				"profit_atr_multiple":  1.0,
+				"adverse_atr_multiple": 0.8,
+				"algorithm":            MA20AlgoBaseline,
+			},
+			UpdatedAt: now,
+		},
+		{
+			StrategyID:  MA20WeakHardFilterStrategyID,
+			DisplayName: "MA20 Weak Pullback Hard Filter",
+			EntryScript: "python/ma20_weak_pullback_hard_filter.py",
+			Version:     "1.0.0",
+			DefaultParams: map[string]any{
+				"ma20_period":          20,
+				"ma60_period":          60,
+				"ma120_period":         120,
+				"atr_period":           14,
+				"observation_bars":     24,
+				"profit_atr_multiple":  1.0,
+				"adverse_atr_multiple": 0.8,
+				"swing_lookback_bars":  20,
+				"slope_lookback_bars":  5,
+				"structure_wait_bars":  3,
+				"touch_wait_bars":      12,
+				"trigger_wait_bars":    6,
+				"use_score_filter":     false,
+				"algorithm":            MA20AlgoHardFilter,
+			},
+			UpdatedAt: now,
+		},
+		{
+			StrategyID:  MA20WeakScoreFilterStrategyID,
+			DisplayName: "MA20 Weak Pullback Score Filter",
+			EntryScript: "python/ma20_weak_pullback_score_filter.py",
+			Version:     "1.0.0",
+			DefaultParams: map[string]any{
+				"ma20_period":          20,
+				"ma60_period":          60,
+				"ma120_period":         120,
+				"atr_period":           14,
+				"observation_bars":     24,
+				"profit_atr_multiple":  1.0,
+				"adverse_atr_multiple": 0.8,
+				"swing_lookback_bars":  20,
+				"slope_lookback_bars":  5,
+				"structure_wait_bars":  3,
+				"touch_wait_bars":      12,
+				"trigger_wait_bars":    6,
+				"use_score_filter":     true,
+				"algorithm":            MA20AlgoScoreFilter,
+			},
+			UpdatedAt: now,
+		},
+	}
 }
 
 func (m *Manager) ListInstances() ([]StrategyInstance, error) {
@@ -352,6 +486,7 @@ func (m *Manager) StartInstance(instanceID string) error {
 	m.mu.Lock()
 	m.instances[inst.InstanceID] = inst
 	m.mu.Unlock()
+	m.persistInstanceStartTrace(inst)
 	m.broadcast("strategy_status_update", m.Status())
 	return nil
 }
@@ -363,12 +498,13 @@ func (m *Manager) callStartInstance(inst StrategyInstance) error {
 	if client == nil {
 		return fmt.Errorf("strategy grpc client not connected")
 	}
+	runtimeInst := runtimeStrategyInstance(inst)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.RequestTimeoutMS)*time.Millisecond)
 	defer cancel()
-	if err := client.LoadStrategy(ctx, LoadStrategyRequest{StrategyID: inst.StrategyID}); err != nil {
+	if err := client.LoadStrategy(ctx, LoadStrategyRequest{StrategyID: runtimeInst.StrategyID}); err != nil {
 		return err
 	}
-	return client.StartInstance(ctx, StartInstanceRequest{Instance: inst})
+	return client.StartInstance(ctx, StartInstanceRequest{Instance: runtimeInst})
 }
 
 func (m *Manager) StopInstance(instanceID string) error {
@@ -797,6 +933,12 @@ func (m *Manager) handleTick(ev TickEvent, mode string) {
 }
 
 func (m *Manager) handleBar(ev BarEvent, mode string) {
+	logger.Info("strategy bar event received",
+		"symbol", ev.InstrumentID,
+		"timeframe", ev.Period,
+		"mode", mode,
+		"event_time", ev.DataTime,
+	)
 	m.forEachMatchingInstance(ev.InstrumentID, ev.Period, mode, func(inst StrategyInstance) {
 		m.callDecision(inst, ev.InstrumentID, mode, ev.DataTime, nil, &ev)
 	})
@@ -834,7 +976,7 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		return
 	}
 	req := DecisionRequest{
-		Instance:        inst,
+		Instance:        runtimeStrategyInstance(inst),
 		Symbol:          symbol,
 		EventTime:       eventTime.Format(time.RFC3339Nano),
 		Mode:            mode,
@@ -851,8 +993,22 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 	case tick != nil:
 		decision, err = client.OnTick(ctx, req)
 	case mode == RunTypeReplay:
+		logger.Info("strategy OnReplayBar call",
+			"instance_id", inst.InstanceID,
+			"strategy_id", inst.StrategyID,
+			"symbol", symbol,
+			"timeframe", inst.Timeframe,
+			"event_time", eventTime,
+		)
 		decision, err = client.OnReplayBar(ctx, req)
 	default:
+		logger.Info("strategy OnBar call",
+			"instance_id", inst.InstanceID,
+			"strategy_id", inst.StrategyID,
+			"symbol", symbol,
+			"timeframe", inst.Timeframe,
+			"event_time", eventTime,
+		)
 		decision, err = client.OnBar(ctx, req)
 	}
 	if err != nil {
@@ -921,12 +1077,22 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		return
 	}
 	sig.ID = id
+	signalStepIndex := 5
+	signalStepTotal := 5
+	if decision.Trace != nil {
+		if decision.Trace.StepIndex > 0 {
+			signalStepIndex = decision.Trace.StepIndex
+		}
+		if decision.Trace.StepTotal > 0 {
+			signalStepTotal = decision.Trace.StepTotal
+		}
+	}
 	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
 		EventType: "signal",
 		StepKey:   "signal",
 		StepLabel: "发出策略信号",
-		StepIndex: 5,
-		StepTotal: 5,
+		StepIndex: signalStepIndex,
+		StepTotal: signalStepTotal,
 		Status:    "passed",
 		Reason:    decision.Reason,
 		Metrics:   decision.Metrics,
@@ -1100,4 +1266,103 @@ func containsFold(items []string, target string) bool {
 		}
 	}
 	return false
+}
+
+func runtimeStrategyInstance(inst StrategyInstance) StrategyInstance {
+	return inst
+}
+
+func cloneStrategyParams(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func (m *Manager) persistInstanceStartTrace(inst StrategyInstance) {
+	trace, ok := initialTraceForInstance(inst)
+	if !ok {
+		return
+	}
+	m.persistTrace(inst, firstSymbol(inst.Symbols), inst.Mode, trace.EventTime, trace)
+}
+
+func initialTraceForInstance(inst StrategyInstance) (StrategyTraceRecord, bool) {
+	params := inst.Params
+	if params == nil {
+		params = map[string]any{}
+	}
+	stepKey := "WAIT_BREAK_BELOW_MA20"
+	stepLabel := "等待跌破 MA20"
+	stepIndex := 1
+	stepTotal := 5
+	switch strings.ToLower(strings.TrimSpace(inst.StrategyID)) {
+	case MA20WeakBaselineStrategyID:
+		stepTotal = 5
+	case MA20WeakStrategyID, MA20WeakHardFilterStrategyID, MA20WeakScoreFilterStrategyID:
+		stepTotal = 6
+	}
+	eventTime := time.Now()
+	if ts, ok := parseInstanceAnchorTime(params); ok {
+		eventTime = ts
+	}
+	return StrategyTraceRecord{
+		InstanceID: inst.InstanceID,
+		StrategyID: inst.StrategyID,
+		Symbol:     firstSymbol(inst.Symbols),
+		Timeframe:  inst.Timeframe,
+		Mode:       inst.Mode,
+		EventType:  "bar",
+		EventTime:  eventTime,
+		StepKey:    stepKey,
+		StepLabel:  stepLabel,
+		StepIndex:  stepIndex,
+		StepTotal:  stepTotal,
+		Status:     "waiting",
+		Reason:     "instance started with warmup bars, waiting for break below MA20",
+		Metrics: map[string]any{
+			"state":        stepKey,
+			"step_total":   stepTotal,
+			"chart_anchor": params["chart_anchor"],
+			"chart_start":  params["chart_start_time"],
+		},
+		CreatedAt: time.Now(),
+	}, true
+}
+
+func parseInstanceAnchorTime(params map[string]any) (time.Time, bool) {
+	values := []string{}
+	if raw, ok := params["chart_start_time"]; ok {
+		values = append(values, fmt.Sprint(raw))
+	}
+	if anchor, ok := params["chart_anchor"].(map[string]any); ok {
+		values = append(values, fmt.Sprint(anchor["data_time"]), fmt.Sprint(anchor["adjusted_time"]), fmt.Sprint(anchor["plot_time"]))
+	}
+	layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02 15:04"}
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" || value == "<nil>" {
+			continue
+		}
+		for _, layout := range layouts {
+			if ts, err := time.ParseInLocation(layout, strings.ReplaceAll(value, "T", " "), time.Local); err == nil {
+				return ts, true
+			}
+			if ts, err := time.Parse(layout, value); err == nil {
+				return ts, true
+			}
+		}
+	}
+	return time.Time{}, false
+}
+
+func firstSymbol(symbols []string) string {
+	if len(symbols) == 0 {
+		return ""
+	}
+	return strings.TrimSpace(symbols[0])
 }

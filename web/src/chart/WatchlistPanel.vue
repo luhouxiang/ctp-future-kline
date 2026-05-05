@@ -6,16 +6,18 @@ const props = defineProps({
   open: { type: Boolean, default: true },
   items: { type: Array, default: () => [] },
   current: { type: String, default: '' },
+  currentTimeframe: { type: String, default: '1m' },
   quoteSnapshot: { type: Object, default: () => ({}) },
   quoteTicks: { type: Array, default: () => [] },
   drawings: { type: Array, default: () => [] },
   lineOrders: { type: Array, default: () => [] },
-  strategy: { type: Object, default: () => ({ status: {}, instances: [], traces: [] }) },
+  strategy: { type: Object, default: () => ({ status: {}, instances: [], traces: [], backtests: [] }) },
   selectedDrawingId: { type: String, default: '' },
   activeTab: { type: String, default: 'quote' },
   channels: { type: Object, default: () => ({ rows: [], selected_id: '', settings: {}, detail: null }) },
   reversal: { type: Object, default: () => ({ settings: {}, results: { lines: [], events: [] }, selected_id: '' }) },
   lightweightOnly: { type: Boolean, default: false },
+  selectedStrategyInstanceId: { type: String, default: '' },
 })
 
 const emit = defineEmits([
@@ -29,6 +31,7 @@ const emit = defineEmits([
   'disable-line-order',
   'stop-line-orders',
   'strategy-trace-focus',
+  'strategy-instance-select',
   'strategy-instance-stop',
   'strategy-run-click',
   'channel-action',
@@ -287,39 +290,83 @@ const runningStrategyInstances = computed(() => (
 
 const strategyInstances = computed(() => (
   (Array.isArray(props.strategy?.instances) ? props.strategy.instances : [])
+    .filter((item) => {
+      const currentSymbol = String(props.current || '').trim().toLowerCase()
+      const currentTimeframe = String(props.currentTimeframe || '1m').trim().toLowerCase()
+      const itemTimeframe = String(item?.timeframe || '').trim().toLowerCase()
+      const symbols = Array.isArray(item?.symbols)
+        ? item.symbols.map((v) => String(v || '').trim().toLowerCase()).filter(Boolean)
+        : []
+      if (currentTimeframe && itemTimeframe && itemTimeframe !== currentTimeframe) return false
+      if (!currentSymbol || !symbols.length) return true
+      return symbols.includes(currentSymbol)
+    })
     .slice()
     .sort((a, b) => Date.parse(String(b?.updated_at || b?.created_at || '')) - Date.parse(String(a?.updated_at || a?.created_at || '')))
 ))
 
+const activeStrategyInstanceId = computed(() => {
+  const selected = String(props.selectedStrategyInstanceId || '').trim()
+  if (selected && strategyInstances.value.some((item) => String(item?.instance_id || '') === selected)) return selected
+  const running = strategyInstances.value.find((item) => String(item?.status || '') === 'running')
+  if (running) return String(running.instance_id || '')
+  return String(strategyInstances.value[0]?.instance_id || '')
+})
+
+const strategyTraceRows = computed(() => {
+  const instanceID = activeStrategyInstanceId.value
+  const currentSymbol = String(props.current || '').trim().toLowerCase()
+  const currentTimeframe = String(props.currentTimeframe || '1m').trim().toLowerCase()
+  return (Array.isArray(props.strategy?.traces) ? props.strategy.traces : [])
+    .filter((row) => {
+      const rowSymbol = String(row?.symbol || '').trim().toLowerCase()
+      const rowTimeframe = String(row?.timeframe || '').trim().toLowerCase()
+      const rowInstanceID = String(row?.instance_id || '').trim()
+      if (currentSymbol && rowSymbol && rowSymbol !== currentSymbol) return false
+      if (currentTimeframe && rowTimeframe && rowTimeframe !== currentTimeframe) return false
+      if (instanceID && rowInstanceID && rowInstanceID !== instanceID) return false
+      return true
+    })
+    .map((row) => ({
+      ...row,
+      timeText: formatTraceTime(row?.event_time),
+      eventLabel: traceEventLabel(row?.event_type),
+      statusLabel: traceStatusLabel(row?.status),
+      checks: Array.isArray(row?.checks) ? row.checks : [],
+    }))
+})
+
 const latestStrategyTrace = computed(() => {
-  const rows = Array.isArray(props.strategy?.traces) ? props.strategy.traces : []
-  return rows[0] || null
+  return strategyTraceRows.value[0] || null
 })
 
 const latestStrategyTimeText = computed(() => formatTraceTime(latestStrategyTrace.value?.event_time))
 
 const ma20Steps = [
-  { key: 'WAIT_MA_READY', label: '等待 MA20 数据足够', index: 1 },
-  { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 2 },
-  { key: 'BROKEN_BELOW_MA20', label: '已跌破，等待反抽触碰 MA20', index: 3 },
-  { key: 'WAIT_BREAK_TOUCH_OPEN', label: '等待跌破触碰K开盘价', index: 4 },
-  { key: 'DONE', label: '已触发/已完成', index: 5 },
+  { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 1 },
+  { key: 'BROKEN_BELOW_MA20', label: '已跌破，等待反抽触碰 MA20', index: 2 },
+  { key: 'WAIT_BREAK_TOUCH_OPEN', label: '等待跌破触碰K开盘价', index: 3 },
+  { key: 'SHORT_SIGNAL', label: '做空信号', index: 4 },
+  { key: 'SIGNAL_ACTIVE', label: '信号观察中', index: 5 },
+  { key: 'SIGNAL_RESULT', label: '信号结果', index: 5 },
 ]
 
 const ma20WeakSteps = [
-  { key: 'WAIT_MA_READY', label: '等待 MA20/MA60/MA120', index: 1 },
-  { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 2 },
-  { key: 'TREND_STRUCTURE_FILTER', label: '趋势/结构过滤', index: 3 },
-  { key: 'WAIT_PULLBACK_TOUCH_MA20', label: '等待弱反触碰 MA20', index: 4 },
-  { key: 'WAIT_BREAK_REACTION_LOW', label: '等待跌破反抽低点', index: 5 },
-  { key: 'SHORT_SIGNAL', label: '做空信号', index: 6 },
+  { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 1 },
+  { key: 'TREND_STRUCTURE_FILTER', label: '趋势/结构过滤', index: 2 },
+  { key: 'WAIT_PULLBACK_TOUCH_MA20', label: '等待弱反触碰 MA20', index: 3 },
+  { key: 'WAIT_BREAK_REACTION_LOW', label: '等待跌破反抽低点', index: 4 },
+  { key: 'SHORT_SIGNAL', label: '做空信号', index: 5 },
+  { key: 'SIGNAL_ACTIVE', label: '信号观察中', index: 6 },
+  { key: 'SIGNAL_RESULT', label: '信号结果', index: 6 },
 ]
 
 const strategyStepRows = computed(() => {
   const trace = latestStrategyTrace.value || {}
   const currentIndex = Number(trace.step_index || 0)
   const currentKey = String(trace.step_key || '')
-  const strategyID = String(trace.strategy_id || runningStrategyInstances.value[0]?.strategy_id || '')
+  const activeInstance = strategyInstances.value.find((item) => String(item?.instance_id || '') === activeStrategyInstanceId.value) || runningStrategyInstances.value[0] || null
+  const strategyID = String(trace.strategy_id || activeInstance?.strategy_id || '')
   let base = [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
   if (strategyID === 'ma20.weak_pullback_short' || strategyID.startsWith('ma20.weak_pullback_short.')) base = ma20WeakSteps
   else if (strategyID === 'ma20.pullback_short' || !strategyID) base = ma20Steps
@@ -330,16 +377,6 @@ const strategyStepRows = computed(() => {
     return { ...step, state, active: currentIndex === step.index || currentKey === step.key }
   })
 })
-
-const strategyTraceRows = computed(() => (
-  (Array.isArray(props.strategy?.traces) ? props.strategy.traces : []).map((row) => ({
-    ...row,
-    timeText: formatTraceTime(row?.event_time),
-    eventLabel: traceEventLabel(row?.event_type),
-    statusLabel: traceStatusLabel(row?.status),
-    checks: Array.isArray(row?.checks) ? row.checks : [],
-  }))
-))
 
 const strategyBacktestRows = computed(() => (
   (Array.isArray(props.strategy?.backtests) ? props.strategy.backtests : [])
@@ -362,6 +399,13 @@ function formatHms(ts) {
 function formatInstanceAnchor(item) {
   const params = item?.params && typeof item.params === 'object' ? item.params : {}
   return String(params.chart_start_time || params.chart_anchor?.data_time || params.chart_anchor?.plot_time || '--')
+}
+
+function strategyInstanceName(item) {
+  const base = String(item?.display_name || item?.instance_id || '').trim()
+  const timeframe = String(item?.timeframe || '').trim()
+  if (!timeframe) return base || '--'
+  return base.includes(`-${timeframe}`) || base.includes(`· ${timeframe}`) ? base : `${base} · ${timeframe}`
 }
 
 function instanceStatusLabel(value) {
@@ -574,9 +618,15 @@ function formatBacktestSummary(summary) {
       <div class="tv-quote-card">
         <div class="tv-channel-settings-head">运行实例</div>
         <div class="tv-strategy-instance-list">
-          <div v-for="item in strategyInstances" :key="item.instance_id" class="tv-strategy-instance-row">
+          <div
+            v-for="item in strategyInstances"
+            :key="item.instance_id"
+            class="tv-strategy-instance-row"
+            :class="{ active: String(item.instance_id || '') === activeStrategyInstanceId }"
+            @click="emit('strategy-instance-select', item.instance_id)"
+          >
             <div class="tv-strategy-instance-main">
-              <strong>{{ item.display_name || item.instance_id }}</strong>
+              <strong>{{ strategyInstanceName(item) }}</strong>
               <small>{{ item.strategy_id }} · {{ (item.symbols || []).join(',') || '--' }} · {{ formatInstanceAnchor(item) }}</small>
             </div>
             <span class="tv-strategy-instance-status">{{ instanceStatusLabel(item.status) }}</span>
@@ -584,6 +634,7 @@ function formatBacktestSummary(summary) {
               v-if="String(item.status || '') === 'running'"
               type="button"
               class="tv-strategy-stop-btn"
+              @click.stop
               @click="emit('strategy-instance-stop', item.instance_id)"
             >
               停止
@@ -940,6 +991,11 @@ function formatBacktestSummary(summary) {
   gap: 4px;
 }
 
+.tv-strategy-backtest-list {
+  display: grid;
+  gap: 4px;
+}
+
 .tv-strategy-step-row {
   display: grid;
   grid-template-columns: 22px minmax(0, 1fr) 42px;
@@ -987,6 +1043,30 @@ function formatBacktestSummary(summary) {
   padding: 7px 4px;
   border-bottom: 1px solid rgba(130, 156, 188, 0.14);
   font-size: 12px;
+  cursor: pointer;
+}
+
+.tv-strategy-instance-row.active {
+  background: rgba(78, 161, 255, 0.12);
+}
+
+.tv-strategy-backtest-row {
+  display: grid;
+  gap: 3px;
+  padding: 7px 4px;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.14);
+  font-size: 12px;
+}
+
+.tv-strategy-backtest-row strong,
+.tv-strategy-backtest-row small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tv-strategy-backtest-row small {
+  color: rgba(210, 223, 238, 0.62);
+  line-height: 1.35;
 }
 
 .tv-strategy-instance-main {

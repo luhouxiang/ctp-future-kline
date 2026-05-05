@@ -183,15 +183,15 @@ func (s *ReplaySink) PublishKlineReplayBar(sub ChartSubscription, item ReplayKli
 		Volume:       bar.Volume,
 		OpenInterest: bar.OpenInterest,
 	})
-	logger.Debug(
-		"kline replay bar published without replay db write",
-		"symbol", bar.InstrumentID,
-		"type", sub.Type,
-		"variety", bar.Variety,
-		"timeframe", bar.Period,
-		"adjusted_time", bar.AdjustedTime.Format(time.RFC3339Nano),
-		"close", bar.Close,
-	)
+	// logger.Debug(
+	// 	"kline replay bar published without replay db write",
+	// 	"symbol", bar.InstrumentID,
+	// 	"type", sub.Type,
+	// 	"variety", bar.Variety,
+	// 	"timeframe", bar.Period,
+	// 	"adjusted_time", bar.AdjustedTime.Format(time.RFC3339Nano),
+	// 	"close", bar.Close,
+	// )
 	return nil
 }
 

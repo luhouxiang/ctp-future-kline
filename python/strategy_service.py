@@ -27,14 +27,21 @@ import argparse
 import json
 # logging：记录服务启动、请求异常、warmup 异常等日志。
 import logging
+import os
+import sys
 # time：生成更新时间、服务时间，并解析部分事件时间戳。
 import time
 # futures.ThreadPoolExecutor：作为 gRPC server 的线程池执行器。
 from concurrent import futures
 # dataclass/field：用于简洁定义策略状态对象 PullbackShortState。
 from dataclasses import dataclass, field
+from logging.handlers import RotatingFileHandler
 # RLock：可重入锁，用来保护多线程 gRPC 请求下的策略状态字典。
 from threading import RLock
+
+from ma20_weak_pullback_baseline import build_strategy as build_ma20_weak_baseline_strategy
+from ma20_weak_pullback_hard_filter import build_strategy as build_ma20_weak_hard_filter_strategy
+from ma20_weak_pullback_score_filter import build_strategy as build_ma20_weak_score_filter_strategy
 
 # grpc 是运行服务时的可选依赖：
 # - 如果环境中安装了 grpcio，则可以正常启动 gRPC 服务；
@@ -46,6 +53,70 @@ except ModuleNotFoundError:
 
 # 模块级 logger，供本文件所有函数/类复用。
 logger = logging.getLogger(__name__)
+DEFAULT_STRATEGY_LOG_FILE = os.path.join("flow", "strategy_logs", "strategy_service.log")
+
+
+def _log_formatter():
+    return logging.Formatter("%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d %(message)s")
+
+
+def _configure_logging(log_file, level_name="INFO"):
+    """Configure console and UTF-8 rotating file logs for strategy execution."""
+    level = getattr(logging, str(level_name or "INFO").upper(), logging.INFO)
+    handlers = [logging.StreamHandler()]
+    if log_file:
+        log_dir = os.path.dirname(os.path.abspath(log_file))
+        if log_dir:
+            os.makedirs(log_dir, exist_ok=True)
+        handlers.append(RotatingFileHandler(log_file, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8"))
+    formatter = _log_formatter()
+    for handler in handlers:
+        handler.setFormatter(formatter)
+    logging.basicConfig(level=level, handlers=handlers, force=True)
+
+
+def _ensure_logging_configured(log_file=DEFAULT_STRATEGY_LOG_FILE, level_name=None):
+    root = logging.getLogger()
+    target_path = os.path.abspath(log_file) if log_file else ""
+    level = getattr(logging, str(level_name or os.environ.get("STRATEGY_LOG_LEVEL", "INFO")).upper(), logging.INFO)
+    if not root.handlers:
+        _configure_logging(log_file, level_name or os.environ.get("STRATEGY_LOG_LEVEL", "INFO"))
+        return
+    root.setLevel(level)
+    if not target_path:
+        return
+    for handler in root.handlers:
+        if isinstance(handler, logging.FileHandler) and os.path.abspath(getattr(handler, "baseFilename", "")) == target_path:
+            return
+    log_dir = os.path.dirname(target_path)
+    if log_dir:
+        os.makedirs(log_dir, exist_ok=True)
+    handler = RotatingFileHandler(target_path, maxBytes=10 * 1024 * 1024, backupCount=5, encoding="utf-8")
+    handler.setFormatter(_log_formatter())
+    root.addHandler(handler)
+
+
+def _log_strategy_phase(request, response):
+    """Write one compact line for every strategy phase emitted by a decision."""
+    trace = (response or {}).get("trace") or {}
+    if not trace:
+        return
+    instance = request.get("instance") or {}
+    metrics = (response or {}).get("metrics") or trace.get("metrics") or {}
+    logger.info(
+        "strategy_phase instance_id=%s strategy_id=%s symbol=%s mode=%s event_type=%s step=%s/%s:%s status=%s reason=%s signal=%s",
+        trace.get("instance_id") or instance.get("instance_id", ""),
+        trace.get("strategy_id") or instance.get("strategy_id", ""),
+        trace.get("symbol") or request.get("symbol", ""),
+        trace.get("mode") or request.get("mode", ""),
+        trace.get("event_type", ""),
+        trace.get("step_index", ""),
+        trace.get("step_total", ""),
+        trace.get("step_key", ""),
+        trace.get("status", ""),
+        trace.get("reason") or (response or {}).get("reason", ""),
+        metrics.get("signal", ""),
+    )
 
 
 # -----------------------------------------------------------------------------
@@ -87,6 +158,8 @@ WAIT_BREAK_BELOW_MA20 = "WAIT_BREAK_BELOW_MA20"
 BROKEN_BELOW_MA20 = "BROKEN_BELOW_MA20"
 # 已找到触碰 MA20 的 K 线：接下来等待 tick 最新价跌破该触碰 K 的开盘价。
 WAIT_BREAK_TOUCH_OPEN = "WAIT_BREAK_TOUCH_OPEN"
+# 已发出信号，等待后续 K 线确认信号成功、失败或观察窗口结束。
+SIGNAL_ACTIVE = "SIGNAL_ACTIVE"
 # 策略流程已完成：已经触发 SHORT 信号，后续不再重复触发。
 DONE = "DONE"
 
@@ -171,6 +244,8 @@ def _no_signal(request, reason, metrics=None, trace=None):
     # trace 是可选字段：只有在调用方传入时才添加，避免响应过于臃肿。
     if trace is not None:
         out["trace"] = trace
+    logger.info("no_signal_from_strategy: instance_id=%s symbol=%s event_time=%s reason=%s metrics=%s trace=%s",
+                out["instance_id"], out["symbol"], out["event_time"], reason, metrics, trace)
     return out
 
 
@@ -222,6 +297,8 @@ def _check(name, passed, current=None, target=None, delta=None, description=""):
         delta: current 与 target 的差值，方便前端或日志判断距离条件还差多少。
         description: 人类可读的补充说明。
     """
+    logger.info("check_condition: name=%s passed=%s current=%s target=%s delta=%s description=%s",
+                name, bool(passed), current, target, delta, description)
     return {
         "name": name,
         "passed": bool(passed),
@@ -262,6 +339,7 @@ class Strategy:
         return _no_signal(request, "tick ignored")
 
     def on_bar(self, request):
+        logger.info("on_bar called with request: %s", request)
         """处理 K 线 bar 事件。默认忽略 bar。"""
         return _no_signal(request, "bar ignored")
 
@@ -434,6 +512,13 @@ class PullbackShortState:
     wait_bars: int = 0
     # 形态失败后是否要求下一次必须“整根 K 线都在 MA 下方”才重新确认跌破。
     reset_requires_full_break: bool = False
+    # 是否已经看到至少一根 OHLC 全部在 MA 上方的 K 线；只有 armed 后才允许等待“跌破 MA”。
+    break_below_armed: bool = False
+    signal_entry: float | None = None
+    signal_profit_target: float | None = None
+    signal_adverse_target: float | None = None
+    signal_bars: int = 0
+    signal_time: str = ""
 
 
 @dataclass
@@ -460,6 +545,11 @@ class WeakPullbackShortState:
     regime: str = ""
     bullish_pause_score: float = 0.0
     bearish_failure_score: float = 0.0
+    signal_entry: float | None = None
+    signal_profit_target: float | None = None
+    signal_adverse_target: float | None = None
+    signal_bars: int = 0
+    signal_time: str = ""
 
 
 # -----------------------------------------------------------------------------
@@ -491,7 +581,13 @@ class MA20PullbackShortStrategy(Strategy):
         "display_name": "MA20 Pullback Short",
         "entry_script": "python/strategy_service.py",
         "version": "1.0.0",
-        "default_params": {"ma_period": 20, "max_wait_bars": 6},
+        "default_params": {
+            "ma_period": 20,
+            "max_wait_bars": 6,
+            "observation_bars": 24,
+            "profit_atr_multiple": 1.0,
+            "adverse_atr_multiple": 0.8,
+        },
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
@@ -576,12 +672,22 @@ class MA20PullbackShortStrategy(Strategy):
 
     def _settings(self, request):
         """读取并规范化策略参数。"""
-        params = _params(request)
+        params = dict(self.definition.get("default_params") or {})
+        params.update(_params(request))
         # 均线周期至少为 2，避免 period=0/1 等无意义或危险配置。
         ma_period = max(2, _int(params.get("ma_period"), 20))
         # 触碰后等待 bar 数至少为 1。
         max_wait_bars = max(1, _int(params.get("max_wait_bars"), 6))
         return ma_period, max_wait_bars
+
+    def _signal_settings(self, request):
+        params = dict(self.definition.get("default_params") or {})
+        params.update(_params(request))
+        return {
+            "observation_bars": max(1, _int(params.get("observation_bars"), 24)),
+            "profit_atr_multiple": max(0.0001, _float(params.get("profit_atr_multiple"), 1.0)),
+            "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
+        }
 
     def _ma(self, closes, period):
         """计算最近 period 个收盘价的简单移动平均线 SMA。"""
@@ -605,6 +711,81 @@ class MA20PullbackShortStrategy(Strategy):
         state.touch_time = ""
         state.wait_bars = 0
         state.reset_requires_full_break = True
+        state.break_below_armed = False
+        self._clear_signal(state)
+
+    def _reset_after_signal_result(self, state):
+        """信号成功/失败/超时结束后，回到等待下一次 MA 跌破。"""
+        state.state = WAIT_BREAK_BELOW_MA20
+        state.touch_open = None
+        state.touch_high = None
+        state.touch_ma20 = None
+        state.touch_time = ""
+        state.wait_bars = 0
+        state.reset_requires_full_break = False
+        state.break_below_armed = False
+        self._clear_signal(state)
+
+    def _clear_signal(self, state):
+        state.signal_entry = None
+        state.signal_profit_target = None
+        state.signal_adverse_target = None
+        state.signal_bars = 0
+        state.signal_time = ""
+
+    def _start_short_signal(self, state, entry_price, high, low, data_time, request):
+        settings = self._signal_settings(request)
+        atr = max(0.0001, high - low)
+        state.state = SIGNAL_ACTIVE
+        state.signal_entry = entry_price
+        state.signal_profit_target = entry_price - settings["profit_atr_multiple"] * atr
+        state.signal_adverse_target = entry_price + settings["adverse_atr_multiple"] * atr
+        state.signal_bars = 0
+        state.signal_time = data_time
+        return atr
+
+    def _signal_metrics(self, state, ma20, ma_period):
+        metrics = self._base_metrics(state, ma20, ma_period)
+        metrics.update({
+            "signal_entry": state.signal_entry,
+            "profit_target": state.signal_profit_target,
+            "adverse_target": state.signal_adverse_target,
+            "signal_bars": state.signal_bars,
+            "signal_time": state.signal_time,
+        })
+        return metrics
+
+    def _evaluate_active_signal(self, request, state, high, low, close, ma20, ma_period):
+        settings = self._signal_settings(request)
+        state.signal_bars += 1
+        hit_adverse = state.signal_adverse_target is not None and high >= state.signal_adverse_target
+        hit_profit = state.signal_profit_target is not None and low <= state.signal_profit_target
+        checks = [
+            _check("触及止损价", hit_adverse, high, state.signal_adverse_target),
+            _check("触及止盈价", hit_profit, low, state.signal_profit_target),
+            _check("观察窗口未结束", state.signal_bars < settings["observation_bars"], state.signal_bars, settings["observation_bars"]),
+        ]
+        if hit_adverse:
+            metrics = self._signal_metrics(state, ma20, ma_period)
+            metrics["signal_result"] = "failure"
+            trace = _trace(request, "bar", "SIGNAL_RESULT", "信号失败", 5, "failed", "adverse target hit before profit target", checks, metrics)
+            self._reset_after_signal_result(state)
+            return _no_signal(request, "adverse target hit before profit target", metrics, trace)
+        if hit_profit:
+            metrics = self._signal_metrics(state, ma20, ma_period)
+            metrics["signal_result"] = "success"
+            trace = _trace(request, "bar", "SIGNAL_RESULT", "信号成功", 5, "passed", "profit target hit before adverse target", checks, metrics)
+            self._reset_after_signal_result(state)
+            return _no_signal(request, "profit target hit before adverse target", metrics, trace)
+        if state.signal_bars >= settings["observation_bars"]:
+            metrics = self._signal_metrics(state, ma20, ma_period)
+            metrics["signal_result"] = "unresolved"
+            trace = _trace(request, "bar", "SIGNAL_RESULT", "信号观察结束", 5, "done", "observation window ended without profit/adverse target", checks, metrics)
+            self._reset_after_signal_result(state)
+            return _no_signal(request, "observation window ended without profit/adverse target", metrics, trace)
+        metrics = self._signal_metrics(state, ma20, ma_period)
+        trace = _trace(request, "bar", SIGNAL_ACTIVE, "信号观察中", 5, "waiting", "waiting for signal result", checks, metrics)
+        return _no_signal(request, "waiting for signal result", metrics, trace)
 
     def _ma_label(self, period):
         """根据均线周期生成展示标签，例如 period=20 时为 MA20。"""
@@ -698,9 +879,12 @@ class MA20PullbackShortStrategy(Strategy):
         ma_label = self._ma_label(ma_period)
         open_price = _float(bar.get("open"))
         high = _float(bar.get("high"))
+        low = _float(bar.get("low"))
         close = _float(bar.get("close"))
         data_time = bar.get("data_time") or request.get("event_time", "")
         data_ts = _event_ts(data_time)
+        logger.info("Strategy.on_bar: instance_id=%s symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
+                    _instance_id(request), request.get("symbol", ""), data_time, open_price, high, low, close)
 
         # 如果能解析出事件时间，则过滤重复或乱序 bar，避免状态机倒退或重复计数。
         if data_ts is not None and state.last_bar_ts is not None and data_ts <= state.last_bar_ts:
@@ -726,23 +910,52 @@ class MA20PullbackShortStrategy(Strategy):
             trace = self._bar_trace(request, state, "WAIT_MA_READY", f"等待 {ma_label} 数据足够", 1, "waiting", "waiting for enough bars", checks, ma20, ma_period)
             return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace)
 
-        # 如果已经完成，则不再重复触发信号，只继续维护 prev_close/prev_ma。
-        if state.state == DONE:
-            self._reset_after_failure(state)
+        if state.state == SIGNAL_ACTIVE:
+            out = self._evaluate_active_signal(request, state, high, low, close, ma20, ma_period)
             state.prev_close = close
             state.prev_ma = ma20
-            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ma_label}", 2, "waiting", "ready for next attempt", [], ma20, ma_period)
+            return out
+
+        # 兼容旧状态：如果已经完成，则回到等待下一轮跌破。
+        if state.state == DONE:
+            self._reset_after_signal_result(state)
+            state.prev_close = close
+            state.prev_ma = ma20
+            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ma_label}", 1, "waiting", "ready for next attempt", [], ma20, ma_period)
             return _no_signal(request, "ready for next attempt", self._base_metrics(state, ma20, ma_period), trace)
 
         # 默认 trace 信息。后续每个状态分支会按实际情况覆盖。
         step_key = state.state
         step_label = f"等待跌破 {ma_label}"
-        step_index = 2
+        step_index = 1
         status = "waiting"
         reason = "no trade signal"
         checks = []
+        full_above = open_price > ma20 and high > ma20 and low > ma20 and close > ma20
 
         if state.state == WAIT_BREAK_BELOW_MA20:
+            if not state.break_below_armed:
+                state.break_below_armed = full_above
+                checks = [
+                    _check(f"整根K线站上{ma_label}", full_above, close, ma20, close - ma20, f"等待出现 OHLC 全部在 {ma_label} 上方的K线")
+                ]
+                step_key = WAIT_BREAK_BELOW_MA20
+                step_label = f"等待先完整站上 {ma_label}"
+                step_index = 1
+                reason = "waiting for first full bar above MA"
+                logger.info(
+                    "Strategy.wait_arm: instance_id=%s symbol=%s event_time=%s ma=%.4f full_above=%s armed=%s",
+                    _instance_id(request),
+                    request.get("symbol", ""),
+                    data_time,
+                    ma20,
+                    full_above,
+                    state.break_below_armed,
+                )
+                state.prev_close = close
+                state.prev_ma = ma20
+                trace = self._bar_trace(request, state, step_key, step_label, step_index, status, reason, checks, ma20, ma_period)
+                return _no_signal(request, reason, self._base_metrics(state, ma20, ma_period), trace)
             # full_break：整根 K 线开盘和收盘都在 MA 下方。
             # 在形态失败重置后，代码要求用 full_break 重新确认跌破，避免在 MA 附近反复误触发。
             full_break = open_price < ma20 and close < ma20
@@ -760,14 +973,14 @@ class MA20PullbackShortStrategy(Strategy):
                 state.reset_requires_full_break = False
                 step_key = BROKEN_BELOW_MA20
                 step_label = f"已跌破，等待反抽触碰 {ma_label}"
-                step_index = 3
+                step_index = 2
                 status = "passed"
                 reason = f"break below {ma_label} confirmed"
             else:
                 # 条件未满足，继续停留在等待跌破阶段。
                 step_key = WAIT_BREAK_BELOW_MA20
                 step_label = f"等待跌破 {ma_label}"
-                step_index = 2
+                step_index = 1
 
         elif state.state == BROKEN_BELOW_MA20:
             # 跌破后，等待价格向上反抽；只要当根 K 的最高价 >= MA，即认为触碰 MA。
@@ -784,14 +997,14 @@ class MA20PullbackShortStrategy(Strategy):
                 state.wait_bars = 1
                 step_key = WAIT_BREAK_TOUCH_OPEN
                 step_label = "等待跌破触碰K开盘价"
-                step_index = 4
+                step_index = 3
                 status = "passed"
                 reason = f"{ma_label} touch bar found"
             else:
                 # 还没有反抽触碰 MA，继续等待。
                 step_key = BROKEN_BELOW_MA20
                 step_label = f"已跌破，等待反抽触碰 {ma_label}"
-                step_index = 3
+                step_index = 2
 
         elif state.state == WAIT_BREAK_TOUCH_OPEN:
             # stood_above：开盘和收盘均在 MA 上方，表示价格重新站上均线，做空形态失效。
@@ -804,8 +1017,8 @@ class MA20PullbackShortStrategy(Strategy):
                 _check("K线跌破触碰K开盘价", state.touch_open is not None and low <= state.touch_open, low, state.touch_open),
             ]
             if state.touch_open is not None and low <= state.touch_open:
-                state.state = DONE
-                metrics = self._base_metrics(state, ma20, ma_period)
+                atr = self._start_short_signal(state, state.touch_open, high, low, data_time, request)
+                metrics = self._signal_metrics(state, ma20, ma_period)
                 metrics.update(
                     {
                         "signal": "SHORT",
@@ -815,14 +1028,15 @@ class MA20PullbackShortStrategy(Strategy):
                         "touch_time": state.touch_time,
                         "trigger_price": state.touch_open,
                         "entry_price": state.touch_open,
+                        "atr": atr,
                     }
                 )
                 trace = _trace(
                     request,
                     "bar",
-                    DONE,
+                    SHORT_SIGNAL,
                     "做空信号",
-                    5,
+                    4,
                     "passed",
                     "SHORT: bar broke below MA touch bar open",
                     checks,
@@ -845,9 +1059,10 @@ class MA20PullbackShortStrategy(Strategy):
             if stood_above:
                 # 价格重新站上 MA：形态失败，重置状态机。
                 self._reset_after_failure(state)
+                state.break_below_armed = True
                 step_key = WAIT_BREAK_BELOW_MA20
                 step_label = f"等待跌破 {ma_label}"
-                step_index = 2
+                step_index = 1
                 status = "failed"
                 reason = f"reset: stood above {ma_label}"
             else:
@@ -858,14 +1073,14 @@ class MA20PullbackShortStrategy(Strategy):
                     self._reset_after_failure(state)
                     step_key = WAIT_BREAK_BELOW_MA20
                     step_label = f"等待跌破 {ma_label}"
-                    step_index = 2
+                    step_index = 1
                     status = "failed"
                     reason = "reset: wait bars exceeded"
                 else:
                     # 继续等待关键 tick 跌破触碰 K 开盘价。
                     step_key = WAIT_BREAK_TOUCH_OPEN
                     step_label = "等待跌破触碰K开盘价"
-                    step_index = 4
+                    step_index = 3
 
         # 处理完当前 bar 后，更新前值，供下一根 bar 判断 cross_break 使用。
         state.prev_close = close
@@ -897,9 +1112,11 @@ class MA20PullbackShortStrategy(Strategy):
                 trace = self._tick_trace(request, state, "waiting", "touch open not broken", checks, last_price)
                 return _no_signal(request, "touch open not broken", self._base_metrics(state, None, ma_period), trace)
 
-            # 触发条件满足：将状态置为 DONE，生成 SHORT 信号。
-            state.state = DONE
-            metrics = self._base_metrics(state, state.touch_ma20, ma_period)
+            # 触发条件满足：生成 SHORT 信号，并进入信号结果观察。
+            atr_high = max(state.touch_high or last_price, last_price, state.touch_open or last_price)
+            atr_low = min(state.touch_open or last_price, last_price)
+            atr = self._start_short_signal(state, last_price, atr_high, atr_low, request.get("event_time", ""), request)
+            metrics = self._signal_metrics(state, state.touch_ma20, ma_period)
             metrics.update(
                 {
                     "signal": "SHORT",
@@ -909,13 +1126,14 @@ class MA20PullbackShortStrategy(Strategy):
                     "touch_time": state.touch_time,
                     "trigger_price": last_price,
                     "entry_price": last_price,
+                    "atr": atr,
                 }
             )
             trace = _trace(
                 request,
                 "key_tick",
-                DONE,
-                "已触发/已完成",
+                SHORT_SIGNAL,
+                "做空信号",
                 5,
                 "passed",
                 "SHORT: tick broke below MA touch bar open",
@@ -948,7 +1166,14 @@ class MA20WeakBaselineStrategy(MA20PullbackShortStrategy):
         definition.update({
             "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
             "display_name": "MA20 Weak Pullback Baseline",
-            "default_params": {"ma_period": 20, "max_wait_bars": 6, "algorithm": "baseline"},
+            "default_params": {
+                "ma_period": 20,
+                "max_wait_bars": 6,
+                "observation_bars": 24,
+                "profit_atr_multiple": 1.0,
+                "adverse_atr_multiple": 0.8,
+                "algorithm": "baseline",
+            },
             "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         })
         super().__init__(definition=definition)
@@ -972,6 +1197,9 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "ma60_period": 60,
             "ma120_period": 120,
             "atr_period": 14,
+            "observation_bars": 24,
+            "profit_atr_multiple": 1.0,
+            "adverse_atr_multiple": 0.8,
             "swing_lookback_bars": 20,
             "slope_lookback_bars": 5,
             "structure_wait_bars": 3,
@@ -1014,7 +1242,8 @@ class MA20WeakPullbackShortStrategy(Strategy):
         return self.states[key]
 
     def _settings(self, request):
-        params = _params(request)
+        params = dict(self.definition.get("default_params") or {})
+        params.update(_params(request))
         return {
             "ma20": max(2, _int(params.get("ma20_period"), _int(params.get("ma_period"), 20))),
             "ma60": max(3, _int(params.get("ma60_period"), 60)),
@@ -1127,6 +1356,11 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "bearish_failure_score": state.bearish_failure_score,
             "bars_since_break": state.bars_since_break,
             "trigger_wait_bars": state.trigger_wait_bars,
+            "signal_entry": state.signal_entry,
+            "profit_target": state.signal_profit_target,
+            "adverse_target": state.signal_adverse_target,
+            "signal_bars": state.signal_bars,
+            "signal_time": state.signal_time,
             "step_total": 6,
         }
 
@@ -1147,6 +1381,65 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.regime = ""
         state.bullish_pause_score = 0.0
         state.bearish_failure_score = 0.0
+        self._clear_signal(state)
+
+    def _clear_signal(self, state):
+        state.signal_entry = None
+        state.signal_profit_target = None
+        state.signal_adverse_target = None
+        state.signal_bars = 0
+        state.signal_time = ""
+
+    def _signal_settings(self, request):
+        params = dict(self.definition.get("default_params") or {})
+        params.update(_params(request))
+        return {
+            "observation_bars": max(1, _int(params.get("observation_bars"), 24)),
+            "profit_atr_multiple": max(0.0001, _float(params.get("profit_atr_multiple"), 1.0)),
+            "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
+        }
+
+    def _start_short_signal(self, state, entry_price, atr, data_time, request):
+        settings = self._signal_settings(request)
+        atr = max(0.0001, atr or 0.0)
+        state.state = SIGNAL_ACTIVE
+        state.signal_entry = entry_price
+        state.signal_profit_target = entry_price - settings["profit_atr_multiple"] * atr
+        state.signal_adverse_target = entry_price + settings["adverse_atr_multiple"] * atr
+        state.signal_bars = 0
+        state.signal_time = data_time
+        return atr
+
+    def _evaluate_active_signal(self, request, state, high, low, ind):
+        settings = self._signal_settings(request)
+        state.signal_bars += 1
+        hit_adverse = state.signal_adverse_target is not None and high >= state.signal_adverse_target
+        hit_profit = state.signal_profit_target is not None and low <= state.signal_profit_target
+        checks = [
+            _check("触及止损价", hit_adverse, high, state.signal_adverse_target),
+            _check("触及止盈价", hit_profit, low, state.signal_profit_target),
+            _check("观察窗口未结束", state.signal_bars < settings["observation_bars"], state.signal_bars, settings["observation_bars"]),
+        ]
+        if hit_adverse:
+            metrics = self._base_metrics(state, ind)
+            metrics["signal_result"] = "failure"
+            trace = self._bar_trace(request, state, "SIGNAL_RESULT", "信号失败", 6, "failed", "adverse target hit before profit target", checks, ind)
+            self._reset(state)
+            return _no_signal(request, "adverse target hit before profit target", metrics, trace)
+        if hit_profit:
+            metrics = self._base_metrics(state, ind)
+            metrics["signal_result"] = "success"
+            trace = self._bar_trace(request, state, "SIGNAL_RESULT", "信号成功", 6, "passed", "profit target hit before adverse target", checks, ind)
+            self._reset(state)
+            return _no_signal(request, "profit target hit before adverse target", metrics, trace)
+        if state.signal_bars >= settings["observation_bars"]:
+            metrics = self._base_metrics(state, ind)
+            metrics["signal_result"] = "unresolved"
+            trace = self._bar_trace(request, state, "SIGNAL_RESULT", "信号观察结束", 6, "done", "observation window ended without profit/adverse target", checks, ind)
+            self._reset(state)
+            return _no_signal(request, "observation window ended without profit/adverse target", metrics, trace)
+        trace = self._bar_trace(request, state, SIGNAL_ACTIVE, "信号观察中", 6, "waiting", "waiting for signal result", checks, ind)
+        return _no_signal(request, "waiting for signal result", self._base_metrics(state, ind), trace)
 
     def _strong_uptrend(self, close, ind):
         ma20, ma60, ma120 = ind.get("ma20"), ind.get("ma60"), ind.get("ma120")
@@ -1220,21 +1513,21 @@ class MA20WeakPullbackShortStrategy(Strategy):
         if strong_up and not structure:
             reason = "strong uptrend pullback, ignore MA20 break"
             self._reset(state)
-            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤", 3, "failed", reason, checks, ind)
+            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤", 2, "failed", reason, checks, ind)
             return _no_signal(request, reason, self._base_metrics(state, ind), trace)
         if not structure:
             if close > ind.get("ma20"):
                 reason = "BULLISH_PAUSE: fast reclaim above MA20"
                 self._reset(state)
-                trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "快速收回 MA20", 3, "failed", reason, checks, ind)
+                trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "快速收回 MA20", 2, "failed", reason, checks, ind)
                 return _no_signal(request, reason, self._base_metrics(state, ind), trace)
             if state.bars_since_break >= settings["structure_wait"]:
                 reason = "structure break not confirmed"
                 self._reset(state)
-                trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "结构破坏未确认", 3, "failed", reason, checks, ind)
+                trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "结构破坏未确认", 2, "failed", reason, checks, ind)
                 return _no_signal(request, reason, self._base_metrics(state, ind), trace)
             state.state = TREND_STRUCTURE_FILTER
-            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "等待破坏上涨结构", 3, "waiting", "waiting for swing low break", checks, ind)
+            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "等待破坏上涨结构", 2, "waiting", "waiting for swing low break", checks, ind)
             return _no_signal(request, "waiting for swing low break", self._base_metrics(state, ind), trace)
         regime = self._classify_regime(close, ind)
         state.regime = regime
@@ -1242,10 +1535,10 @@ class MA20WeakPullbackShortStrategy(Strategy):
         if regime not in ("BEARISH_REVERSAL_CANDIDATE", "WEAK_BEARISH_CANDIDATE"):
             reason = "not bearish regime"
             self._reset(state)
-            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤", 3, "failed", reason, checks, ind)
+            trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤", 2, "failed", reason, checks, ind)
             return _no_signal(request, reason, self._base_metrics(state, ind), trace)
         state.state = WAIT_PULLBACK_TOUCH_MA20
-        trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤通过", 3, "passed", regime, checks, ind)
+        trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤通过", 2, "passed", regime, checks, ind)
         return _no_signal(request, regime, self._base_metrics(state, ind), trace)
 
     def on_bar(self, request):
@@ -1264,6 +1557,16 @@ class MA20WeakPullbackShortStrategy(Strategy):
         low = _float(bar.get("low"))
         close = _float(bar.get("close"))
         data_time = bar.get("data_time") or request.get("event_time", "")
+        logger.info(
+            "WeakStrategy.on_bar: instance_id=%s symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
+            _instance_id(request),
+            request.get("symbol", ""),
+            data_time,
+            open_price,
+            high,
+            low,
+            close,
+        )
         data_ts = _event_ts(data_time)
         if data_ts is not None and state.last_bar_ts is not None and data_ts <= state.last_bar_ts:
             return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state))
@@ -1291,9 +1594,12 @@ class MA20WeakPullbackShortStrategy(Strategy):
             state.prev_ma20 = ma20
             return out
 
+        if state.state == SIGNAL_ACTIVE:
+            return finish(self._evaluate_active_signal(request, state, high, low, ind))
+
         if state.state == DONE:
             self._reset(state)
-            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 2, "waiting", "ready for next attempt", [], ind)
+            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 1, "waiting", "ready for next attempt", [], ind)
             return finish(_no_signal(request, "ready for next attempt", self._base_metrics(state, ind), trace))
 
         if state.state == WAIT_BREAK_BELOW_MA20:
@@ -1303,7 +1609,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
                 _check("上一根收盘在MA20上方", previous_close is not None and previous_ma20 is not None and previous_close >= previous_ma20, previous_close, previous_ma20),
             ]
             if not cross_break:
-                trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 2, "waiting", "waiting for MA20 cross break", checks, ind)
+                trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 1, "waiting", "waiting for MA20 cross break", checks, ind)
                 return finish(_no_signal(request, "waiting for MA20 cross break", self._base_metrics(state, ind), trace))
             state.break_time = data_time
             state.break_index = len(state.closes) - 1
@@ -1331,12 +1637,12 @@ class MA20WeakPullbackShortStrategy(Strategy):
             if stood_above:
                 reason = "reset: stood above MA20 before weak pullback"
                 self._reset(state)
-                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 4, "failed", reason, checks, ind)
+                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 3, "failed", reason, checks, ind)
                 return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
             if wait_used > settings["touch_wait"]:
                 reason = "weak pullback touch timeout"
                 self._reset(state)
-                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 4, "failed", reason, checks, ind)
+                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 3, "failed", reason, checks, ind)
                 return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
             if high >= ma20:
                 state.state = WAIT_BREAK_REACTION_LOW
@@ -1345,9 +1651,9 @@ class MA20WeakPullbackShortStrategy(Strategy):
                 state.touch_ma20 = ma20
                 state.touch_time = data_time
                 state.trigger_wait_bars = 0
-                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "弱反触碰 MA20", 4, "passed", "weak pullback touched MA20", checks, ind)
+                trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "弱反触碰 MA20", 3, "passed", "weak pullback touched MA20", checks, ind)
                 return finish(_no_signal(request, "weak pullback touched MA20", self._base_metrics(state, ind), trace))
-            trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 4, "waiting", "waiting for weak pullback touch", checks, ind)
+            trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "等待弱反触碰 MA20", 3, "waiting", "waiting for weak pullback touch", checks, ind)
             return finish(_no_signal(request, "waiting for weak pullback touch", self._base_metrics(state, ind), trace))
 
         if state.state == WAIT_BREAK_REACTION_LOW:
@@ -1363,33 +1669,34 @@ class MA20WeakPullbackShortStrategy(Strategy):
             if stood_above:
                 reason = "reset: stood above MA20 before reaction low break"
                 self._reset(state)
-                trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 5, "failed", reason, checks, ind)
+                trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 4, "failed", reason, checks, ind)
                 return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
             if state.trigger_wait_bars > settings["trigger_wait"]:
                 reason = "reaction low break timeout"
                 self._reset(state)
-                trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 5, "failed", reason, checks, ind)
+                trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 4, "failed", reason, checks, ind)
                 return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
             if state.reaction_low is not None and low <= state.reaction_low:
                 if settings["use_score_filter"] and bull > bear:
                     reason = "bullish pause score exceeds bearish failure score"
                     self._reset(state)
-                    trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "评分过滤", 5, "failed", reason, checks, ind)
+                    trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "评分过滤", 4, "failed", reason, checks, ind)
                     return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
-                state.state = DONE
+                atr = self._start_short_signal(state, state.reaction_low, ind.get("atr14") or (high - low), data_time, request)
                 metrics = self._base_metrics(state, ind)
                 metrics.update({
                     "signal": "SHORT",
                     "entry_price": state.reaction_low,
                     "trigger_price": state.reaction_low,
                     "reaction_low": state.reaction_low,
+                    "atr14": atr,
                 })
                 trace = _trace(
                     request,
                     "bar",
                     SHORT_SIGNAL,
                     "做空信号",
-                    6,
+                    5,
                     "passed",
                     "SHORT: broke weak pullback reaction low",
                     checks,
@@ -1407,7 +1714,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
                     "metrics": metrics,
                     "trace": trace,
                 })
-            trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 5, "waiting", "waiting for reaction low break", checks, ind)
+            trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "等待跌破反抽低点", 4, "waiting", "waiting for reaction low break", checks, ind)
             return finish(_no_signal(request, "waiting for reaction low break", self._base_metrics(state, ind), trace))
 
         return finish(_no_signal(request, "unknown state", self._base_metrics(state, ind)))
@@ -1451,24 +1758,16 @@ class StrategyService:
 
     def __init__(self):
         """注册内置策略实例。"""
+        _ensure_logging_configured()
         self.strategies = {
             "sample.momentum": SampleMomentumStrategy(),
             "ma20.pullback_short": MA20PullbackShortStrategy(),
             MA20_WEAK_STRATEGY_ID: MA20WeakPullbackShortStrategy(),
-            MA20_WEAK_BASELINE_STRATEGY_ID: MA20WeakBaselineStrategy(),
-            MA20_WEAK_HARD_FILTER_STRATEGY_ID: MA20WeakPullbackVariantStrategy(
-                MA20_WEAK_HARD_FILTER_STRATEGY_ID,
-                "MA20 Weak Pullback Hard Filter",
-                "hard_filter",
-                False,
-            ),
-            MA20_WEAK_SCORE_FILTER_STRATEGY_ID: MA20WeakPullbackVariantStrategy(
-                MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
-                "MA20 Weak Pullback Score Filter",
-                "score_filter",
-                True,
-            ),
+            MA20_WEAK_BASELINE_STRATEGY_ID: build_ma20_weak_baseline_strategy(sys.modules[__name__]),
+            MA20_WEAK_HARD_FILTER_STRATEGY_ID: build_ma20_weak_hard_filter_strategy(sys.modules[__name__]),
+            MA20_WEAK_SCORE_FILTER_STRATEGY_ID: build_ma20_weak_score_filter_strategy(sys.modules[__name__]),
         }
+        logger.info("strategy registry initialized2: %s", ",".join(sorted(self.strategies)))
 
     def Ping(self, request, context):
         """健康检查接口。"""
@@ -1488,6 +1787,7 @@ class StrategyService:
         strategy_id = request.get("strategy_id", "")
         if strategy_id not in self.strategies:
             raise ValueError(f"unknown strategy_id: {strategy_id}")
+        logger.info("strategy loaded: %s", strategy_id)
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def StartInstance(self, request, context):
@@ -1495,6 +1795,13 @@ class StrategyService:
         instance = request.get("instance") or {}
         strategy = self._strategy_for_instance(instance)
         strategy.start_instance(instance)
+        logger.info(
+            "strategy instance started2: instance_id=%s strategy_id=%s symbols=%s mode=%s",
+            instance.get("instance_id", ""),
+            instance.get("strategy_id", ""),
+            ",".join(str(item) for item in (instance.get("symbols") or [])),
+            instance.get("mode", ""),
+        )
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def StopInstance(self, request, context):
@@ -1505,19 +1812,20 @@ class StrategyService:
         instance_id = request.get("instance_id", "")
         for strategy in self.strategies.values():
             strategy.stop_instance(instance_id)
+        logger.info("strategy instance stopped: instance_id=%s", instance_id)
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def OnTick(self, request, context):
         """接收 tick 事件并分发给请求中指定的策略。"""
-        return self._strategy_for_request(request).on_tick(request)
+        return self._run_and_log_phase(request, self._strategy_for_request(request).on_tick)
 
     def OnBar(self, request, context):
         """接收实时 K 线事件并分发给请求中指定的策略。"""
-        return self._strategy_for_request(request).on_bar(request)
+        return self._run_and_log_phase(request, self._strategy_for_request(request).on_bar)
 
     def OnReplayBar(self, request, context):
         """接收回放 K 线事件并分发给请求中指定的策略。"""
-        return self._strategy_for_request(request).on_replay_bar(request)
+        return self._run_and_log_phase(request, self._strategy_for_request(request).on_replay_bar)
 
     def RunBacktest(self, request, context):
         """运行回测的占位接口。
@@ -1564,6 +1872,11 @@ class StrategyService:
     def _strategy_for_request(self, request):
         """从请求的 instance 字段中解析并获取策略对象。"""
         return self._strategy_for_instance(request.get("instance") or {})
+
+    def _run_and_log_phase(self, request, fn):
+        out = fn(request)
+        _log_strategy_phase(request, out)
+        return out
 
 
 # -----------------------------------------------------------------------------
@@ -1620,6 +1933,7 @@ def build_server():
     """创建并配置 gRPC server。"""
     if grpc is None:
         raise RuntimeError("grpcio is required to run the strategy service")
+    _ensure_logging_configured()
     service = StrategyService()
     # 使用最多 8 个工作线程并发处理 unary 请求。
     server = grpc.server(futures.ThreadPoolExecutor(max_workers=8))
@@ -1675,16 +1989,21 @@ def main():
     示例：
         python strategy_service.py --addr 127.0.0.1:50051
     """
-    # 配置基础日志格式。
-    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     # 解析监听地址，默认只监听本机 127.0.0.1:50051。
     parser = argparse.ArgumentParser()
     parser.add_argument("--addr", default="127.0.0.1:50051")
+    parser.add_argument("--log-file", default=DEFAULT_STRATEGY_LOG_FILE)
+    parser.add_argument("--log-level", default=os.environ.get("STRATEGY_LOG_LEVEL", "INFO"))
     args = parser.parse_args()
+    _configure_logging(args.log_file, args.log_level)
     # 创建 gRPC server，绑定端口并启动。
     server = build_server()
-    server.add_insecure_port(args.addr)
+    bound_port = server.add_insecure_port(args.addr)
+    if bound_port == 0:
+        logger.error("strategy service bind failed: addr=%s log_file=%s", args.addr, args.log_file)
+        raise SystemExit(f"strategy service bind failed: {args.addr}")
     server.start()
+    logger.info("strategy service listening on %s log_file=%s", args.addr, args.log_file)
     print(f"strategy service listening on {args.addr}", flush=True)
     # 阻塞主线程，直到进程被终止。
     server.wait_for_termination()

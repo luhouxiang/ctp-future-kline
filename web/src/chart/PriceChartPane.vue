@@ -32,6 +32,7 @@ const MIN_MACD_H = 70;
 const MIN_VOLUME_H = 120;
 const DATA_ZONE_WIDTH_PX = 64;
 const DATA_ZONE_MASK_PAD_PX = 12;
+const KLINE_REPLAY_RIGHT_PAD = 2;
 const COLOR_UP = "#ff2f2f";
 const COLOR_DOWN_KLINE_VOLUME = "#49e9f8";
 const COLOR_DOWN_MACD = "#2e7d32";
@@ -174,6 +175,8 @@ let loadRequestSeq = 0;
 let klineReplayPanelDrag = null;
 let klineReplayStatusTimer = null;
 let klineReplayActionSeq = 0;
+let klineReplayViewportLock = null;
+let klineReplayViewportApplying = false;
 let lastKlineReplayTaskID = "";
 let reportedKlineReplayTaskID = "";
 
@@ -546,6 +549,7 @@ function initCharts() {
       scheduleReversalRecalc();
       viewVersion.value += 1;
       if (range.from < 30) void loadOlderChunk();
+      refreshKlineReplayViewportLockFromRange(range);
     });
   };
   link(chartRefs.candle, chartRefs.macd, chartRefs.volume);
@@ -892,18 +896,117 @@ function scheduleDerivedSeriesRender() {
 function resetViewportToLoadedBars() {
   const range = buildInitialVisibleLogicalRange(Array.isArray(state.bars) ? state.bars.length : 0);
   if (!range) return;
+  applyVisibleLogicalRange(range);
+}
+
+function applyVisibleLogicalRange(range, options = {}) {
+  if (!range) return;
+  const suppressReplayLock = !!options.suppressReplayLock;
+  if (suppressReplayLock) klineReplayViewportApplying = true;
   try {
     chartRefs.candle?.timeScale?.().setVisibleLogicalRange?.(range);
     chartRefs.macd?.timeScale?.().setVisibleLogicalRange?.(range);
     chartRefs.volume?.timeScale?.().setVisibleLogicalRange?.(range);
   } catch {
     // ignore
+  } finally {
+    if (suppressReplayLock) {
+      requestAnimationFrame(() => {
+        klineReplayViewportApplying = false;
+      });
+    }
   }
+}
+
+function currentVisibleLogicalRangeRaw() {
+  const range = chartRefs.candle?.timeScale()?.getVisibleLogicalRange?.();
+  if (
+    !range ||
+    !Number.isFinite(Number(range.from)) ||
+    !Number.isFinite(Number(range.to))
+  ) {
+    return null;
+  }
+  return { from: Number(range.from), to: Number(range.to) };
+}
+
+function setKlineReplayViewportLockFromRange(raw, options = {}) {
+  const total = Array.isArray(state.bars) ? state.bars.length : 0;
+  if (total <= 0) {
+    klineReplayViewportLock = null;
+    return false;
+  }
+  const fallback = buildInitialVisibleLogicalRange(total);
+  if (!raw) {
+    klineReplayViewportLock = null;
+    return false;
+  }
+  let from = Number(raw.from);
+  let to = Number(raw.to);
+  let span = to - from;
+  if (!Number.isFinite(span) || span < 20 || span > total + 20) {
+    from = Number(fallback?.from);
+    to = Number(fallback?.to);
+    span = to - from;
+  }
+  if (!Number.isFinite(span) || span <= 0) {
+    klineReplayViewportLock = null;
+    return false;
+  }
+  const latestIndex = total - 1;
+  const followsLatest = to >= latestIndex - 0.5;
+  if (followsLatest && to > latestIndex + KLINE_REPLAY_RIGHT_PAD) {
+    to = latestIndex + KLINE_REPLAY_RIGHT_PAD;
+    from = to - span;
+  }
+  klineReplayViewportLock = {
+    from,
+    to,
+    span,
+    baseLastIndex: latestIndex,
+    followsLatest,
+  };
+  if (options.applyNow) applyLockedKlineReplayViewport();
+  return true;
+}
+
+function captureKlineReplayViewportLock() {
+  const total = Array.isArray(state.bars) ? state.bars.length : 0;
+  const fallback = buildInitialVisibleLogicalRange(total);
+  setKlineReplayViewportLockFromRange(currentVisibleLogicalRangeRaw() || fallback, { applyNow: true });
+}
+
+function refreshKlineReplayViewportLockFromRange(range) {
+  if (!klineReplayPanel.running || klineReplayViewportApplying || !range) return;
+  setKlineReplayViewportLockFromRange(range, { applyNow: false });
+}
+
+function clearKlineReplayViewportLock() {
+  klineReplayViewportLock = null;
+}
+
+function applyLockedKlineReplayViewport() {
+  const lock = klineReplayViewportLock;
+  const total = Array.isArray(state.bars) ? state.bars.length : 0;
+  if (!lock || total <= 0) return false;
+  const latestIndex = total - 1;
+  const shift = lock.followsLatest ? Math.max(0, latestIndex - Number(lock.baseLastIndex || latestIndex)) : 0;
+  const nextRange = {
+    from: Number(lock.from) + shift,
+    to: Number(lock.to) + shift,
+  };
+  applyVisibleLogicalRange(nextRange, { suppressReplayLock: true });
+  klineReplayViewportLock = {
+    ...lock,
+    ...nextRange,
+    baseLastIndex: latestIndex,
+  };
+  return true;
 }
 
 function currentVisibleIndexRange() {
   if (!state.bars.length) return null;
-  const range = chartRefs.candle?.timeScale()?.getVisibleLogicalRange?.();
+  const range = currentVisibleLogicalRangeRaw();
   if (
     !range ||
     !Number.isFinite(Number(range.from)) ||
@@ -918,6 +1021,25 @@ function currentVisibleIndexRange() {
   );
   if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return null;
   return { start, end };
+}
+
+function shiftViewportForAppendedBars(previousBars, nextBars, previousRange) {
+  const before = Array.isArray(previousBars) ? previousBars : [];
+  const after = Array.isArray(nextBars) ? nextBars : [];
+  if (!before.length || !after.length) return;
+  const appended = after.length - before.length;
+  if (appended <= 0) return;
+  if (klineReplayPanel.running && applyLockedKlineReplayViewport()) return;
+  if (!previousRange) return;
+  const oldLastIndex = before.length - 1;
+  const wasTrackingRightEdge = Number(previousRange.to) >= oldLastIndex - 0.5;
+  if (!wasTrackingRightEdge) return;
+  const span = Number(previousRange.to) - Number(previousRange.from);
+  if (!Number.isFinite(span) || span <= 0) return;
+  applyVisibleLogicalRange({
+    from: Number(previousRange.from) + appended,
+    to: Number(previousRange.from) + appended + span,
+  });
 }
 
 function channelSegmentMetrics(seg) {
@@ -1415,6 +1537,7 @@ async function loadOlderChunk() {
     return;
   state.loadingMore = true;
   try {
+    const previousRange = currentVisibleLogicalRangeRaw();
     const oldest = state.bars[0].adjusted_time;
     const nextEnd = fmtTime(oldest - 60);
     const chunk = await fetchChunk(nextEnd);
@@ -1438,6 +1561,14 @@ async function loadOlderChunk() {
     state.bars = normalizeBarsAscendingUnique([...toPrepend, ...state.bars], "merge_older");
     state.hasMore = olderBars.length >= CHUNK_SIZE;
     renderSeries();
+    if (previousRange && toPrepend.length > 0) {
+      const shiftedRange = {
+        from: Number(previousRange.from) + toPrepend.length,
+        to: Number(previousRange.to) + toPrepend.length,
+      };
+      applyVisibleLogicalRange(shiftedRange);
+      if (klineReplayPanel.running) refreshKlineReplayViewportLockFromRange(shiftedRange);
+    }
     scheduleChannelRecalc();
     publishLatestBar();
   } finally {
@@ -1916,6 +2047,8 @@ async function reloadRecentWindow() {
 
 function applyRealtimeBarUpdate(update) {
   realtimeApplyCount += 1;
+  const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+  const previousRange = currentVisibleLogicalRangeRaw();
   const sub = update?.subscription || {};
   const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
   const localDataMode = String(props.dataMode || "realtime").trim().toLowerCase();
@@ -1940,6 +2073,7 @@ function applyRealtimeBarUpdate(update) {
   }
   state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   updatePrimarySeriesForRealtime();
+  shiftViewportForAppendedBars(previousBars, state.bars, previousRange);
   scheduleDerivedSeriesRender();
   publishLatestBar();
 }
@@ -2260,6 +2394,10 @@ function getLatestBarAnchor() {
   return buildBarAnchor(state.bars.length - 1);
 }
 
+function isKlineReplayRunning() {
+  return !!klineReplayPanel.running;
+}
+
 function buildStrategyWarmupBar(bar) {
   if (!bar) return null;
   return {
@@ -2294,6 +2432,32 @@ function getWarmupBarsBeforeAnchor(anchor, count = 20) {
     .slice(start, Math.floor(anchorIndex))
     .map((bar) => buildStrategyWarmupBar(bar))
     .filter(Boolean);
+}
+
+function getWarmupBarsBeforeAnchorTime(anchorTime, count = 20) {
+  const target = Math.max(1, Number(count) || 20);
+  const ts = Number(anchorTime || 0);
+  if (!Number.isFinite(ts) || ts <= 0) return [];
+  const anchorIndex = state.bars.findIndex((bar) => Number(getAdjustedTime(bar)) === ts);
+  if (anchorIndex <= 0) return [];
+  const start = Math.max(0, anchorIndex - target);
+  return state.bars
+    .slice(start, anchorIndex)
+    .map((bar) => buildStrategyWarmupBar(bar))
+    .filter(Boolean);
+}
+
+async function ensureWarmupBarsBeforeAnchor(anchor, count = 20) {
+  const target = Math.max(1, Number(count) || 20);
+  const anchorTime = Number(anchor?.adjusted_time || anchor?.plot_time || anchor?.data_time || 0);
+  if (!Number.isFinite(anchorTime) || anchorTime <= 0) return [];
+  while (true) {
+    const warmupBars = getWarmupBarsBeforeAnchorTime(anchorTime, target);
+    if (warmupBars.length >= target || !state.hasMore || state.loading || state.loadingMore || state.bars.length === 0) {
+      return warmupBars;
+    }
+    await loadOlderChunk();
+  }
 }
 
 function pad2(n) {
@@ -2394,6 +2558,7 @@ function applyKlineReplayTaskStatus(task) {
   const taskID = String(task?.task_id || "");
   if (taskID) lastKlineReplayTaskID = taskID;
   klineReplayPanel.running = mode === "kline" && (status === "running" || status === "paused");
+  if (!klineReplayPanel.running) clearKlineReplayViewportLock();
   if (mode === "kline" && status === "done" && taskID && taskID !== reportedKlineReplayTaskID) {
     reportedKlineReplayTaskID = taskID;
     emit("kline-replay-finished", {
@@ -2500,6 +2665,7 @@ async function startKlineReplayFromPanel() {
   klineReplayPanel.error = "";
   reportedKlineReplayTaskID = "";
   lastKlineReplayTaskID = "";
+  captureKlineReplayViewportLock();
   ensureKlineReplayStatusPolling();
   try {
     const resp = await fetch("/api/replay/start", {
@@ -2543,6 +2709,7 @@ async function stopKlineReplayFromPanel() {
   const actionSeq = ++klineReplayActionSeq;
   console.info("[replay] kline stop button clicked");
   klineReplayPanel.running = false;
+  clearKlineReplayViewportLock();
   klineReplayPanel.loading = true;
   klineReplayPanel.error = "";
   try {
@@ -2589,7 +2756,9 @@ defineExpose({
   reload: loadInitialChunk,
   openKlineReplayPanelFromToolbar,
   getLatestBarAnchor,
+  isKlineReplayRunning,
   getWarmupBarsBeforeAnchor,
+  ensureWarmupBarsBeforeAnchor,
   reloadRecentWindow,
   applyRealtimeBarUpdate,
   applyQuoteSynthesis,
@@ -3577,6 +3746,11 @@ async function syncLayoutAndChartSizes() {
   requestAnimationFrame(() => {
     refreshOverlayMetrics();
     applyChartSizes();
+    if (klineReplayPanel.running) {
+      requestAnimationFrame(() => {
+        refreshKlineReplayViewportLockFromRange(currentVisibleLogicalRangeRaw());
+      });
+    }
   });
 }
 
@@ -3652,6 +3826,7 @@ onUnmounted(() => {
   stopResize();
   stopKlineReplayPanelDrag();
   stopKlineReplayStatusPolling();
+  clearKlineReplayViewportLock();
   if (channelRecalcTimer) {
     clearTimeout(channelRecalcTimer);
     channelRecalcTimer = null;
