@@ -9,11 +9,11 @@ import TradeDockWindow from './TradeDockWindow.vue'
 import { bootKlineComposerWASM } from './klineComposeBridge'
 import { DEFAULT_CHANNEL_SETTINGS, normalizeChannelSettingsV2 } from './analysis/channelDetector'
 import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis/reversalDetector'
+import { TRADE_WINDOW_PREF_KEY, readLastChartSessionPrefs, writeLastChartSessionPrefs } from './chartPrefs'
 
 const paneRef = ref(null)
 const owner = ref('admin')
 const lightweightOnly = true
-const TRADE_WINDOW_PREF_KEY = 'chart_trade_window_prefs_v1'
 
 const scope = reactive({
   symbol: '',
@@ -102,6 +102,7 @@ const replayMode = ref('kline')
 const replayKlineAdjustedTime = ref(0)
 const chartSubscribedTicket = ref(null)
 const autoOpenTradeWindow = ref(false)
+const forcedTradeWindowVisible = ref(null)
 const chartHealth = reactive({
   lastBarUpdateAt: 0,
   lastQuoteUpdateAt: 0,
@@ -235,10 +236,15 @@ function saveTradeWindowPrefs() {
   } catch {
     // ignore
   }
+  writeLastChartSessionPrefs({ trade_window_visible: !!tradeWindow.visible })
 }
 
 function applyInitialTradeWindowVisibility() {
   const hasPrefs = loadTradeWindowPrefs()
+  if (typeof forcedTradeWindowVisible.value === 'boolean') {
+    tradeWindow.visible = forcedTradeWindowVisible.value
+    return
+  }
   if (autoOpenTradeWindow.value) {
     tradeWindow.visible = true
     return
@@ -283,15 +289,20 @@ function normalizeDrawingForSave(d) {
 
 function getParams() {
   const p = new URLSearchParams(location.search)
-  const symbol = String(p.get('symbol') || '').trim().toLowerCase()
-  const kind = String(p.get('type') || '').trim().toLowerCase()
-  const variety = String(p.get('variety') || '').trim().toLowerCase()
+  const prefs = readLastChartSessionPrefs()
+  const symbol = String(p.get('symbol') || prefs.symbol || '').trim().toLowerCase()
+  const kind = String(p.get('type') || prefs.type || '').trim().toLowerCase()
+  const variety = String(p.get('variety') || prefs.variety || '').trim().toLowerCase()
   scope.symbol = symbol
   scope.type = kind || inferKlineTypeBySymbol(symbol)
   scope.variety = variety || inferVarietyBySymbol(symbol, scope.type)
-  scope.timeframe = p.get('timeframe') || '1m'
-  scope.end = p.get('end') || ''
-  autoOpenTradeWindow.value = p.get('open_trade') === '1'
+  scope.timeframe = p.get('timeframe') || prefs.timeframe || '1m'
+  scope.end = p.get('end') || prefs.end || ''
+  const requestedDataMode = String(p.get('data_mode') || prefs.data_mode || '').trim().toLowerCase()
+  if (requestedDataMode) dataMode.value = requestedDataMode
+  const openTrade = p.get('open_trade')
+  forcedTradeWindowVisible.value = openTrade === '1' ? true : (openTrade === '0' ? false : null)
+  autoOpenTradeWindow.value = forcedTradeWindowVisible.value === true
 }
 
 function inferKlineTypeBySymbol(symbol) {
@@ -473,6 +484,7 @@ function onSelectWatch(item) {
     tradeForm.symbol = scope.symbol
   }
   syncBrowserScopeQuery()
+  persistLastChartSessionPrefs()
 }
 
 function resetKeyboardSprite() {
@@ -565,14 +577,20 @@ function openTradeWindow(forceSync = true) {
     if (tradeWindow.x === 0 && tradeWindow.y <= 24) placeTradeWindowDefault()
     tradeWindow.visible = true
   }
+  forcedTradeWindowVisible.value = true
+  autoOpenTradeWindow.value = true
   syncTradeFormWithScope(forceSync)
   saveTradeWindowPrefs()
+  syncBrowserScopeQuery()
   void fetchTradeTerminal().catch(() => {})
 }
 
 function closeTradeWindow() {
+  forcedTradeWindowVisible.value = false
+  autoOpenTradeWindow.value = false
   tradeWindow.visible = false
   saveTradeWindowPrefs()
+  syncBrowserScopeQuery()
 }
 
 async function fetchTradeTerminal() {
@@ -713,8 +731,24 @@ function syncBrowserScopeQuery() {
     timeframe: String(scope.timeframe || '1m').trim(),
   })
   if (scope.end) qs.set('end', scope.end)
-  if (autoOpenTradeWindow.value) qs.set('open_trade', '1')
+  if (dataMode.value) qs.set('data_mode', String(dataMode.value || 'realtime').trim().toLowerCase())
+  qs.set('open_trade', tradeWindow.visible ? '1' : '0')
   history.replaceState({}, '', `/chart?${qs.toString()}`)
+}
+
+function persistLastChartSessionPrefs() {
+  if (!scope.symbol || !scope.type) return
+  writeLastChartSessionPrefs({
+    symbol: scope.symbol,
+    type: scope.type,
+    variety: scope.variety,
+    timeframe: scope.timeframe || '1m',
+    end: scope.end || '',
+    data_mode: dataMode.value || 'realtime',
+    app_mode: appMode.value || '',
+    replay_default_mode: replayMode.value || 'kline',
+    trade_window_visible: !!tradeWindow.visible,
+  })
 }
 
 async function restartStrategyInstance(instanceID) {
@@ -1585,6 +1619,7 @@ function onSetTimeframe(v) {  // K线顶部按钮切换周期时会把周期传�
   }
   scope.timeframe = v
   syncBrowserScopeQuery()
+  persistLastChartSessionPrefs()
 }
 
 async function onKlineReplayDateChange(payload) {
@@ -1594,6 +1629,7 @@ async function onKlineReplayDateChange(payload) {
   const ts = Date.parse(end.replace(' ', 'T'))
   if (Number.isFinite(ts)) replayKlineAdjustedTime.value = Math.floor(ts / 1000)
   syncBrowserScopeQuery()
+  persistLastChartSessionPrefs()
   await restartMatchingStrategyInstancesForCurrentScope()
 }
 
@@ -1642,8 +1678,8 @@ function applyAppModeSnapshot(snapshot) {
   appMode.value = String(snapshot?.mode || appMode.value || '').trim().toLowerCase()
   replayMode.value = String(snapshot?.replay_default_mode || replayMode.value || 'kline').trim().toLowerCase()
   const nextMode = String(snapshot?.kline_data_mode || snapshot?.chart_data_mode || 'realtime').trim().toLowerCase()
-  if (!nextMode || dataMode.value === nextMode) return
-  dataMode.value = nextMode
+  if (nextMode && dataMode.value !== nextMode) dataMode.value = nextMode
+  persistLastChartSessionPrefs()
 }
 
 function resetQuotePanel() {
@@ -1969,12 +2005,14 @@ watch(
       }
     }
     await fetchStrategyRuntime()
+    persistLastChartSessionPrefs()
   },
 )
 
 watch(
   () => dataMode.value,
   async () => {
+    syncBrowserScopeQuery()
     await syncChartScopeAndReload()
     if (tradeWindow.visible) {
       try {
@@ -1983,6 +2021,7 @@ watch(
         // ignore
       }
     }
+    persistLastChartSessionPrefs()
   },
 )
 
@@ -2004,6 +2043,8 @@ watch(
   () => [tradeWindow.visible, tradeWindow.activeTab, tradeWindow.symbolLocked],
   () => {
     saveTradeWindowPrefs()
+    if (scope.symbol && scope.type) syncBrowserScopeQuery()
+    persistLastChartSessionPrefs()
   },
 )
 
@@ -2055,6 +2096,7 @@ onMounted(async () => {
     dataMode.value = 'realtime'
   }
   applyInitialTradeWindowVisibility()
+  persistLastChartSessionPrefs()
   await fetchWatchlist()
   await fetchLineOrders()
   await fetchStrategyDefinitions()
@@ -2075,6 +2117,7 @@ onMounted(async () => {
     closeChartWS()
     flushSaveOnUnload()
     saveTradeWindowPrefs()
+    persistLastChartSessionPrefs()
     if (saveTimer) clearTimeout(saveTimer)
   }
   window.addEventListener('beforeunload', beforeUnloadHandler)

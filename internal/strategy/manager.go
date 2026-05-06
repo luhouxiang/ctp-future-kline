@@ -1148,12 +1148,12 @@ func (m *Manager) handleTick(ev TickEvent, mode string) {
 }
 
 func (m *Manager) handleBar(ev BarEvent, mode string) {
-	logger.Info("strategy bar event received",
-		"symbol", ev.InstrumentID,
-		"timeframe", ev.Period,
-		"mode", mode,
-		"event_time", ev.DataTime,
-	)
+	// logger.Info("strategy bar event received",
+	// 	"symbol", ev.InstrumentID,
+	// 	"timeframe", ev.Period,
+	// 	"mode", mode,
+	// 	"event_time", ev.DataTime,
+	// )
 	m.forEachMatchingInstance(ev.InstrumentID, ev.Period, mode, func(inst StrategyInstance) {
 		m.callDecision(inst, ev.InstrumentID, mode, ev.DataTime, nil, &ev)
 	})
@@ -1208,13 +1208,13 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 	case tick != nil:
 		decision, err = client.OnTick(ctx, req)
 	case mode == RunTypeReplay:
-		logger.Info("strategy OnReplayBar call",
-			"instance_id", inst.InstanceID,
-			"strategy_id", inst.StrategyID,
-			"symbol", symbol,
-			"timeframe", inst.Timeframe,
-			"event_time", eventTime,
-		)
+		// logger.Info("strategy OnReplayBar call",
+		// 	"instance_id", inst.InstanceID,
+		// 	"strategy_id", inst.StrategyID,
+		// 	"symbol", symbol,
+		// 	"timeframe", inst.Timeframe,
+		// 	"event_time", eventTime,
+		// )
 		decision, err = client.OnReplayBar(ctx, req)
 	default:
 		logger.Info("strategy OnBar call",

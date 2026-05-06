@@ -57,7 +57,10 @@ DEFAULT_STRATEGY_LOG_FILE = os.path.join("flow", "strategy_logs", "strategy_serv
 
 
 def _log_formatter():
-    return logging.Formatter("%(asctime)s %(levelname)s %(name)s %(filename)s:%(lineno)d %(message)s")
+    # 增加 datefmt 参数，格式：月-日 时:分:秒
+    return logging.Formatter(
+        "[%(asctime)s][%(levelname)s]%(filename)s:%(lineno)d %(message)s", datefmt="%m-%d %H:%M:%S"
+    )
 
 
 def _configure_logging(log_file, level_name="INFO"):
@@ -883,8 +886,8 @@ class MA20PullbackShortStrategy(Strategy):
         close = _float(bar.get("close"))
         data_time = bar.get("data_time") or request.get("event_time", "")
         data_ts = _event_ts(data_time)
-        logger.info("Strategy.on_bar: instance_id=%s symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
-                    _instance_id(request), request.get("symbol", ""), data_time, open_price, high, low, close)
+        logger.info("symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
+                    request.get("symbol", ""), data_time, open_price, high, low, close)
 
         # 如果能解析出事件时间，则过滤重复或乱序 bar，避免状态机倒退或重复计数。
         if data_ts is not None and state.last_bar_ts is not None and data_ts <= state.last_bar_ts:

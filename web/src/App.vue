@@ -1,6 +1,7 @@
 <script setup>
 import { computed, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { FRONTEND_VERSION } from './version'
+import { readKlineReplayPanelPrefs, readLastChartSessionPrefs, readTradeWindowPrefs } from './chart/chartPrefs'
 
 const APP_VERSION = FRONTEND_VERSION
 
@@ -1463,20 +1464,54 @@ function nextPage() {
   void runSearch(false)
 }
 
+function inferChartTypeBySymbol(symbol) {
+  const s = String(symbol || '').trim().toLowerCase()
+  if (!s) return ''
+  if (s === 'l9' || s.endsWith('l9')) return 'l9'
+  return 'contract'
+}
+
+function inferChartVarietyBySymbol(symbol, kind) {
+  const s = String(symbol || '').trim().toLowerCase()
+  if (!s) return ''
+  if (kind === 'l9') return s === 'l9' ? '' : (s.endsWith('l9') ? s.slice(0, -2) : s)
+  return (s.match(/^[a-z]+/) || [])[0] || ''
+}
+
+function replayDateToChartEnd(value) {
+  const raw = String(value || '').trim()
+  const parts = raw.split('-')
+  if (parts.length !== 3) return ''
+  const [year, month, day] = parts.map((x) => Number(x))
+  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return ''
+  return `${String(year).padStart(4, '0')}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')} 23:59:00`
+}
+
+function lastChartOpenTradeValue(defaultOpen = false) {
+  const sessionPrefs = readLastChartSessionPrefs()
+  if (typeof sessionPrefs.trade_window_visible === 'boolean') return sessionPrefs.trade_window_visible ? '1' : '0'
+  const tradePrefs = readTradeWindowPrefs()
+  if (typeof tradePrefs?.visible === 'boolean') return tradePrefs.visible ? '1' : '0'
+  return defaultOpen ? '1' : '0'
+}
+
 async function openChart(item) {
   const refreshedItem = await rebuildOneIndex(item)
   if (!refreshedItem) return
+  const sessionPrefs = readLastChartSessionPrefs()
   const params = new URLSearchParams({
     symbol: refreshedItem.symbol,
     type: refreshedItem.type,
     variety: refreshedItem.variety || '',
-    data_mode: appMode.kline_data_mode,
+    timeframe: sessionPrefs.timeframe || '1m',
+    data_mode: sessionPrefs.data_mode || appMode.kline_data_mode,
   })
   const url = `/chart?${params.toString()}`
   console.log('[openChart] params', {
     symbol: refreshedItem.symbol,
     type: refreshedItem.type,
     variety: refreshedItem.variety || '',
+    timeframe: sessionPrefs.timeframe || '1m',
     url,
   })
   addLog(`openChart symbol=${refreshedItem.symbol} type=${refreshedItem.type} variety=${refreshedItem.variety || ''}`)
@@ -1484,18 +1519,21 @@ async function openChart(item) {
 }
 
 function openChartTradeDock() {
-  const symbol = String(tradeForm.symbol || '').trim().toLowerCase()
-  const inferredType = symbol && (symbol === 'l9' || symbol.endsWith('l9')) ? 'l9' : 'contract'
-  const inferredVariety = inferredType === 'l9'
-    ? (symbol.endsWith('l9') ? symbol.slice(0, -2) : symbol)
-    : ((symbol.match(/^[a-z]+/) || [])[0] || '')
+  const sessionPrefs = readLastChartSessionPrefs()
+  const replayPanelPrefs = readKlineReplayPanelPrefs()
+  const symbol = String(sessionPrefs.symbol || tradeForm.symbol || '').trim().toLowerCase()
+  const inferredType = sessionPrefs.type || inferChartTypeBySymbol(symbol)
+  const inferredVariety = sessionPrefs.variety || inferChartVarietyBySymbol(symbol, inferredType)
   const params = new URLSearchParams({
     symbol,
     type: inferredType || 'contract',
     variety: inferredVariety || '',
-    data_mode: appMode.kline_data_mode,
-    open_trade: '1',
+    timeframe: sessionPrefs.timeframe || '1m',
+    data_mode: sessionPrefs.data_mode || appMode.kline_data_mode,
+    open_trade: lastChartOpenTradeValue(true),
   })
+  const end = sessionPrefs.end || replayDateToChartEnd(replayPanelPrefs?.date)
+  if (end) params.set('end', end)
   window.open(`/chart?${params.toString()}`, '_blank')
 }
 

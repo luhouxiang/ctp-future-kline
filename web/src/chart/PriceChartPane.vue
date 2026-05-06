@@ -23,6 +23,7 @@ import {
 import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
 import { mergeRealtimeBarUpdate } from "./realtimeBars";
 import { getComposedBar, initKlineComposer, pushComposeTick } from "./klineComposeBridge";
+import { KLINE_REPLAY_PANEL_PREF_KEY } from "./chartPrefs";
 
 const CHUNK_SIZE = 2000;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
@@ -32,8 +33,6 @@ const MIN_MACD_H = 70;
 const MIN_VOLUME_H = 120;
 const DATA_ZONE_WIDTH_PX = 64;
 const DATA_ZONE_MASK_PAD_PX = 12;
-const KLINE_REPLAY_RIGHT_PAD = 2;
-const KLINE_REPLAY_PANEL_PREF_KEY = "chart_kline_replay_panel_prefs_v1";
 const COLOR_UP = "#ff2f2f";
 const COLOR_DOWN_KLINE_VOLUME = "#49e9f8";
 const COLOR_DOWN_MACD = "#2e7d32";
@@ -881,7 +880,8 @@ function renderSeries() {
   renderDerivedSeries(bars);
 }
 
-function renderDerivedSeries(bars) {
+function renderDerivedSeries(bars, options = {}) {
+  const restoreRange = options.preserveViewport ? currentVisibleLogicalRangeRaw() : null;
   const normalizedBars = Array.isArray(bars) ? bars : normalizeBarsAscendingUnique(state.bars, "derived_render");
   const ma20Data = buildMA20Data(normalizedBars);
   const m = calcMACD(normalizedBars);
@@ -900,6 +900,7 @@ function renderDerivedSeries(bars) {
   }
   scheduleChannelRecalc();
   scheduleReversalRecalc();
+  if (restoreRange) applyVisibleLogicalRange(restoreRange);
   viewVersion.value += 1;
 }
 
@@ -949,7 +950,7 @@ function scheduleDerivedSeriesRender() {
   if (realtimeIndicatorTimer) return;
   realtimeIndicatorTimer = setTimeout(() => {
     realtimeIndicatorTimer = null;
-    renderDerivedSeries();
+    renderDerivedSeries(undefined, { preserveViewport: true });
   }, 120);
 }
 
@@ -1014,11 +1015,7 @@ function setKlineReplayViewportLockFromRange(raw, options = {}) {
     return false;
   }
   const latestIndex = total - 1;
-  const followsLatest = to >= latestIndex - 0.5;
-  if (followsLatest && to > latestIndex + KLINE_REPLAY_RIGHT_PAD) {
-    to = latestIndex + KLINE_REPLAY_RIGHT_PAD;
-    from = to - span;
-  }
+  const followsLatest = latestIndex >= from - 0.5 && latestIndex <= to + 0.5;
   klineReplayViewportLock = {
     from,
     to,
@@ -1083,17 +1080,23 @@ function currentVisibleIndexRange() {
   return { start, end };
 }
 
-function shiftViewportForAppendedBars(previousBars, nextBars, previousRange) {
+function restoreViewportAfterBarsChange(previousBars, nextBars, previousRange, options = {}) {
   const before = Array.isArray(previousBars) ? previousBars : [];
   const after = Array.isArray(nextBars) ? nextBars : [];
   if (!before.length || !after.length) return;
   const appended = after.length - before.length;
-  if (appended <= 0) return;
   if (klineReplayPanel.running && applyLockedKlineReplayViewport()) return;
   if (!previousRange) return;
+  if (appended <= 0) {
+    if (options.preserveUnshifted) applyVisibleLogicalRange(previousRange);
+    return;
+  }
   const oldLastIndex = before.length - 1;
   const wasTrackingRightEdge = Number(previousRange.to) >= oldLastIndex - 0.5;
-  if (!wasTrackingRightEdge) return;
+  if (!wasTrackingRightEdge) {
+    if (options.preserveUnshifted) applyVisibleLogicalRange(previousRange);
+    return;
+  }
   const span = Number(previousRange.to) - Number(previousRange.from);
   if (!Number.isFinite(span) || span <= 0) return;
   applyVisibleLogicalRange({
@@ -2094,10 +2097,13 @@ async function reloadRecentWindow() {
     const chunk = await fetchChunk(endParam);
     const latest = normalizeBarsAscendingUnique(chunk.bars, "recent_window");
     if (!latest.length) return;
+    const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+    const previousRange = currentVisibleLogicalRangeRaw();
     const latestTimes = new Set(latest.map((x) => Number(x.adjusted_time || 0)));
     const historical = (Array.isArray(state.bars) ? state.bars : []).filter((x) => !latestTimes.has(Number(x?.adjusted_time || 0)));
     state.bars = normalizeBarsAscendingUnique([...historical, ...latest], "recent_window_merge");
     renderSeries();
+    restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
     scheduleDerivedSeriesRender();
     publishLatestBar();
   } catch {
@@ -2133,7 +2139,7 @@ function applyRealtimeBarUpdate(update) {
   }
   state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   updatePrimarySeriesForRealtime();
-  shiftViewportForAppendedBars(previousBars, state.bars, previousRange);
+  restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
   scheduleDerivedSeriesRender();
   publishLatestBar();
 }
@@ -2166,6 +2172,8 @@ function applyQuoteSynthesis(update, ticketPayload) {
   ) {
     return;
   }
+  const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+  const previousRange = currentVisibleLogicalRangeRaw();
   const synthesized = synthesizeBarFromQuote(update, ticketPayload || composeTicketRef.value);
   if (!synthesized) return;
   const ts = Number(synthesized.bar?.adjusted_time || 0);
@@ -2185,6 +2193,7 @@ function applyQuoteSynthesis(update, ticketPayload) {
   }
   state.bars = normalizeBarsAscendingUnique(merged, "quote_synthesis");
   updatePrimarySeriesForRealtime();
+  restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
   scheduleDerivedSeriesRender();
   publishLatestBar();
 }
