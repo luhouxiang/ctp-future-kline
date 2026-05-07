@@ -33,9 +33,11 @@ const MIN_MACD_H = 70;
 const MIN_VOLUME_H = 120;
 const DATA_ZONE_WIDTH_PX = 64;
 const DATA_ZONE_MASK_PAD_PX = 12;
-const COLOR_UP = "#ff2f2f";
+const COLOR_UP = "#ff3b30";
+const COLOR_UP_HOLLOW_FILL = "rgba(0, 0, 0, 0)";
 const COLOR_DOWN_KLINE_VOLUME = "#49e9f8";
 const COLOR_DOWN_MACD = "#2e7d32";
+const COLOR_MA20 = "#ff00d4";
 const KLINE_REPLAY_MIN_INTERVAL_MS = 10;
 const KLINE_REPLAY_MAX_INTERVAL_MS = 60000;
 
@@ -120,7 +122,10 @@ function loadKlineReplayPanelPrefs() {
     if (!data || typeof data !== "object") return false;
     klineReplayPanelPrefsExist = true;
     klineReplayPanel.open = !!data.open;
-    if (typeof data.date === "string" && data.date.trim()) klineReplayPanel.date = data.date.trim();
+    if (typeof data.date === "string" && data.date.trim()) {
+      const normalizedDate = normalizeReplayDateInput(data.date);
+      if (normalizedDate) klineReplayPanel.date = normalizedDate;
+    }
     if (Number.isFinite(Number(data.intervalMs))) klineReplayPanel.intervalMs = clampReplayInterval(Number(data.intervalMs));
     if (Number.isFinite(Number(data.slider))) klineReplayPanel.slider = Math.max(0, Math.min(1000, Math.round(Number(data.slider))));
     else klineReplayPanel.slider = intervalToReplaySlider(klineReplayPanel.intervalMs);
@@ -556,7 +561,7 @@ function initCharts() {
   chartRefs.volume = buildChart(volumeRef.value, Math.max(80, paneHeights.volume));
 
   seriesRefs.candle = chartRefs.candle.addSeries(CandlestickSeries, {
-    upColor: COLOR_UP,
+    upColor: COLOR_UP_HOLLOW_FILL,
     downColor: COLOR_DOWN_KLINE_VOLUME,
     borderVisible: true,
     borderUpColor: COLOR_UP,
@@ -565,7 +570,7 @@ function initCharts() {
     wickDownColor: COLOR_DOWN_KLINE_VOLUME,
   });
   seriesRefs.ma20 = chartRefs.candle.addSeries(LineSeries, {
-    color: "#f5c242",
+    color: COLOR_MA20,
     lineWidth: 1,
     crosshairMarkerVisible: false,
     priceLineVisible: false,
@@ -2535,17 +2540,27 @@ function pad2(n) {
 
 function defaultReplayDateInput() {
   const d = new Date();
-  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function normalizeReplayDateInput(value) {
+  const raw = String(value || "").trim();
+  if (!raw) return "";
+  if (/^\d{4}-\d{2}-\d{2}$/.test(raw)) return `${raw}T23:59`;
+  if (/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw)) return raw;
+  const ts = Date.parse(raw.replace(" ", "T"));
+  if (!Number.isFinite(ts)) return "";
+  const d = new Date(ts);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 function replayDateToEndText(value) {
-  const raw = String(value || "").trim();
-  if (!raw) return "";
-  const parts = raw.split("-");
-  if (parts.length !== 3) return "";
-  const [year, month, day] = parts.map((x) => Number(x));
-  if (!Number.isFinite(year) || !Number.isFinite(month) || !Number.isFinite(day)) return "";
-  return `${String(year).padStart(4, "0")}-${pad2(month)}-${pad2(day)} 23:59:00`;
+  const normalized = normalizeReplayDateInput(value);
+  if (!normalized) return "";
+  const match = normalized.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})$/);
+  if (!match) return "";
+  const [, year, month, day, hour, minute] = match;
+  return `${year}-${month}-${day} ${hour}:${minute}:00`;
 }
 
 function replayDateAnchorISO(value) {
@@ -2991,15 +3006,34 @@ const strategyOverlayData = computed(() => {
   void viewVersion.value;
   if (!seriesRefs.candle) return [];
   const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  const latestBar = Array.isArray(state.bars) && state.bars.length ? state.bars[state.bars.length - 1] : null;
+  const latestBarTime = Number(latestBar ? getDisplayTime(latestBar) : 0);
+  if (!Number.isFinite(latestBarTime) || latestBarTime <= 0) return [];
   const traces = Array.isArray(props.strategyTraces) ? props.strategyTraces : [];
-  return traces
+  const candidates = traces
     .filter((row) => {
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const strategyID = String(row?.strategy_id || "");
-      return strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short";
+      if (!(strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short")) {
+        return false;
+      }
+      const traceTime = strategyTraceTime(row);
+      return Number.isFinite(traceTime) && traceTime === latestBarTime;
     })
-    .slice(0, 160)
+    .slice()
+    .sort((a, b) => {
+      const ta = strategyTraceTime(a);
+      const tb = strategyTraceTime(b);
+      if (tb !== ta) return tb - ta;
+      const da = Date.parse(String(a?.event_time || ""));
+      const db = Date.parse(String(b?.event_time || ""));
+      if (Number.isFinite(db) && Number.isFinite(da) && db !== da) return db - da;
+      return Number(b?.step_index || 0) - Number(a?.step_index || 0);
+    });
+  const latestTrace = candidates[0] || null;
+  if (!latestTrace) return [];
+  return [latestTrace]
     .map((row, idx) => {
       const time = strategyTraceTime(row);
       const x = mapTimeToXWithFallback(time);
@@ -4343,8 +4377,8 @@ onUnmounted(() => {
         <button class="kline-replay-close" title="关闭" @pointerdown.stop @click="closeKlineReplayPanel">×</button>
       </div>
       <div class="kline-replay-date-row">
-        <input v-model="klineReplayPanel.date" type="date" />
-        <button @click="applyReplayDateToChart">更换至此日期</button>
+        <input v-model="klineReplayPanel.date" type="datetime-local" step="60" />
+        <button @click="applyReplayDateToChart">更换至此时间</button>
       </div>
       <div class="kline-replay-speed-row">
         <button :class="{ active: klineReplayPanel.intervalMs === 5000 }" @click="setReplayPreset(5000)">每5秒1根</button>

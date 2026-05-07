@@ -231,6 +231,7 @@ func NewServer(cfg config.AppConfig) *Server {
 			logger.Error("init strategy manager failed", "error", err)
 		} else {
 			manager.SetBacktestMarketDSN(realtimeDSN)
+			manager.SetMarketDataDSNs(realtimeDSN, replayDSN, sharedDSN)
 			s.strategy = manager
 		}
 	}

@@ -91,6 +91,13 @@ def weak_bar_req(instance_id="weak-1", symbol="yl9", open_=100, high=100.5, low=
 class MA20PullbackShortStrategyTest(unittest.TestCase):
     def setUp(self):
         self.strategy = MA20PullbackShortStrategy()
+        self.strategy.start_instance({
+            "instance_id": "inst-1",
+            "strategy_id": "ma20.pullback_short",
+            "mode": "live",
+            "symbols": ["rb2601"],
+            "params": {"ma_period": 20, "max_wait_bars": 6},
+        })
 
     def warmup(self, count=20, close=100):
         for i in range(1, count + 1):
@@ -178,6 +185,13 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
 
     def test_replay_state_does_not_pollute_live_state(self):
         self.warmup()
+        self.strategy.start_instance({
+            "instance_id": "inst-1",
+            "strategy_id": "ma20.pullback_short",
+            "mode": "replay",
+            "symbols": ["rb2601"],
+            "params": {"ma_period": 20, "max_wait_bars": 6},
+        })
         req = bar_req(open_=100, high=100, low=99, close=99, idx=21)
         req["mode"] = "replay"
 
@@ -254,6 +268,21 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
 class MA20WeakPullbackShortStrategyTest(unittest.TestCase):
     def setUp(self):
         self.strategy = MA20WeakPullbackShortStrategy()
+        self.strategy.start_instance({
+            "instance_id": "weak-1",
+            "strategy_id": MA20_WEAK_STRATEGY_ID,
+            "mode": "live",
+            "symbols": ["yl9"],
+            "params": {
+                "ma20_period": 20,
+                "ma60_period": 60,
+                "ma120_period": 120,
+                "structure_wait_bars": 3,
+                "touch_wait_bars": 12,
+                "trigger_wait_bars": 6,
+                "use_score_filter": True,
+            },
+        })
 
     def state(self):
         return self.strategy.states[("live", "weak-1", "yl9")]
@@ -333,6 +362,21 @@ class MA20WeakPullbackShortStrategyTest(unittest.TestCase):
 
     def test_replay_state_does_not_pollute_live_state(self):
         self.warmup_flat()
+        self.strategy.start_instance({
+            "instance_id": "weak-1",
+            "strategy_id": MA20_WEAK_STRATEGY_ID,
+            "mode": "replay",
+            "symbols": ["yl9"],
+            "params": {
+                "ma20_period": 20,
+                "ma60_period": 60,
+                "ma120_period": 120,
+                "structure_wait_bars": 3,
+                "touch_wait_bars": 12,
+                "trigger_wait_bars": 6,
+                "use_score_filter": True,
+            },
+        })
         req = weak_bar_req(idx=121, open_=100, high=100.2, low=98.7, close=98.9)
         req["mode"] = "replay"
 
@@ -343,6 +387,75 @@ class MA20WeakPullbackShortStrategyTest(unittest.TestCase):
 
 
 class StrategyServiceRegistryTest(unittest.TestCase):
+    def test_get_start_requirements_comes_from_python_strategies(self):
+        service = StrategyService()
+
+        pullback = service.GetStartRequirements({
+            "instance": {
+                "strategy_id": "ma20.pullback_short",
+                "params": {"ma_period": 55},
+            }
+        }, None)
+        weak = service.GetStartRequirements({
+            "instance": {
+                "strategy_id": MA20_WEAK_STRATEGY_ID,
+                "params": {"ma120_period": 180, "slope_lookback_bars": 8},
+            }
+        }, None)
+        sample = service.GetStartRequirements({
+            "instance": {"strategy_id": "sample.momentum", "params": {}}
+        }, None)
+
+        self.assertEqual(pullback["warmup_target"], 75)
+        self.assertTrue(pullback["requires_anchor_time"])
+        self.assertEqual(weak["warmup_target"], 208)
+        self.assertEqual(sample["warmup_target"], 0)
+        self.assertFalse(sample["requires_anchor_time"])
+
+    def test_factory_creates_one_runtime_per_saved_instance(self):
+        service = StrategyService()
+        instance = {
+            "instance_id": "multi-1",
+            "strategy_id": "ma20.pullback_short",
+            "mode": "live",
+            "symbols": ["rb2601", "ag2601"],
+            "timeframe": "1m",
+            "params": {"ma_period": 20, "max_wait_bars": 6},
+        }
+
+        service.StartInstance({"instance": instance}, None)
+
+        self.assertEqual(len(service.factory.instances), 1)
+        runtime = service.factory.instances[("live", "multi-1")]
+        self.assertIn(("live", "multi-1", "rb2601"), runtime.strategy.states)
+        self.assertIn(("live", "multi-1", "ag2601"), runtime.strategy.states)
+
+    def test_repeated_start_replaces_runtime_and_resets_state(self):
+        service = StrategyService()
+        instance = {
+            "instance_id": "repeat-1",
+            "strategy_id": "ma20.pullback_short",
+            "mode": "live",
+            "symbols": ["rb2601"],
+            "params": {"ma_period": 20, "max_wait_bars": 6},
+        }
+        service.StartInstance({"instance": instance}, None)
+        first = service.factory.instances[("live", "repeat-1")]
+        first.strategy.on_bar(bar_req(instance_id="repeat-1", idx=1))
+        self.assertEqual(len(first.strategy.states[("live", "repeat-1", "rb2601")].closes), 1)
+
+        service.StartInstance({"instance": instance}, None)
+
+        second = service.factory.instances[("live", "repeat-1")]
+        self.assertIsNot(first, second)
+        self.assertEqual(len(second.strategy.states[("live", "repeat-1", "rb2601")].closes), 0)
+
+    def test_unstarted_runtime_event_is_rejected(self):
+        service = StrategyService()
+
+        with self.assertRaises(ValueError):
+            service.OnBar(bar_req(instance_id="missing-1"), None)
+
     def test_weak_pullback_variants_expose_separate_entry_scripts(self):
         service = StrategyService()
 

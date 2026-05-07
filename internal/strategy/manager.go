@@ -17,8 +17,10 @@ import (
 
 	"ctp-future-kline/internal/config"
 	dbx "ctp-future-kline/internal/db"
+	"ctp-future-kline/internal/klinequery"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/queuewatch"
+	"ctp-future-kline/internal/searchindex"
 )
 
 type strategyServiceProcessInfo struct {
@@ -46,6 +48,9 @@ type Manager struct {
 	lastRestart time.Time
 
 	backtestMarketDSN string
+	marketRealtimeDSN string
+	marketReplayDSN   string
+	sharedMetaDSN     string
 }
 
 func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Registry) (*Manager, error) {
@@ -90,6 +95,14 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 func (m *Manager) SetBacktestMarketDSN(dsn string) {
 	m.mu.Lock()
 	m.backtestMarketDSN = strings.TrimSpace(dsn)
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetMarketDataDSNs(realtimeDSN string, replayDSN string, sharedMetaDSN string) {
+	m.mu.Lock()
+	m.marketRealtimeDSN = strings.TrimSpace(realtimeDSN)
+	m.marketReplayDSN = strings.TrimSpace(replayDSN)
+	m.sharedMetaDSN = strings.TrimSpace(sharedMetaDSN)
 	m.mu.Unlock()
 }
 
@@ -713,13 +726,24 @@ func (m *Manager) callStartInstance(inst StrategyInstance) error {
 	if client == nil {
 		return fmt.Errorf("strategy grpc client not connected")
 	}
-	runtimeInst := runtimeStrategyInstance(inst)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.RequestTimeoutMS)*time.Millisecond)
 	defer cancel()
-	if err := client.LoadStrategy(ctx, LoadStrategyRequest{StrategyID: runtimeInst.StrategyID}); err != nil {
+	plan, err := m.buildRuntimeStartPlan(ctx, client, inst)
+	if err != nil {
 		return err
 	}
-	return client.StartInstance(ctx, StartInstanceRequest{Instance: runtimeInst})
+	logger.Info("strategy StartInstance call",
+		"instance_id", plan.Instance.InstanceID,
+		"strategy_id", plan.Instance.StrategyID,
+		"mode", plan.Instance.Mode,
+		"symbols", plan.Instance.Symbols,
+		"timeframe", plan.Instance.Timeframe,
+		"warmup_target", plan.Requirements.WarmupTarget,
+		"requires_anchor_time", plan.Requirements.RequiresAnchorTime,
+		"params", plan.Instance.Params,
+	)
+
+	return client.StartInstance(ctx, StartInstanceRequest{Instance: plan.Instance})
 }
 
 func (m *Manager) StopInstance(instanceID string) error {
@@ -1487,6 +1511,256 @@ func runtimeStrategyInstance(inst StrategyInstance) StrategyInstance {
 	return inst
 }
 
+type runtimeStartPlanner interface {
+	LoadStrategy(context.Context, LoadStrategyRequest) error
+	GetStartRequirements(context.Context, StartRequirementsRequest) (StartRequirementsResponse, error)
+}
+
+type RuntimeStartPlan struct {
+	Instance     StrategyInstance
+	Requirements StartRequirementsResponse
+}
+
+func (m *Manager) buildRuntimeStartPlan(ctx context.Context, client runtimeStartPlanner, inst StrategyInstance) (RuntimeStartPlan, error) {
+	if client == nil {
+		return RuntimeStartPlan{}, fmt.Errorf("strategy grpc client not connected")
+	}
+	if err := client.LoadStrategy(ctx, LoadStrategyRequest{StrategyID: inst.StrategyID}); err != nil {
+		logger.Error("LoadStrategy err: ", err)
+		return RuntimeStartPlan{}, err
+	}
+	requirements, err := client.GetStartRequirements(ctx, StartRequirementsRequest{Instance: runtimeStrategyInstance(inst)})
+	if err != nil {
+		logger.Error("GetStartRequirements err: ", err)
+		return RuntimeStartPlan{}, err
+	}
+	runtimeInst, err := m.prepareRuntimeStartInstance(inst, requirements)
+	if err != nil {
+		return RuntimeStartPlan{}, err
+	}
+	return RuntimeStartPlan{Instance: runtimeInst, Requirements: requirements}, nil
+}
+
+func (m *Manager) prepareRuntimeStartInstance(inst StrategyInstance, requirements StartRequirementsResponse) (StrategyInstance, error) {
+	out := runtimeStrategyInstance(inst)
+	out.Params = cloneStrategyParams(inst.Params)
+	warmupTarget := requirements.WarmupTarget
+	if warmupTarget <= 0 {
+		return out, nil
+	}
+	existing := warmupBarsFromParams(out.Params)
+	if len(existing) >= warmupTarget {
+		out.Params["warmup_count"] = len(existing)
+		out.Params["warmup_target"] = warmupTarget
+		return out, nil
+	}
+	anchorTime, ok := parseInstanceAnchorTime(out.Params)
+	if !ok {
+		return out, fmt.Errorf("strategy instance start_time/chart_start_time/chart_anchor is required: instance_id=%s strategy_id=%s timeframe=%s warmup_target=%d requires_anchor_time=%t", out.InstanceID, out.StrategyID, out.Timeframe, warmupTarget, requirements.RequiresAnchorTime)
+	}
+	warmupBars, err := m.fetchWarmupBars(out, anchorTime, warmupTarget)
+	if err != nil {
+		return out, err
+	}
+	out.Params["warmup_bars"] = warmupBars
+	out.Params["warmup_count"] = len(warmupBars)
+	out.Params["warmup_target"] = warmupTarget
+	out.Params["warmup_anchor_time"] = anchorTime.Format("2006-01-02 15:04:05")
+	return out, nil
+}
+
+func warmupBarsFromParams(params map[string]any) []klinequery.KlineBar {
+	if len(params) == 0 {
+		return nil
+	}
+	raw, ok := params["warmup_bars"]
+	if !ok || raw == nil {
+		return nil
+	}
+	var out []klinequery.KlineBar
+	buf, err := json.Marshal(raw)
+	if err != nil {
+		return nil
+	}
+	if err := json.Unmarshal(buf, &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+func inferWarmupScope(inst StrategyInstance) (symbol string, kind string, variety string) {
+	symbol = firstSymbol(inst.Symbols)
+	params := inst.Params
+	if anchor, ok := params["chart_anchor"].(map[string]any); ok {
+		if v := strings.TrimSpace(fmt.Sprint(anchor["symbol"])); v != "" {
+			symbol = strings.ToLower(v)
+		}
+		kind = strings.ToLower(strings.TrimSpace(fmt.Sprint(anchor["type"])))
+		variety = strings.ToLower(strings.TrimSpace(fmt.Sprint(anchor["variety"])))
+	}
+	symbol = strings.ToLower(strings.TrimSpace(symbol))
+	if kind == "" {
+		if symbol == "l9" || strings.HasSuffix(symbol, "l9") {
+			kind = "l9"
+		} else {
+			kind = "contract"
+		}
+	}
+	if variety == "" {
+		if kind == "l9" {
+			if symbol != "l9" && strings.HasSuffix(symbol, "l9") {
+				variety = strings.TrimSuffix(symbol, "l9")
+			}
+		} else {
+			for i := 0; i < len(symbol); i++ {
+				c := symbol[i]
+				if c < 'a' || c > 'z' {
+					variety = symbol[:i]
+					break
+				}
+			}
+			if variety == "" {
+				variety = symbol
+			}
+		}
+	}
+	return symbol, kind, variety
+}
+
+func (m *Manager) fetchWarmupBars(inst StrategyInstance, anchorTime time.Time, target int) ([]klinequery.KlineBar, error) {
+	if target <= 0 {
+		return nil, nil
+	}
+	m.mu.RLock()
+	realtimeDSN := strings.TrimSpace(m.marketRealtimeDSN)
+	replayDSN := strings.TrimSpace(m.marketReplayDSN)
+	sharedMetaDSN := strings.TrimSpace(m.sharedMetaDSN)
+	m.mu.RUnlock()
+	mode := strings.ToLower(strings.TrimSpace(inst.Mode))
+	sources := warmupQuerySources(inst, realtimeDSN, replayDSN)
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("strategy warmup market DSN is not configured for mode=%s", mode)
+	}
+	symbol, kind, variety := inferWarmupScope(inst)
+	if symbol == "" {
+		return nil, fmt.Errorf("strategy warmup symbol is empty for instance_id=%s", inst.InstanceID)
+	}
+	timeframe := strings.TrimSpace(inst.Timeframe)
+	if timeframe == "" {
+		timeframe = "1m"
+	}
+	var lastErr error
+	for _, source := range sources {
+		querySvc := klinequery.NewServiceWithSessionDB(source.dsn, sharedMetaDSN, searchindex.NewManager(source.dsn, 0))
+		resp, err := querySvc.BarsByEnd(symbol, kind, variety, timeframe, anchorTime, target)
+		if err != nil {
+			lastErr = err
+			logger.Warn("strategy warmup source failed",
+				"instance_id", inst.InstanceID,
+				"strategy_id", inst.StrategyID,
+				"mode", mode,
+				"source", source.name,
+				"symbol", symbol,
+				"type", kind,
+				"variety", variety,
+				"timeframe", timeframe,
+				"anchor_time", anchorTime.Format("2006-01-02 15:04:05"),
+				"warmup_target", target,
+				"error", err,
+			)
+			continue
+		}
+		if len(resp.Bars) < target {
+			logger.Warn("strategy warmup bars below target",
+				"instance_id", inst.InstanceID,
+				"strategy_id", inst.StrategyID,
+				"mode", mode,
+				"source", source.name,
+				"symbol", symbol,
+				"type", kind,
+				"variety", variety,
+				"timeframe", timeframe,
+				"anchor_time", anchorTime.Format("2006-01-02 15:04:05"),
+				"warmup_target", target,
+				"warmup_count", len(resp.Bars),
+			)
+		} else {
+			logger.Info("strategy warmup source selected",
+				"instance_id", inst.InstanceID,
+				"strategy_id", inst.StrategyID,
+				"mode", mode,
+				"source", source.name,
+				"symbol", symbol,
+				"timeframe", timeframe,
+				"warmup_count", len(resp.Bars),
+			)
+		}
+		return resp.Bars, nil
+	}
+	if lastErr != nil {
+		return nil, fmt.Errorf("fetch warmup bars failed after trying %s: %w", warmupSourceNames(sources), lastErr)
+	}
+	return nil, fmt.Errorf("fetch warmup bars failed: no available market data source")
+}
+
+type warmupQuerySource struct {
+	name string
+	dsn  string
+}
+
+func warmupQuerySources(inst StrategyInstance, realtimeDSN string, replayDSN string) []warmupQuerySource {
+	mode := strings.ToLower(strings.TrimSpace(inst.Mode))
+	realtimeDSN = strings.TrimSpace(realtimeDSN)
+	replayDSN = strings.TrimSpace(replayDSN)
+	sources := make([]warmupQuerySource, 0, 2)
+	appendSource := func(name string, dsn string) {
+		dsn = strings.TrimSpace(dsn)
+		if dsn == "" {
+			return
+		}
+		for _, item := range sources {
+			if item.dsn == dsn {
+				return
+			}
+		}
+		sources = append(sources, warmupQuerySource{name: name, dsn: dsn})
+	}
+	params := inst.Params
+	if params == nil {
+		params = map[string]any{}
+	}
+	switch strings.ToLower(strings.TrimSpace(fmt.Sprint(params["warmup_source"]))) {
+	case "realtime", "live":
+		appendSource("realtime", realtimeDSN)
+		return sources
+	case "replay":
+		appendSource("replay", replayDSN)
+		return sources
+	}
+	if mode == RunTypeReplay {
+		appendSource("replay", replayDSN)
+		appendSource("realtime", realtimeDSN)
+		return sources
+	}
+	appendSource("realtime", realtimeDSN)
+	appendSource("replay", replayDSN)
+	return sources
+}
+
+func warmupSourceNames(items []warmupQuerySource) string {
+	names := make([]string, 0, len(items))
+	for _, item := range items {
+		if strings.TrimSpace(item.name) == "" {
+			continue
+		}
+		names = append(names, item.name)
+	}
+	if len(names) == 0 {
+		return "no source"
+	}
+	return strings.Join(names, " -> ")
+}
+
 func cloneStrategyParams(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return map[string]any{}
@@ -1552,6 +1826,9 @@ func initialTraceForInstance(inst StrategyInstance) (StrategyTraceRecord, bool) 
 func parseInstanceAnchorTime(params map[string]any) (time.Time, bool) {
 	values := []string{}
 	if raw, ok := params["chart_start_time"]; ok {
+		values = append(values, fmt.Sprint(raw))
+	}
+	if raw, ok := params["start_time"]; ok {
 		values = append(values, fmt.Sprint(raw))
 	}
 	if anchor, ok := params["chart_anchor"].(map[string]any); ok {

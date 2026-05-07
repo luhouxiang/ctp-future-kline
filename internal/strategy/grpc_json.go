@@ -2,6 +2,7 @@ package strategy
 
 import (
 	"context"
+	"ctp-future-kline/internal/logger"
 	"encoding/json"
 
 	"google.golang.org/grpc"
@@ -47,6 +48,18 @@ type LoadStrategyRequest struct {
 type StartInstanceRequest struct {
 	// Instance 是待启动的策略实例配置。
 	Instance StrategyInstance `json:"instance"`
+}
+
+type StartRequirementsRequest struct {
+	// Instance 是待查询启动要求的策略实例配置。
+	Instance StrategyInstance `json:"instance"`
+}
+
+type StartRequirementsResponse struct {
+	// WarmupTarget 是启动前至少需要预热的 K 线数量。
+	WarmupTarget int `json:"warmup_target"`
+	// RequiresAnchorTime 表示 warmup_target > 0 时是否必须提供起始锚点时间。
+	RequiresAnchorTime bool `json:"requires_anchor_time"`
 }
 
 type StopInstanceRequest struct {
@@ -178,22 +191,56 @@ func (c *StrategyServiceClient) Ping(ctx context.Context) (HealthResponse, error
 func (c *StrategyServiceClient) ListStrategies(ctx context.Context) (ListStrategiesResponse, error) {
 	var out ListStrategiesResponse
 	err := c.cc.Invoke(ctx, "/strategy.Registry/ListStrategies", &ListStrategiesRequest{}, &out)
+	logger.Info("ListStrategies call",
+		"ctx", ctx,
+		"out", out,
+		"err", err,
+	)
 	return out, err
 }
 
 func (c *StrategyServiceClient) LoadStrategy(ctx context.Context, req LoadStrategyRequest) error {
 	var out HealthResponse
-	return c.cc.Invoke(ctx, "/strategy.Runtime/LoadStrategy", &req, &out)
+	err := c.cc.Invoke(ctx, "/strategy.Runtime/LoadStrategy", &req, &out)
+	logger.Info("LoadStrategy call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
+	return err
+}
+
+func (c *StrategyServiceClient) GetStartRequirements(ctx context.Context, req StartRequirementsRequest) (StartRequirementsResponse, error) {
+	var out StartRequirementsResponse
+	err := c.cc.Invoke(ctx, "/strategy.Runtime/GetStartRequirements", &req, &out)
+	logger.Info("GetStartRequirements call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
+	return out, err
 }
 
 func (c *StrategyServiceClient) StartInstance(ctx context.Context, req StartInstanceRequest) error {
 	var out HealthResponse
-	return c.cc.Invoke(ctx, "/strategy.Runtime/StartInstance", &req, &out)
+	err := c.cc.Invoke(ctx, "/strategy.Runtime/StartInstance", &req, &out)
+	logger.Info("StartInstance call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
+	return err
 }
 
 func (c *StrategyServiceClient) StopInstance(ctx context.Context, req StopInstanceRequest) error {
 	var out HealthResponse
-	return c.cc.Invoke(ctx, "/strategy.Runtime/StopInstance", &req, &out)
+	err := c.cc.Invoke(ctx, "/strategy.Runtime/StopInstance", &req, &out)
+	logger.Info("StopInstance call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
+	return err
 }
 
 func (c *StrategyServiceClient) OnTick(ctx context.Context, req DecisionRequest) (SignalDecision, error) {
@@ -205,30 +252,55 @@ func (c *StrategyServiceClient) OnTick(ctx context.Context, req DecisionRequest)
 func (c *StrategyServiceClient) OnBar(ctx context.Context, req DecisionRequest) (SignalDecision, error) {
 	var out SignalDecision
 	err := c.cc.Invoke(ctx, "/strategy.Runtime/OnBar", &req, &out)
+	logger.Info("OnBar call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
 	return out, err
 }
 
 func (c *StrategyServiceClient) OnReplayBar(ctx context.Context, req DecisionRequest) (SignalDecision, error) {
 	var out SignalDecision
 	err := c.cc.Invoke(ctx, "/strategy.Runtime/OnReplayBar", &req, &out)
+	logger.Info("OnReplayBar call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
 	return out, err
 }
 
 func (c *StrategyServiceClient) RunBacktest(ctx context.Context, req BacktestRequest) (BacktestResponse, error) {
 	var out BacktestResponse
 	err := c.cc.Invoke(ctx, "/strategy.Backtest/RunBacktest", &req, &out)
+	logger.Info("RunBacktest call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
 	return out, err
 }
 
 func (c *StrategyServiceClient) GetBacktestResult(ctx context.Context, req BacktestResultRequest) (BacktestResponse, error) {
 	var out BacktestResponse
 	err := c.cc.Invoke(ctx, "/strategy.Backtest/GetBacktestResult", &req, &out)
+	logger.Info("GetBacktestResult call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
 	return out, err
 }
 
 func (c *StrategyServiceClient) RunParameterSweep(ctx context.Context, req ParameterSweepRequest) (ParameterSweepResponse, error) {
 	var out ParameterSweepResponse
 	err := c.cc.Invoke(ctx, "/strategy.Optimizer/RunParameterSweep", &req, &out)
+	logger.Info("RunParameterSweep call",
+		"req", req,
+		"out", out,
+		"err", err,
+	)
 	return out, err
 }
 
@@ -236,6 +308,7 @@ type ServiceHandlers interface {
 	Ping(context.Context, HealthRequest) (HealthResponse, error)
 	ListStrategies(context.Context, ListStrategiesRequest) (ListStrategiesResponse, error)
 	LoadStrategy(context.Context, LoadStrategyRequest) (HealthResponse, error)
+	GetStartRequirements(context.Context, StartRequirementsRequest) (StartRequirementsResponse, error)
 	StartInstance(context.Context, StartInstanceRequest) (HealthResponse, error)
 	StopInstance(context.Context, StopInstanceRequest) (HealthResponse, error)
 	OnTick(context.Context, DecisionRequest) (SignalDecision, error)
@@ -272,6 +345,9 @@ func RegisterStrategyServiceServer(s grpc.ServiceRegistrar, h ServiceHandlers) {
 		HandlerType: (*ServiceHandlers)(nil),
 		Methods: []grpc.MethodDesc{
 			{MethodName: "LoadStrategy", Handler: unaryHandler(func(ctx context.Context, req any) (any, error) { return h.LoadStrategy(ctx, req.(LoadStrategyRequest)) }, func() any { return &LoadStrategyRequest{} })},
+			{MethodName: "GetStartRequirements", Handler: unaryHandler(func(ctx context.Context, req any) (any, error) {
+				return h.GetStartRequirements(ctx, req.(StartRequirementsRequest))
+			}, func() any { return &StartRequirementsRequest{} })},
 			{MethodName: "StartInstance", Handler: unaryHandler(func(ctx context.Context, req any) (any, error) {
 				return h.StartInstance(ctx, req.(StartInstanceRequest))
 			}, func() any { return &StartInstanceRequest{} })},
@@ -316,6 +392,8 @@ func unaryHandler(call func(context.Context, any) (any, error), newReq func() an
 		case *ListStrategiesRequest:
 			value = *v
 		case *LoadStrategyRequest:
+			value = *v
+		case *StartRequirementsRequest:
 			value = *v
 		case *StartInstanceRequest:
 			value = *v

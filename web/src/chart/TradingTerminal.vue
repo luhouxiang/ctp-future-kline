@@ -10,6 +10,13 @@ import { bootKlineComposerWASM } from './klineComposeBridge'
 import { DEFAULT_CHANNEL_SETTINGS, normalizeChannelSettingsV2 } from './analysis/channelDetector'
 import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis/reversalDetector'
 import { TRADE_WINDOW_PREF_KEY, readLastChartSessionPrefs, writeLastChartSessionPrefs } from './chartPrefs'
+import {
+  buildChartStrategyInstance,
+  formatStrategyAnchorTime,
+  saveAndStartStrategyInstance,
+  selectPreferredStrategyDefinition,
+  strategyDefaultParamsText,
+} from './strategyRuntime'
 
 const paneRef = ref(null)
 const owner = ref('admin')
@@ -885,11 +892,7 @@ async function stopLineOrders() {
 }
 
 function formatAnchorTime(unixSeconds) {
-  const n = Number(unixSeconds || 0)
-  if (!Number.isFinite(n) || n <= 0) return '--'
-  const d = new Date(n * 1000)
-  const p = (v) => String(v).padStart(2, '0')
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+  return formatStrategyAnchorTime(unixSeconds)
 }
 
 function formatScopeEndTime(unixSeconds) {
@@ -934,9 +937,7 @@ async function onChartContextMenu(payload) {
   strategyContextMenu.error = ''
   try {
     if (!strategyDefinitions.value.length) await fetchStrategyDefinitions()
-    const preferred = strategyDefinitions.value.find((item) => item.strategy_id === 'ma20.weak_pullback_short.score_filter')
-      || strategyDefinitions.value.find((item) => item.strategy_id === 'ma20.weak_pullback_short')
-      || strategyDefinitions.value[0]
+    const preferred = selectPreferredStrategyDefinition(strategyDefinitions.value)
     if (preferred) selectStrategyDefinition(preferred)
   } finally {
     strategyContextMenu.loading = false
@@ -962,31 +963,8 @@ async function openStrategyRunMenu(evt) {
 
 function selectStrategyDefinition(definition) {
   strategyContextMenu.selectedDefinition = definition || null
-  const defaultParams = definition?.default_params && typeof definition.default_params === 'object'
-    ? definition.default_params
-    : {}
-  strategyContextMenu.paramsText = JSON.stringify(defaultParams, null, 2)
+  strategyContextMenu.paramsText = strategyDefaultParamsText(definition)
   strategyContextMenu.error = ''
-}
-
-function parseStrategyParamsText() {
-  const raw = String(strategyContextMenu.paramsText || '').trim()
-  if (!raw) return {}
-  const parsed = JSON.parse(raw)
-  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-    throw new Error('参数必须是 JSON 对象')
-  }
-  return parsed
-}
-
-function strategyWarmupCount(strategyID, params) {
-  const id = String(strategyID || '')
-  if (id === 'ma20.weak_pullback_short' || id.startsWith('ma20.weak_pullback_short.')) {
-    const ma120 = Number(params?.ma120_period || 120)
-    const slope = Number(params?.slope_lookback_bars || 5)
-    return Math.max(140, ma120 + slope + 20)
-  }
-  return 40
 }
 
 function replayTaskTime(task, keys) {
@@ -1060,46 +1038,18 @@ async function startStrategyFromAnchor(anchor, definition) {
   if (!strategyID) return
   strategyStarting.value = true
   try {
-    const defaultParams = definition?.default_params && typeof definition.default_params === 'object'
-      ? JSON.parse(JSON.stringify(definition.default_params))
-      : {}
-    const userParams = parseStrategyParamsText()
-    const mergedParams = { ...defaultParams, ...userParams }
-    const instanceID = `chart-${String(scope.symbol || 'symbol').trim().toLowerCase()}-${String(scope.timeframe || '1m').trim().toLowerCase()}-${Date.now()}`
-    const mode = replayKlineMode.value || dataMode.value === 'replay' || paneRef.value?.isKlineReplayRunning?.() ? 'replay' : 'paper'
-    const displayTime = formatAnchorTime(anchor.data_time || anchor.adjusted_time || anchor.plot_time)
-    const timeframeText = String(scope.timeframe || '1m').trim()
-    const warmupTarget = strategyWarmupCount(strategyID, mergedParams)
-    const warmupBars = await (paneRef.value?.ensureWarmupBarsBeforeAnchor?.(anchor, warmupTarget)
-      || Promise.resolve(paneRef.value?.getWarmupBarsBeforeAnchor?.(anchor, warmupTarget) || []))
-    const instance = {
-      instance_id: instanceID,
-      strategy_id: strategyID,
-      display_name: `${definition?.display_name || strategyID}@${scope.symbol}-${timeframeText}-${displayTime}`,
-      mode,
-      account_id: tradeForm.account_id || tradeTerminal.order_entry_defaults?.account_id || mode,
-      symbols: [scope.symbol],
-      timeframe: timeframeText || '1m',
-      params: {
-        ...mergedParams,
-        chart_anchor: anchor,
-        chart_start_time: displayTime,
-        start_source: 'chart_context_menu',
-        warmup_bars: warmupBars,
-        warmup_count: warmupBars.length,
-        warmup_target: warmupTarget,
-      },
-    }
-    const saveResp = await fetch('/api/strategy/instances', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(instance),
+    const { instanceID, instance } = buildChartStrategyInstance({
+      anchor,
+      definition,
+      scope,
+      paramsText: strategyContextMenu.paramsText,
+      accountID: tradeForm.account_id,
+      fallbackAccountID: tradeTerminal.order_entry_defaults?.account_id,
+      replayKlineMode: replayKlineMode.value,
+      dataMode: dataMode.value,
+      klineReplayRunning: !!paneRef.value?.isKlineReplayRunning?.(),
     })
-    if (!saveResp.ok) throw new Error(await saveResp.text())
-    const startResp = await fetch(`/api/strategy/instances/${encodeURIComponent(instanceID)}/start`, {
-      method: 'POST',
-    })
-    if (!startResp.ok) throw new Error(await startResp.text())
+    await saveAndStartStrategyInstance(instance)
     activeRightTab.value = 'strategy'
     layout.panes.right_watchlist_open = true
     await fetchStrategyRuntime()

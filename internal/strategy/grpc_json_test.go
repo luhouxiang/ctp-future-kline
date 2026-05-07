@@ -23,6 +23,10 @@ func (testService) LoadStrategy(context.Context, LoadStrategyRequest) (HealthRes
 	return HealthResponse{OK: true}, nil
 }
 
+func (testService) GetStartRequirements(context.Context, StartRequirementsRequest) (StartRequirementsResponse, error) {
+	return StartRequirementsResponse{WarmupTarget: 40, RequiresAnchorTime: true}, nil
+}
+
 func (testService) StartInstance(context.Context, StartInstanceRequest) (HealthResponse, error) {
 	return HealthResponse{OK: true}, nil
 }
@@ -113,6 +117,13 @@ func TestJSONStrategyServiceRoundTrip(t *testing.T) {
 	}
 	if len(defs.Strategies) != 1 || defs.Strategies[0].StrategyID != "demo" {
 		t.Fatalf("ListStrategies() = %+v, want demo strategy", defs)
+	}
+	requirements, err := client.GetStartRequirements(ctx, StartRequirementsRequest{Instance: StrategyInstance{StrategyID: "demo"}})
+	if err != nil {
+		t.Fatalf("GetStartRequirements() error = %v", err)
+	}
+	if requirements.WarmupTarget != 40 || !requirements.RequiresAnchorTime {
+		t.Fatalf("GetStartRequirements() = %+v, want warmup target 40 and anchor required", requirements)
 	}
 	barDecision, err := client.OnBar(ctx, DecisionRequest{})
 	if err != nil {

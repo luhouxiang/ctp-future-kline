@@ -23,6 +23,8 @@
 
 # argparse：解析命令行参数，例如服务监听地址 --addr。
 import argparse
+# copy：复制策略定义与启动实例，避免运行实例之间共享可变 params/default_params。
+import copy
 # json：负责 gRPC bytes 与 Python dict 之间的序列化/反序列化。
 import json
 # logging：记录服务启动、请求异常、warmup 异常等日志。
@@ -218,6 +220,59 @@ def _params(request):
     return (request.get("instance") or {}).get("params") or {}
 
 
+def _mode_from_value(value):
+    """归一化运行模式，作为运行实例和状态字典的 key。"""
+    return "replay" if str(value or "").strip().lower() == "replay" else "live"
+
+
+def _instance_mode(instance):
+    """从策略实例配置中读取归一化运行模式。"""
+    return _mode_from_value((instance or {}).get("mode"))
+
+
+def _normalize_symbols(symbols):
+    """将实例 symbols 规范成字符串列表。"""
+    if not isinstance(symbols, list):
+        return []
+    return [str(item) for item in symbols if str(item) != ""]
+
+
+def _warmup_bar_time(bar):
+    if not isinstance(bar, dict):
+        return ""
+    return str(bar.get("data_time") or bar.get("adjusted_time") or bar.get("event_time") or "")
+
+
+def _instance_start_log_payload(instance):
+    """提取实例启动日志摘要，避免直接打印全部 warmup_bars。"""
+    params = dict(instance.get("params") or {})
+    warmup_bars = params.get("warmup_bars")
+    warmup_count = len(warmup_bars) if isinstance(warmup_bars, list) else _int(params.get("warmup_count"), 0)
+    warmup_first_time = ""
+    warmup_last_time = ""
+    if isinstance(warmup_bars, list):
+        if warmup_bars:
+            warmup_first_time = _warmup_bar_time(warmup_bars[0])
+            warmup_last_time = _warmup_bar_time(warmup_bars[-1])
+        params["warmup_bars"] = f"<{len(warmup_bars)} bars>"
+    return {
+        "instance_id": instance.get("instance_id", ""),
+        "strategy_id": instance.get("strategy_id", ""),
+        "display_name": instance.get("display_name", ""),
+        "mode": instance.get("mode", ""),
+        "account_id": instance.get("account_id", ""),
+        "symbols": instance.get("symbols") or [],
+        "timeframe": instance.get("timeframe", ""),
+        "start_time": params.get("start_time") or params.get("chart_start_time") or "",
+        "warmup_target": _int(params.get("warmup_target"), 0),
+        "warmup_count": warmup_count,
+        "warmup_anchor_time": params.get("warmup_anchor_time", ""),
+        "warmup_first_time": warmup_first_time,
+        "warmup_last_time": warmup_last_time,
+        "params": params,
+    }
+
+
 def _no_signal(request, reason, metrics=None, trace=None):
     """构造统一的“无交易信号”响应。
 
@@ -337,6 +392,10 @@ class Strategy:
         """停止策略实例时调用。默认无状态策略不需要清理。"""
         return None
 
+    def required_warmup_bars(self, instance):
+        """返回启动该策略实例前至少需要预热的 K 线数量。"""
+        return 0
+
     def on_tick(self, request):
         """处理 tick 事件。默认忽略 tick。"""
         return _no_signal(request, "tick ignored")
@@ -363,10 +422,7 @@ def _mode_key(request):
 
     这样同一个 instance_id + symbol 在 live 和 replay 下可以拥有互不干扰的状态。
     """
-    mode = str(request.get("mode") or "").strip().lower()
-    if mode == "replay":
-        return "replay"
-    return "live"
+    return _mode_from_value(request.get("mode"))
 
 
 def _require_fields(source, fields):
@@ -378,6 +434,13 @@ def _require_fields(source, fields):
     missing = [name for name in fields if source.get(name) is None or source.get(name) == ""]
     if missing:
         raise ValueError(f"missing required field(s): {', '.join(missing)}")
+
+
+def _strategy_params_for_instance(definition, instance):
+    """合并策略默认参数与实例参数。"""
+    params = dict((definition or {}).get("default_params") or {})
+    params.update((instance or {}).get("params") or {})
+    return params
 
 
 def _event_ts(value):
@@ -595,13 +658,20 @@ class MA20PullbackShortStrategy(Strategy):
     }
 
     def __init__(self, definition=None):
-        """初始化状态容器与锁。"""
+        """初始化单个运行实例的状态容器与锁。"""
         if definition is not None:
             self.definition = definition
-        # states 保存每个 (mode, instance_id, symbol) 对应的 PullbackShortState。
+        # states 保存当前运行实例内每个 (mode, instance_id, symbol) 对应的 PullbackShortState。
         self.states = {}
-        # gRPC server 使用线程池处理请求，因此策略状态读写需要加锁。
+        # gRPC server 使用线程池处理请求，因此运行状态读写需要加锁。
         self._lock = RLock()
+
+    def required_warmup_bars(self, instance):
+        params = _strategy_params_for_instance(self.definition, instance)
+        if _int(params.get("warmup_target"), 0) > 0:
+            return _int(params.get("warmup_target"), 0)
+        ma_period = max(20, _int(params.get("ma_period"), 20))
+        return max(40, ma_period + 20)
 
     def start_instance(self, instance):
         """启动一个策略实例，并为其订阅品种初始化状态。
@@ -612,10 +682,11 @@ class MA20PullbackShortStrategy(Strategy):
         - params: 策略参数，可包含 warmup_bars；
         - mode: live 或 replay。
         """
+        logger.info("ma20 pullback start_instance args=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
         instance_id = instance.get("instance_id", "")
         symbols = instance.get("symbols") or []
         params = instance.get("params") or {}
-        mode = "replay" if str(instance.get("mode") or "").strip().lower() == "replay" else "live"
+        mode = _instance_mode(instance)
         # 若 symbols 为空，使用空字符串作为兜底 symbol key，保证状态仍可创建。
         if not symbols:
             symbols = [""]
@@ -634,10 +705,13 @@ class MA20PullbackShortStrategy(Strategy):
                     del self.states[key]
 
     def _state_for(self, request):
-        """根据请求定位策略状态；如果不存在则懒创建。"""
+        """根据请求定位策略状态；不存在说明实例未显式启动或 symbol 不匹配。"""
         key = (_mode_key(request), _instance_id(request), request.get("symbol", ""))
         if key not in self.states:
-            self.states[key] = PullbackShortState()
+            raise ValueError(
+                "strategy runtime instance not started: "
+                f"instance_id={key[1]} mode={key[0]} symbol={key[2]} strategy_id={self.definition.get('strategy_id', '')}"
+            )
         return self.states[key]
 
     def _apply_warmup_bars(self, instance, bars, mode):
@@ -1223,10 +1297,19 @@ class MA20WeakPullbackShortStrategy(Strategy):
         self.states = {}
         self._lock = RLock()
 
+    def required_warmup_bars(self, instance):
+        params = _strategy_params_for_instance(self.definition, instance)
+        if _int(params.get("warmup_target"), 0) > 0:
+            return _int(params.get("warmup_target"), 0)
+        ma120 = max(120, _int(params.get("ma120_period"), 120))
+        slope = max(5, _int(params.get("slope_lookback_bars"), 5))
+        return max(140, ma120 + slope + 20)
+
     def start_instance(self, instance):
+        logger.info("ma20 weak pullback start_instance args=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
         instance_id = instance.get("instance_id", "")
         symbols = instance.get("symbols") or [""]
-        mode = "replay" if str(instance.get("mode") or "").strip().lower() == "replay" else "live"
+        mode = _instance_mode(instance)
         with self._lock:
             for symbol in symbols:
                 self.states[(mode, instance_id, str(symbol))] = WeakPullbackShortState()
@@ -1241,7 +1324,10 @@ class MA20WeakPullbackShortStrategy(Strategy):
     def _state_for(self, request):
         key = (_mode_key(request), _instance_id(request), request.get("symbol", ""))
         if key not in self.states:
-            self.states[key] = WeakPullbackShortState()
+            raise ValueError(
+                "strategy runtime instance not started: "
+                f"instance_id={key[1]} mode={key[0]} symbol={key[2]} strategy_id={self.definition.get('strategy_id', '')}"
+            )
         return self.states[key]
 
     def _settings(self, request):
@@ -1749,6 +1835,179 @@ class MA20WeakPullbackVariantStrategy(MA20WeakPullbackShortStrategy):
         super().__init__(definition=definition, use_score_filter=use_score_filter)
 
 
+def _clone_definition(definition):
+    """复制策略定义，避免运行实例修改 default_params 时污染注册表。"""
+    return copy.deepcopy(definition or {})
+
+
+def _clone_strategy_template(strategy):
+    """基于注册模板创建一个新的运行策略对象。"""
+    definition = _clone_definition(getattr(strategy, "definition", {}))
+    if isinstance(strategy, MA20WeakPullbackShortStrategy):
+        return MA20WeakPullbackShortStrategy(definition=definition)
+    if isinstance(strategy, MA20PullbackShortStrategy):
+        return MA20PullbackShortStrategy(definition=definition)
+    if isinstance(strategy, SampleMomentumStrategy):
+        return SampleMomentumStrategy()
+    return strategy.__class__()
+
+
+@dataclass
+class StrategyRegistryEntry:
+    """工厂注册表中的策略定义项。"""
+
+    strategy_id: str
+    definition: dict
+    template: Strategy
+
+    def create_runtime(self):
+        return _clone_strategy_template(self.template)
+
+    def required_warmup_bars(self, instance):
+        return max(0, _int(self.template.required_warmup_bars(instance), 0))
+
+
+class StrategyRuntimeInstance:
+    """一次 StartInstance 对应的运行实例。"""
+
+    def __init__(self, entry, instance):
+        self.entry = entry
+        self.instance = copy.deepcopy(instance or {})
+        self.instance_id = str(self.instance.get("instance_id") or "")
+        self.mode = _instance_mode(self.instance)
+        self.symbols = _normalize_symbols(self.instance.get("symbols") or [])
+        self.strategy = entry.create_runtime()
+        self.strategy.start_instance(self.instance)
+
+    def _assert_symbol_allowed(self, request):
+        symbol = str(request.get("symbol") or "")
+        if self.symbols and symbol and symbol not in self.symbols:
+            raise ValueError(
+                "strategy runtime symbol not started: "
+                f"instance_id={self.instance_id} mode={self.mode} symbol={symbol} symbols={','.join(self.symbols)}"
+            )
+
+    def on_tick(self, request):
+        self._assert_symbol_allowed(request)
+        return self.strategy.on_tick(request)
+
+    def on_bar(self, request):
+        self._assert_symbol_allowed(request)
+        return self.strategy.on_bar(request)
+
+    def on_replay_bar(self, request):
+        self._assert_symbol_allowed(request)
+        return self.strategy.on_replay_bar(request)
+
+
+class StrategyFactory:
+    """单例策略工厂：注册策略定义，并维护已启动的运行实例。"""
+
+    def __init__(self):
+        self._strategies = {}
+        self._instances = {}
+        self._lock = RLock()
+
+    @property
+    def strategies(self):
+        return self._strategies
+
+    @property
+    def instances(self):
+        return self._instances
+
+    def register(self, strategy):
+        strategy_id = str(strategy.definition.get("strategy_id") or "")
+        if not strategy_id:
+            raise ValueError("strategy definition missing strategy_id")
+        self._strategies[strategy_id] = StrategyRegistryEntry(
+            strategy_id=strategy_id,
+            definition=_clone_definition(strategy.definition),
+            template=strategy,
+        )
+
+    @classmethod
+    def builtin(cls):
+        factory = cls()
+        for strategy in (
+            SampleMomentumStrategy(),
+            MA20PullbackShortStrategy(),
+            MA20WeakPullbackShortStrategy(),
+            build_ma20_weak_baseline_strategy(sys.modules[__name__]),
+            build_ma20_weak_hard_filter_strategy(sys.modules[__name__]),
+            build_ma20_weak_score_filter_strategy(sys.modules[__name__]),
+        ):
+            factory.register(strategy)
+        return factory
+
+    def list_definitions(self):
+        return [_clone_definition(entry.definition) for entry in self._strategies.values()]
+
+    def load_strategy(self, strategy_id):
+        strategy_id = str(strategy_id or "")
+        if strategy_id not in self._strategies:
+            raise ValueError(f"unknown strategy_id: {strategy_id}")
+        return self._strategies[strategy_id]
+
+    def start_requirements(self, instance):
+        entry = self.load_strategy((instance or {}).get("strategy_id", ""))
+        warmup_target = entry.required_warmup_bars(instance or {})
+        return {
+            "warmup_target": warmup_target,
+            "requires_anchor_time": warmup_target > 0,
+        }
+
+    def _key_for_instance(self, instance):
+        instance_id = str((instance or {}).get("instance_id") or "")
+        if not instance_id:
+            raise ValueError("missing required field(s): instance.instance_id")
+        return (_instance_mode(instance), instance_id)
+
+    def _key_for_request(self, request):
+        instance_id = _instance_id(request)
+        if not instance_id:
+            raise ValueError("missing required field(s): instance.instance_id")
+        return (_mode_key(request), instance_id)
+
+    def start_instance(self, instance):
+        entry = self.load_strategy((instance or {}).get("strategy_id", ""))
+        key = self._key_for_instance(instance)
+        with self._lock:
+            self._instances.pop(key, None)
+        runtime = StrategyRuntimeInstance(entry, instance)
+        with self._lock:
+            self._instances[key] = runtime
+        return runtime
+
+    def stop_instance(self, instance_id):
+        instance_id = str(instance_id or "")
+        removed = 0
+        with self._lock:
+            for key, runtime in list(self._instances.items()):
+                if key[1] != instance_id:
+                    continue
+                runtime.strategy.stop_instance(instance_id)
+                del self._instances[key]
+                removed += 1
+        return removed
+
+    def runtime_for_request(self, request):
+        key = self._key_for_request(request)
+        with self._lock:
+            runtime = self._instances.get(key)
+        if runtime is None:
+            instance = request.get("instance") or {}
+            raise ValueError(
+                "strategy runtime instance not started: "
+                f"instance_id={key[1]} strategy_id={instance.get('strategy_id', '')} mode={key[0]}"
+            )
+        return runtime
+
+    def dispatch(self, method_name, request):
+        runtime = self.runtime_for_request(request)
+        return getattr(runtime, method_name)(request)
+
+
 # -----------------------------------------------------------------------------
 # 策略服务门面：把 gRPC 方法映射到具体策略
 # -----------------------------------------------------------------------------
@@ -1760,16 +2019,10 @@ class StrategyService:
     """
 
     def __init__(self):
-        """注册内置策略实例。"""
+        """初始化单例策略工厂并注册内置策略。"""
         _ensure_logging_configured()
-        self.strategies = {
-            "sample.momentum": SampleMomentumStrategy(),
-            "ma20.pullback_short": MA20PullbackShortStrategy(),
-            MA20_WEAK_STRATEGY_ID: MA20WeakPullbackShortStrategy(),
-            MA20_WEAK_BASELINE_STRATEGY_ID: build_ma20_weak_baseline_strategy(sys.modules[__name__]),
-            MA20_WEAK_HARD_FILTER_STRATEGY_ID: build_ma20_weak_hard_filter_strategy(sys.modules[__name__]),
-            MA20_WEAK_SCORE_FILTER_STRATEGY_ID: build_ma20_weak_score_filter_strategy(sys.modules[__name__]),
-        }
+        self.factory = StrategyFactory.builtin()
+        self.strategies = self.factory.strategies
         logger.info("strategy registry initialized2: %s", ",".join(sorted(self.strategies)))
 
     def Ping(self, request, context):
@@ -1779,7 +2032,7 @@ class StrategyService:
     def ListStrategies(self, request, context):
         """返回当前服务支持的策略元数据列表。"""
         return {
-            "strategies": [strategy.definition for strategy in self.strategies.values()]
+            "strategies": self.factory.list_definitions()
         }
 
     def LoadStrategy(self, request, context):
@@ -1788,47 +2041,61 @@ class StrategyService:
         当前实现中的策略均已在 __init__ 注册，因此这里只校验 strategy_id 是否存在。
         """
         strategy_id = request.get("strategy_id", "")
-        if strategy_id not in self.strategies:
-            raise ValueError(f"unknown strategy_id: {strategy_id}")
+        self.factory.load_strategy(strategy_id)
         logger.info("strategy loaded: %s", strategy_id)
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
+
+    def GetStartRequirements(self, request, context):
+        """返回启动该实例前需要满足的 warmup 条件。"""
+        instance = request.get("instance") or {}
+        out = self.factory.start_requirements(instance)
+        logger.info(
+            "strategy start requirements: instance_id=%s strategy_id=%s mode=%s timeframe=%s warmup_target=%s requires_anchor_time=%s",
+            instance.get("instance_id", ""),
+            instance.get("strategy_id", ""),
+            instance.get("mode", ""),
+            instance.get("timeframe", ""),
+            out.get("warmup_target"),
+            out.get("requires_anchor_time"),
+        )
+        return out
 
     def StartInstance(self, request, context):
         """启动策略实例，并把 instance 交给对应策略初始化。"""
         instance = request.get("instance") or {}
-        strategy = self._strategy_for_instance(instance)
-        strategy.start_instance(instance)
+        logger.info("strategy StartInstance request=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
+        runtime = self.factory.start_instance(instance)
         logger.info(
-            "strategy instance started2: instance_id=%s strategy_id=%s symbols=%s mode=%s",
-            instance.get("instance_id", ""),
-            instance.get("strategy_id", ""),
-            ",".join(str(item) for item in (instance.get("symbols") or [])),
-            instance.get("mode", ""),
+            "strategy instance started2: instance_id=%s strategy_id=%s symbols=%s mode=%s runtime_count=%s",
+            runtime.instance_id,
+            runtime.entry.strategy_id,
+            ",".join(runtime.symbols),
+            runtime.mode,
+            len(self.factory.instances),
         )
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def StopInstance(self, request, context):
         """停止策略实例。
 
-        为简化实现，这里会遍历所有策略并让它们清理该 instance_id 下的状态。
+        工厂会清理该 instance_id 在所有 mode 下的运行对象。
         """
         instance_id = request.get("instance_id", "")
-        for strategy in self.strategies.values():
-            strategy.stop_instance(instance_id)
-        logger.info("strategy instance stopped: instance_id=%s", instance_id)
+        removed = self.factory.stop_instance(instance_id)
+        logger.info("strategy instance stopped: instance_id=%s runtime_removed=%s", instance_id, removed)
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
     def OnTick(self, request, context):
         """接收 tick 事件并分发给请求中指定的策略。"""
-        return self._run_and_log_phase(request, self._strategy_for_request(request).on_tick)
+        return self._run_and_log_phase(request, lambda req: self.factory.dispatch("on_tick", req))
 
     def OnBar(self, request, context):
         """接收实时 K 线事件并分发给请求中指定的策略。"""
-        return self._run_and_log_phase(request, self._strategy_for_request(request).on_bar)
+        return self._run_and_log_phase(request, lambda req: self.factory.dispatch("on_bar", req))
 
     def OnReplayBar(self, request, context):
         """接收回放 K 线事件并分发给请求中指定的策略。"""
-        return self._run_and_log_phase(request, self._strategy_for_request(request).on_replay_bar)
+        return self._run_and_log_phase(request, lambda req: self.factory.dispatch("on_replay_bar", req))
 
     def RunBacktest(self, request, context):
         """运行回测的占位接口。
@@ -1865,16 +2132,13 @@ class StrategyService:
         }
 
     def _strategy_for_instance(self, instance):
-        """根据 instance.strategy_id 获取策略对象。"""
+        """根据 instance.strategy_id 获取策略注册项。"""
         strategy_id = instance.get("strategy_id", "")
-        strategy = self.strategies.get(strategy_id)
-        if strategy is None:
-            raise ValueError(f"unknown strategy_id: {strategy_id}")
-        return strategy
+        return self.factory.load_strategy(strategy_id)
 
     def _strategy_for_request(self, request):
-        """从请求的 instance 字段中解析并获取策略对象。"""
-        return self._strategy_for_instance(request.get("instance") or {})
+        """从请求定位已启动运行实例。"""
+        return self.factory.runtime_for_request(request)
 
     def _run_and_log_phase(self, request, fn):
         out = fn(request)
@@ -1958,6 +2222,7 @@ def build_server():
                 "strategy.Runtime",
                 {
                     "LoadStrategy": add_unary(service, "strategy.Runtime", "LoadStrategy", service.LoadStrategy),
+                    "GetStartRequirements": add_unary(service, "strategy.Runtime", "GetStartRequirements", service.GetStartRequirements),
                     "StartInstance": add_unary(service, "strategy.Runtime", "StartInstance", service.StartInstance),
                     "StopInstance": add_unary(service, "strategy.Runtime", "StopInstance", service.StopInstance),
                     "OnTick": add_unary(service, "strategy.Runtime", "OnTick", service.OnTick),
