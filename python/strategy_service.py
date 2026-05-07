@@ -396,6 +396,10 @@ class Strategy:
         """返回启动该策略实例前至少需要预热的 K 线数量。"""
         return 0
 
+    def validate_warmup(self, instance, applied_counts=None):
+        """校验 warmup 后的运行状态。默认无额外校验。"""
+        return None
+
     def on_tick(self, request):
         """处理 tick 事件。默认忽略 tick。"""
         return _no_signal(request, "tick ignored")
@@ -694,7 +698,8 @@ class MA20PullbackShortStrategy(Strategy):
             for symbol in symbols:
                 self.states[(mode, instance_id, str(symbol))] = PullbackShortState()
         # 如果启动实例时提供了历史 K 线，则先喂入状态机用于预热 MA 与状态。
-        self._apply_warmup_bars(instance, params.get("warmup_bars") or [], mode)
+        applied_counts = self._apply_warmup_bars(instance, params.get("warmup_bars") or [], mode)
+        self.validate_warmup(instance, applied_counts)
 
     def stop_instance(self, instance_id):
         """停止策略实例，并清理该实例下所有 symbol/mode 的状态。"""
@@ -723,8 +728,9 @@ class MA20PullbackShortStrategy(Strategy):
 
         warmup=True 当前只作为语义标识传入 _on_bar_locked，原逻辑中未单独分支。
         """
+        counts = {}
         if not isinstance(bars, list) or not bars:
-            return
+            return counts
         symbol = ""
         symbols = instance.get("symbols") or []
         if symbols:
@@ -743,9 +749,37 @@ class MA20PullbackShortStrategy(Strategy):
             try:
                 with self._lock:
                     self._on_bar_locked(req, warmup=True)
+                counts[req["symbol"]] = counts.get(req["symbol"], 0) + 1
             except Exception as exc:
                 # warmup 异常不阻断实例启动，只记录警告。
                 logger.warning("warmup bar ignored: %s", exc)
+        return counts
+
+    def validate_warmup(self, instance, applied_counts=None):
+        target = self.required_warmup_bars(instance)
+        if target <= 0:
+            return
+        instance_id = instance.get("instance_id", "")
+        mode = _instance_mode(instance)
+        symbols = instance.get("symbols") or [""]
+        applied_counts = applied_counts or {}
+        params = _strategy_params_for_instance(self.definition, instance)
+        ma_period = max(2, _int(params.get("ma_period"), 20))
+        missing = []
+        with self._lock:
+            for symbol in symbols:
+                key = (mode, instance_id, str(symbol))
+                state = self.states.get(key)
+                ma_value = self._ma((state.closes if state else []), ma_period)
+                applied = _int(applied_counts.get(str(symbol)), 0)
+                if state is None or ma_value is None or applied < target:
+                    missing.append(f"{symbol}:{applied}/{target}")
+        if missing:
+            raise ValueError(
+                "strategy warmup is insufficient for MA calculation: "
+                f"instance_id={instance_id} strategy_id={self.definition.get('strategy_id', '')} "
+                f"mode={mode} ma_period={ma_period} warmup_target={target} symbols={','.join(missing)}"
+            )
 
     def _settings(self, request):
         """读取并规范化策略参数。"""
@@ -1313,7 +1347,8 @@ class MA20WeakPullbackShortStrategy(Strategy):
         with self._lock:
             for symbol in symbols:
                 self.states[(mode, instance_id, str(symbol))] = WeakPullbackShortState()
-        self._apply_warmup_bars(instance, (instance.get("params") or {}).get("warmup_bars") or [], mode)
+        applied_counts = self._apply_warmup_bars(instance, (instance.get("params") or {}).get("warmup_bars") or [], mode)
+        self.validate_warmup(instance, applied_counts)
 
     def stop_instance(self, instance_id):
         with self._lock:
@@ -1349,6 +1384,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
     def _apply_warmup_bars(self, instance, bars, mode):
         instance_id = instance.get("instance_id", "")
         params = instance.get("params") or {}
+        counts = {}
         for idx, bar in enumerate(bars):
             try:
                 symbol = str(bar.get("symbol") or (instance.get("symbols") or [""])[0])
@@ -1365,8 +1401,44 @@ class MA20WeakPullbackShortStrategy(Strategy):
                     "bar": bar,
                 }
                 self._on_bar_locked(req)
+                counts[symbol] = counts.get(symbol, 0) + 1
             except Exception as exc:
                 logger.warning("weak pullback warmup bar ignored: %s", exc)
+        return counts
+
+    def validate_warmup(self, instance, applied_counts=None):
+        target = self.required_warmup_bars(instance)
+        if target <= 0:
+            return
+        instance_id = instance.get("instance_id", "")
+        mode = _instance_mode(instance)
+        symbols = instance.get("symbols") or [""]
+        applied_counts = applied_counts or {}
+        params = _strategy_params_for_instance(self.definition, instance)
+        settings = {
+            "ma20": max(2, _int(params.get("ma20_period"), _int(params.get("ma_period"), 20))),
+            "ma60": max(3, _int(params.get("ma60_period"), 60)),
+            "ma120": max(4, _int(params.get("ma120_period"), 120)),
+            "atr": max(2, _int(params.get("atr_period"), 14)),
+            "swing": max(2, _int(params.get("swing_lookback_bars"), 20)),
+            "slope": max(1, _int(params.get("slope_lookback_bars"), 5)),
+        }
+        missing = []
+        with self._lock:
+            for symbol in symbols:
+                key = (mode, instance_id, str(symbol))
+                state = self.states.get(key)
+                ind = self._indicators(state, settings) if state is not None else {}
+                applied = _int(applied_counts.get(str(symbol)), 0)
+                enough = state is not None and ind.get("ma20") is not None and ind.get("ma120") is not None and applied >= target
+                if not enough:
+                    missing.append(f"{symbol}:{applied}/{target}")
+        if missing:
+            raise ValueError(
+                "strategy warmup is insufficient for weak pullback indicators: "
+                f"instance_id={instance_id} strategy_id={self.definition.get('strategy_id', '')} "
+                f"mode={mode} warmup_target={target} symbols={','.join(missing)}"
+            )
 
     def _sma(self, values, period):
         if len(values) < period:
@@ -1972,8 +2044,6 @@ class StrategyFactory:
     def start_instance(self, instance):
         entry = self.load_strategy((instance or {}).get("strategy_id", ""))
         key = self._key_for_instance(instance)
-        with self._lock:
-            self._instances.pop(key, None)
         runtime = StrategyRuntimeInstance(entry, instance)
         with self._lock:
             self._instances[key] = runtime

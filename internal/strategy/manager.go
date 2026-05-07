@@ -1671,6 +1671,7 @@ func (m *Manager) fetchWarmupBars(inst StrategyInstance, anchorTime time.Time, t
 			continue
 		}
 		if len(resp.Bars) < target {
+			lastErr = fmt.Errorf("warmup bars below target: source=%s warmup_count=%d warmup_target=%d", source.name, len(resp.Bars), target)
 			logger.Warn("strategy warmup bars below target",
 				"instance_id", inst.InstanceID,
 				"strategy_id", inst.StrategyID,
@@ -1684,17 +1685,17 @@ func (m *Manager) fetchWarmupBars(inst StrategyInstance, anchorTime time.Time, t
 				"warmup_target", target,
 				"warmup_count", len(resp.Bars),
 			)
-		} else {
-			logger.Info("strategy warmup source selected",
-				"instance_id", inst.InstanceID,
-				"strategy_id", inst.StrategyID,
-				"mode", mode,
-				"source", source.name,
-				"symbol", symbol,
-				"timeframe", timeframe,
-				"warmup_count", len(resp.Bars),
-			)
+			continue
 		}
+		logger.Info("strategy warmup source selected",
+			"instance_id", inst.InstanceID,
+			"strategy_id", inst.StrategyID,
+			"mode", mode,
+			"source", source.name,
+			"symbol", symbol,
+			"timeframe", timeframe,
+			"warmup_count", len(resp.Bars),
+		)
 		return resp.Bars, nil
 	}
 	if lastErr != nil {
