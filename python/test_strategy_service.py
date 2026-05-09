@@ -26,6 +26,7 @@ from strategy_service import (  # noqa: E402
 
 
 def bar_req(instance_id="inst-1", symbol="rb2601", open_=100, high=100, low=100, close=100, idx=1, params=None):
+    ts = f"2026-01-01T09:{idx:02d}:00+08:00"
     return {
         "instance": {
             "instance_id": instance_id,
@@ -33,10 +34,11 @@ def bar_req(instance_id="inst-1", symbol="rb2601", open_=100, high=100, low=100,
             "params": params or {"ma_period": 20, "max_wait_bars": 6},
         },
         "symbol": symbol,
-        "event_time": f"2026-01-01T09:{idx:02d}:00+08:00",
+        "event_time": ts,
         "current_position": 0,
         "bar": {
-            "data_time": f"2026-01-01T09:{idx:02d}:00+08:00",
+            "adjusted_time": ts,
+            "data_time": ts,
             "open": open_,
             "high": high,
             "low": low,
@@ -60,17 +62,19 @@ def tick_req(instance_id="inst-1", symbol="rb2601", last_price=100, idx=1):
 
 
 def pullback_warmup_bars(symbol="rb2601", count=40, close=100):
-    return [
-        {
+    bars = []
+    for i in range(1, count + 1):
+        ts = f"2026-01-01T08:{i:02d}:00+08:00"
+        bars.append({
             "symbol": symbol,
-            "data_time": f"2026-01-01T08:{i:02d}:00+08:00",
+            "adjusted_time": ts,
+            "data_time": ts,
             "open": close,
             "high": close,
             "low": close,
             "close": close,
-        }
-        for i in range(1, count + 1)
-    ]
+        })
+    return bars
 
 
 def weak_bar_req(instance_id="weak-1", symbol="yl9", open_=100, high=100.5, low=99.5, close=100, idx=1, params=None):
@@ -95,6 +99,7 @@ def weak_bar_req(instance_id="weak-1", symbol="yl9", open_=100, high=100.5, low=
         "event_time": ts,
         "current_position": 0,
         "bar": {
+            "adjusted_time": ts,
             "data_time": ts,
             "open": open_,
             "high": high,
@@ -112,6 +117,7 @@ def weak_warmup_bars(symbol="yl9", count=145, close=100):
         ts = f"2026-01-01T{hour:02d}:{minute:02d}:00+08:00"
         bars.append({
             "symbol": symbol,
+            "adjusted_time": ts,
             "data_time": ts,
             "open": close,
             "high": close + 0.5,
@@ -238,6 +244,22 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         req["mode"] = "replay"
         out = self.strategy.on_replay_bar(req)
         self.assertEqual(out["trace"]["step_key"], BROKEN_BELOW_MA20)
+
+    def test_adjusted_time_drives_ordering_not_data_time(self):
+        first = bar_req(idx=21, close=101)
+        first["event_time"] = 1_000
+        first["bar"]["adjusted_time"] = 1_000
+        first["bar"]["data_time"] = 2_000
+        self.strategy.on_bar(first)
+
+        second = bar_req(idx=22, close=102)
+        second["event_time"] = 1_060
+        second["bar"]["adjusted_time"] = 1_060
+        second["bar"]["data_time"] = 1_500
+        out = self.strategy.on_bar(second)
+
+        self.assertNotEqual(out["reason"], "duplicate or out-of-order bar")
+        self.assertEqual(self.state().last_bar_ts, 1_060)
 
     def test_starting_below_ma20_requires_full_bar_above_before_break_wait(self):
         warmup = pullback_warmup_bars("rb2601", 40)

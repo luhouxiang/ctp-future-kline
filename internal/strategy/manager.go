@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -1176,10 +1177,10 @@ func (m *Manager) handleBar(ev BarEvent, mode string) {
 	// 	"symbol", ev.InstrumentID,
 	// 	"timeframe", ev.Period,
 	// 	"mode", mode,
-	// 	"event_time", ev.DataTime,
+	// 	"event_time", strategyBarEventTime(ev),
 	// )
 	m.forEachMatchingInstance(ev.InstrumentID, ev.Period, mode, func(inst StrategyInstance) {
-		m.callDecision(inst, ev.InstrumentID, mode, ev.DataTime, nil, &ev)
+		m.callDecision(inst, ev.InstrumentID, mode, strategyBarEventTime(ev), nil, &ev)
 	})
 }
 
@@ -1213,6 +1214,9 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 	m.mu.RUnlock()
 	if client == nil {
 		return
+	}
+	if bar != nil {
+		eventTime = strategyBarEventTime(*bar)
 	}
 	req := DecisionRequest{
 		Instance:        runtimeStrategyInstance(inst),
@@ -1437,6 +1441,10 @@ func (m *Manager) Subscribe() (<-chan EventEnvelope, func()) {
 			m.queueHandle.ObserveDepth(m.maxEventDepth())
 		}
 	}
+}
+
+func strategyBarEventTime(ev BarEvent) time.Time {
+	return ev.AdjustedTime
 }
 
 func (m *Manager) broadcast(typ string, data any) {
@@ -1738,6 +1746,10 @@ func warmupQuerySources(inst StrategyInstance, realtimeDSN string, replayDSN str
 		appendSource("replay", replayDSN)
 		return sources
 	}
+	if mode == RunTypeReplay && strings.ToLower(strings.TrimSpace(fmt.Sprint(params["replay_mode"]))) == "kline" {
+		appendSource("realtime", realtimeDSN)
+		return sources
+	}
 	if mode == RunTypeReplay {
 		appendSource("replay", replayDSN)
 		appendSource("realtime", realtimeDSN)
@@ -1826,20 +1838,23 @@ func initialTraceForInstance(inst StrategyInstance) (StrategyTraceRecord, bool) 
 
 func parseInstanceAnchorTime(params map[string]any) (time.Time, bool) {
 	values := []string{}
+	if anchor, ok := params["chart_anchor"].(map[string]any); ok {
+		values = append(values, fmt.Sprint(anchor["adjusted_time"]), fmt.Sprint(anchor["plot_time"]))
+	}
 	if raw, ok := params["chart_start_time"]; ok {
 		values = append(values, fmt.Sprint(raw))
 	}
 	if raw, ok := params["start_time"]; ok {
 		values = append(values, fmt.Sprint(raw))
 	}
-	if anchor, ok := params["chart_anchor"].(map[string]any); ok {
-		values = append(values, fmt.Sprint(anchor["data_time"]), fmt.Sprint(anchor["adjusted_time"]), fmt.Sprint(anchor["plot_time"]))
-	}
 	layouts := []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05", "2006-01-02 15:04"}
 	for _, raw := range values {
 		value := strings.TrimSpace(raw)
 		if value == "" || value == "<nil>" {
 			continue
+		}
+		if ts, ok := parseUnixSecondsText(value); ok {
+			return ts, true
 		}
 		for _, layout := range layouts {
 			if ts, err := time.ParseInLocation(layout, strings.ReplaceAll(value, "T", " "), time.Local); err == nil {
@@ -1851,6 +1866,19 @@ func parseInstanceAnchorTime(params map[string]any) (time.Time, bool) {
 		}
 	}
 	return time.Time{}, false
+}
+
+func parseUnixSecondsText(value string) (time.Time, bool) {
+	if strings.ContainsAny(value, "-:TtZz ") {
+		return time.Time{}, false
+	}
+	seconds, err := strconv.ParseFloat(value, 64)
+	if err != nil || seconds <= 0 {
+		return time.Time{}, false
+	}
+	whole := int64(seconds)
+	nanos := int64((seconds - float64(whole)) * 1e9)
+	return time.Unix(whole, nanos).In(time.Local), true
 }
 
 func firstSymbol(symbols []string) string {

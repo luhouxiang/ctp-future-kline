@@ -74,7 +74,7 @@ export function buildChartStrategyInstance({
   if (!symbol) throw new Error('当前图表没有合约')
   const timeframe = cleanText(scope?.timeframe || '1m') || '1m'
   const mode = resolveStrategyRunMode({ replayKlineMode, dataMode, klineReplayRunning })
-  const displayTime = formatStrategyAnchorTime(anchor.data_time || anchor.adjusted_time || anchor.plot_time)
+  const displayTime = formatStrategyAnchorTime(anchor.adjusted_time || anchor.plot_time)
   if (displayTime === '--') throw new Error('右键位置没有有效K线时间')
 
   const defaultParams = strategyDefaultParams(definition)

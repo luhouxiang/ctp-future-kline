@@ -232,7 +232,7 @@ function applySelectedByTime(ts, candleData) {
   const volumeValue = bar?.volume
   const oiValue = bar?.open_interest
 
-  const displayTs = bar?.data_time ?? ts
+  const displayTs = bar?.adjusted_time ?? bar?.time ?? ts
   state.selected.timeText = formatDisplayTime(displayTs)
   state.selected.open = formatNumber(openValue)
   state.selected.high = formatNumber(highValue)

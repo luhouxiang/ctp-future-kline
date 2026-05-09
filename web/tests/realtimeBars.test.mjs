@@ -18,6 +18,7 @@ test('mergeRealtimeBarUpdate inserts partial bar', () => {
   })
   assert.equal(out.length, 1)
   assert.equal(out[0].adjusted_time, 100)
+  assert.equal(out[0].data_time, 100)
   assert.equal(out[0].close, 2)
 })
 
@@ -74,4 +75,3 @@ test('mergeRealtimeBarUpdate appends newer bar in order', () => {
   })
   assert.deepEqual(out.map((item) => item.adjusted_time), [100, 160])
 })
-

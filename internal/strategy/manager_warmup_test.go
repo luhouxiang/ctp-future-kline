@@ -38,6 +38,53 @@ func TestParseInstanceAnchorTimeSupportsStartTime(t *testing.T) {
 	}
 }
 
+func TestParseInstanceAnchorTimePrefersAdjustedAnchor(t *testing.T) {
+	adjusted := time.Date(2026, 5, 6, 21, 5, 0, 0, time.Local)
+	dataTime := time.Date(2026, 5, 7, 21, 5, 0, 0, time.Local)
+	ts, ok := parseInstanceAnchorTime(map[string]any{
+		"chart_start_time": dataTime.Format("2006-01-02 15:04:05"),
+		"chart_anchor": map[string]any{
+			"adjusted_time": adjusted.Unix(),
+			"data_time":     dataTime.Unix(),
+		},
+	})
+	if !ok {
+		t.Fatalf("parseInstanceAnchorTime() ok = false, want true")
+	}
+	if !ts.Equal(adjusted) {
+		t.Fatalf("parseInstanceAnchorTime() = %v, want adjusted %v", ts, adjusted)
+	}
+}
+
+func TestParseInstanceAnchorTimeDoesNotUseDataTimeFallback(t *testing.T) {
+	dataTime := time.Date(2026, 5, 7, 21, 5, 0, 0, time.Local)
+	_, ok := parseInstanceAnchorTime(map[string]any{
+		"chart_anchor": map[string]any{
+			"data_time": dataTime.Unix(),
+		},
+	})
+	if ok {
+		t.Fatalf("parseInstanceAnchorTime() ok = true, want false when only data_time is present")
+	}
+}
+
+func TestStrategyBarEventTimeUsesAdjustedTime(t *testing.T) {
+	dataTime := time.Date(2026, 5, 7, 21, 5, 0, 0, time.Local)
+	adjusted := time.Date(2026, 5, 6, 21, 5, 0, 0, time.Local)
+	got := strategyBarEventTime(BarEvent{DataTime: dataTime, AdjustedTime: adjusted})
+	if !got.Equal(adjusted) {
+		t.Fatalf("strategyBarEventTime() = %v, want adjusted %v", got, adjusted)
+	}
+}
+
+func TestStrategyBarEventTimeDoesNotUseDataTimeFallback(t *testing.T) {
+	dataTime := time.Date(2026, 5, 7, 21, 5, 0, 0, time.Local)
+	got := strategyBarEventTime(BarEvent{DataTime: dataTime})
+	if !got.IsZero() {
+		t.Fatalf("strategyBarEventTime() = %v, want zero when adjusted_time is missing", got)
+	}
+}
+
 func TestWarmupBarsFromParams(t *testing.T) {
 	bars := warmupBarsFromParams(map[string]any{
 		"warmup_bars": []klinequery.KlineBar{
@@ -154,6 +201,21 @@ func TestWarmupQuerySourcesRealtimeOverrideWinsInReplayMode(t *testing.T) {
 		Params: map[string]any{
 			"warmup_source": "realtime",
 			"replay_mode":   "kline",
+		},
+	}, "realtime-dsn", "replay-dsn")
+	if len(items) != 1 {
+		t.Fatalf("warmupQuerySources() len = %d, want 1", len(items))
+	}
+	if items[0].name != "realtime" || items[0].dsn != "realtime-dsn" {
+		t.Fatalf("warmupQuerySources()[0] = %+v, want single realtime source", items[0])
+	}
+}
+
+func TestWarmupQuerySourcesKlineReplayUsesRealtimeOnly(t *testing.T) {
+	items := warmupQuerySources(StrategyInstance{
+		Mode: RunTypeReplay,
+		Params: map[string]any{
+			"replay_mode": "kline",
 		},
 	}, "realtime-dsn", "replay-dsn")
 	if len(items) != 1 {

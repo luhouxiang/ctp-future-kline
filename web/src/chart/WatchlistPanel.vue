@@ -398,7 +398,7 @@ function formatHms(ts) {
 
 function formatInstanceAnchor(item) {
   const params = item?.params && typeof item.params === 'object' ? item.params : {}
-  return String(params.chart_start_time || params.chart_anchor?.data_time || params.chart_anchor?.plot_time || '--')
+  return String(params.chart_anchor?.adjusted_time || params.chart_anchor?.plot_time || params.chart_start_time || '--')
 }
 
 function strategyInstanceName(item) {

@@ -2248,7 +2248,7 @@ onUnmounted(() => {
     >
       <div class="tv-strategy-context-head">
         <span>从此K线启动策略</span>
-        <small>{{ formatAnchorTime(strategyContextMenu.anchor?.data_time || strategyContextMenu.anchor?.adjusted_time || strategyContextMenu.anchor?.plot_time) }}</small>
+        <small>{{ formatAnchorTime(strategyContextMenu.anchor?.adjusted_time || strategyContextMenu.anchor?.plot_time) }}</small>
       </div>
       <div v-if="strategyContextMenu.loading" class="tv-strategy-context-empty">加载策略...</div>
       <template v-else>

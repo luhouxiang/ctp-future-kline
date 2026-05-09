@@ -2523,7 +2523,7 @@ function getWarmupBarsBeforeAnchorTime(anchorTime, count = 20) {
 
 async function ensureWarmupBarsBeforeAnchor(anchor, count = 20) {
   const target = Math.max(1, Number(count) || 20);
-  const anchorTime = Number(anchor?.adjusted_time || anchor?.plot_time || anchor?.data_time || 0);
+  const anchorTime = Number(anchor?.adjusted_time || anchor?.plot_time || 0);
   if (!Number.isFinite(anchorTime) || anchorTime <= 0) return [];
   while (true) {
     const warmupBars = getWarmupBarsBeforeAnchorTime(anchorTime, target);
@@ -2733,7 +2733,7 @@ function stopKlineReplayPanelDrag() {
 function replayAnchorISO(anchor) {
   const fromDate = replayDateAnchorISO(klineReplayPanel.date);
   if (fromDate) return fromDate;
-  const ts = Number(anchor?.adjusted_time || anchor?.data_time || anchor?.plot_time || 0);
+  const ts = Number(anchor?.adjusted_time || anchor?.plot_time || 0);
   if (!Number.isFinite(ts) || ts <= 0) return "";
   return new Date(ts * 1000).toISOString();
 }
@@ -3059,7 +3059,7 @@ function strategyTraceTime(row) {
   const raw = String(row?.event_time || "");
   const parsed = Date.parse(raw);
   if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
-  return Number(row?.metrics?.adjusted_time || row?.metrics?.data_time || 0);
+  return Number(row?.metrics?.adjusted_time || 0);
 }
 
 function findNearestBarByDisplayTime(time) {

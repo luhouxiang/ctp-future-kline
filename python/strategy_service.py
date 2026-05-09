@@ -240,7 +240,13 @@ def _normalize_symbols(symbols):
 def _warmup_bar_time(bar):
     if not isinstance(bar, dict):
         return ""
-    return str(bar.get("data_time") or bar.get("adjusted_time") or bar.get("event_time") or "")
+    return _bar_event_time(bar)
+
+
+def _bar_event_time(bar, fallback=""):
+    if not isinstance(bar, dict):
+        return str(fallback or "")
+    return str(bar.get("adjusted_time") or bar.get("plot_time") or bar.get("event_time") or fallback or "")
 
 
 def _instance_start_log_payload(instance):
@@ -743,7 +749,7 @@ class MA20PullbackShortStrategy(Strategy):
                 "instance": instance,
                 "symbol": str(bar.get("symbol") or symbol),
                 "mode": mode,
-                "event_time": bar.get("data_time") or bar.get("adjusted_time") or "",
+                "event_time": _bar_event_time(bar),
                 "bar": bar,
             }
             try:
@@ -844,7 +850,7 @@ class MA20PullbackShortStrategy(Strategy):
         state.signal_bars = 0
         state.signal_time = ""
 
-    def _start_short_signal(self, state, entry_price, high, low, data_time, request):
+    def _start_short_signal(self, state, entry_price, high, low, event_time, request):
         settings = self._signal_settings(request)
         atr = max(0.0001, high - low)
         state.state = SIGNAL_ACTIVE
@@ -852,7 +858,7 @@ class MA20PullbackShortStrategy(Strategy):
         state.signal_profit_target = entry_price - settings["profit_atr_multiple"] * atr
         state.signal_adverse_target = entry_price + settings["adverse_atr_multiple"] * atr
         state.signal_bars = 0
-        state.signal_time = data_time
+        state.signal_time = event_time
         return atr
 
     def _signal_metrics(self, state, ma20, ma_period):
@@ -992,16 +998,16 @@ class MA20PullbackShortStrategy(Strategy):
         high = _float(bar.get("high"))
         low = _float(bar.get("low"))
         close = _float(bar.get("close"))
-        data_time = bar.get("data_time") or request.get("event_time", "")
-        data_ts = _event_ts(data_time)
+        event_time = _bar_event_time(bar, request.get("event_time", ""))
+        event_ts = _event_ts(event_time)
         logger.info("symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
-                    request.get("symbol", ""), data_time, open_price, high, low, close)
+                    request.get("symbol", ""), event_time, open_price, high, low, close)
 
         # 如果能解析出事件时间，则过滤重复或乱序 bar，避免状态机倒退或重复计数。
-        if data_ts is not None and state.last_bar_ts is not None and data_ts <= state.last_bar_ts:
+        if event_ts is not None and state.last_bar_ts is not None and event_ts <= state.last_bar_ts:
             return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state, state.prev_ma, ma_period))
-        if data_ts is not None:
-            state.last_bar_ts = data_ts
+        if event_ts is not None:
+            state.last_bar_ts = event_ts
 
         # 先用追加 close 之前的 closes 计算 previous_ma，用于判断上根 K 是否在 MA 上方。
         previous_ma = self._ma(state.closes, ma_period)
@@ -1058,7 +1064,7 @@ class MA20PullbackShortStrategy(Strategy):
                     "Strategy.wait_arm: instance_id=%s symbol=%s event_time=%s ma=%.4f full_above=%s armed=%s",
                     _instance_id(request),
                     request.get("symbol", ""),
-                    data_time,
+                    event_time,
                     ma20,
                     full_above,
                     state.break_below_armed,
@@ -1104,7 +1110,7 @@ class MA20PullbackShortStrategy(Strategy):
                 state.touch_open = open_price
                 state.touch_high = high
                 state.touch_ma20 = ma20
-                state.touch_time = data_time
+                state.touch_time = event_time
                 state.wait_bars = 1
                 step_key = WAIT_BREAK_TOUCH_OPEN
                 step_label = "等待跌破触碰K开盘价"
@@ -1128,7 +1134,7 @@ class MA20PullbackShortStrategy(Strategy):
                 _check("K线跌破触碰K开盘价", state.touch_open is not None and low <= state.touch_open, low, state.touch_open),
             ]
             if state.touch_open is not None and low <= state.touch_open:
-                atr = self._start_short_signal(state, state.touch_open, high, low, data_time, request)
+                atr = self._start_short_signal(state, state.touch_open, high, low, event_time, request)
                 metrics = self._signal_metrics(state, ma20, ma_period)
                 metrics.update(
                     {
@@ -1397,7 +1403,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
                     },
                     "symbol": symbol,
                     "mode": mode,
-                    "event_time": bar.get("data_time") or bar.get("event_time") or f"warmup-{idx}",
+                    "event_time": _bar_event_time(bar, f"warmup-{idx}"),
                     "bar": bar,
                 }
                 self._on_bar_locked(req)
@@ -1560,7 +1566,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
         }
 
-    def _start_short_signal(self, state, entry_price, atr, data_time, request):
+    def _start_short_signal(self, state, entry_price, atr, event_time, request):
         settings = self._signal_settings(request)
         atr = max(0.0001, atr or 0.0)
         state.state = SIGNAL_ACTIVE
@@ -1568,7 +1574,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.signal_profit_target = entry_price - settings["profit_atr_multiple"] * atr
         state.signal_adverse_target = entry_price + settings["adverse_atr_multiple"] * atr
         state.signal_bars = 0
-        state.signal_time = data_time
+        state.signal_time = event_time
         return atr
 
     def _evaluate_active_signal(self, request, state, high, low, ind):
@@ -1717,22 +1723,22 @@ class MA20WeakPullbackShortStrategy(Strategy):
         high = _float(bar.get("high"))
         low = _float(bar.get("low"))
         close = _float(bar.get("close"))
-        data_time = bar.get("data_time") or request.get("event_time", "")
+        event_time = _bar_event_time(bar, request.get("event_time", ""))
         logger.info(
             "WeakStrategy.on_bar: instance_id=%s symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
             _instance_id(request),
             request.get("symbol", ""),
-            data_time,
+            event_time,
             open_price,
             high,
             low,
             close,
         )
-        data_ts = _event_ts(data_time)
-        if data_ts is not None and state.last_bar_ts is not None and data_ts <= state.last_bar_ts:
+        event_ts = _event_ts(event_time)
+        if event_ts is not None and state.last_bar_ts is not None and event_ts <= state.last_bar_ts:
             return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state))
-        if data_ts is not None:
-            state.last_bar_ts = data_ts
+        if event_ts is not None:
+            state.last_bar_ts = event_ts
 
         previous_ma20 = self._sma(state.closes, settings["ma20"])
         previous_close = state.prev_close
@@ -1772,7 +1778,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
             if not cross_break:
                 trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, "等待跌破 MA20", 1, "waiting", "waiting for MA20 cross break", checks, ind)
                 return finish(_no_signal(request, "waiting for MA20 cross break", self._base_metrics(state, ind), trace))
-            state.break_time = data_time
+            state.break_time = event_time
             state.break_index = len(state.closes) - 1
             state.bars_since_break = 1
             state.reaction_low = low
@@ -1810,7 +1816,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
                 state.touch_open = open_price
                 state.touch_high = high
                 state.touch_ma20 = ma20
-                state.touch_time = data_time
+                state.touch_time = event_time
                 state.trigger_wait_bars = 0
                 trace = self._bar_trace(request, state, WAIT_PULLBACK_TOUCH_MA20, "弱反触碰 MA20", 3, "passed", "weak pullback touched MA20", checks, ind)
                 return finish(_no_signal(request, "weak pullback touched MA20", self._base_metrics(state, ind), trace))
@@ -1843,7 +1849,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
                     self._reset(state)
                     trace = self._bar_trace(request, state, WAIT_BREAK_REACTION_LOW, "评分过滤", 4, "failed", reason, checks, ind)
                     return finish(_no_signal(request, reason, self._base_metrics(state, ind), trace))
-                atr = self._start_short_signal(state, state.reaction_low, ind.get("atr14") or (high - low), data_time, request)
+                atr = self._start_short_signal(state, state.reaction_low, ind.get("atr14") or (high - low), event_time, request)
                 metrics = self._base_metrics(state, ind)
                 metrics.update({
                     "signal": "SHORT",

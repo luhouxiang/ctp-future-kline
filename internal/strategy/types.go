@@ -211,7 +211,7 @@ type BarEvent struct {
 	InstrumentID string `json:"instrument_id"`
 	// Exchange 是交易所代码。
 	Exchange string `json:"exchange"`
-	// DataTime 是该 bar 的业务分钟时间。
+	// DataTime 保留原始业务/交易日上下文，不用于策略排序或定位。
 	DataTime time.Time `json:"data_time"`
 	// AdjustedTime 是跨夜修正后的实际时间轴。
 	AdjustedTime time.Time `json:"adjusted_time"`
