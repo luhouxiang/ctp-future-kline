@@ -10,7 +10,6 @@ from strategy_service import (  # noqa: E402
     MA20_WEAK_HARD_FILTER_STRATEGY_ID,
     MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
     MA20_WEAK_STRATEGY_ID,
-    SHORT_SIGNAL,
     SIGNAL_ACTIVE,
     StrategyService,
     WAIT_BREAK_BELOW_MA20,
@@ -169,25 +168,56 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(state.wait_bars, 1)
         self.assertTrue(state.touch_time)
 
-    def test_tick_breaks_touch_open_once(self):
+    def test_tick_is_ignored_after_touch_open(self):
         self.warmup()
         self.strategy.on_bar(bar_req(open_=100, high=100, low=99, close=99, idx=21))
         self.strategy.on_bar(bar_req(open_=99.5, high=100.2, low=99.4, close=99.6, idx=22))
 
         out = self.strategy.on_tick(tick_req(last_price=99.49))
-        again = self.strategy.on_tick(tick_req(last_price=99.0, idx=2))
 
-        self.assertFalse(out.get("no_signal", False))
-        self.assertEqual(out["target_position"], -1)
-        self.assertEqual(out["trace"]["event_type"], "key_tick")
-        self.assertEqual(out["trace"]["step_key"], SHORT_SIGNAL)
-        self.assertEqual(out["trace"]["signal_preview"]["signal"], "SHORT")
-        self.assertEqual(out["metrics"]["signal"], "SHORT")
-        self.assertEqual(out["metrics"]["touch_open"], 99.5)
-        self.assertEqual(out["metrics"]["touch_high"], 100.2)
-        self.assertEqual(out["metrics"]["trigger_price"], 99.49)
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["reason"], "bar driven strategy ignores ticks")
+        self.assertEqual(self.state().state, WAIT_BREAK_TOUCH_OPEN)
+
+    def test_bar_breaks_touch_open_then_done_observes_profit(self):
+        self.warmup()
+        self.strategy.on_bar(bar_req(open_=100, high=100, low=99, close=99, idx=21))
+        self.strategy.on_bar(bar_req(open_=99.5, high=100.2, low=99.4, close=99.6, idx=22))
+
+        signal = self.strategy.on_bar(bar_req(open_=99.4, high=99.6, low=99.4, close=99.45, idx=23))
+
+        self.assertFalse(signal.get("no_signal", False))
+        self.assertEqual(signal["target_position"], -1)
+        self.assertEqual(signal["trace"]["step_key"], SIGNAL_ACTIVE)
+        self.assertEqual(signal["metrics"]["signal"], "SHORT")
+        self.assertEqual(signal["metrics"]["trigger_price"], 99.5)
         self.assertEqual(self.state().state, SIGNAL_ACTIVE)
-        self.assertTrue(again["no_signal"])
+
+        entered = self.strategy.on_bar(bar_req(open_=99.3, high=99.35, low=99.1, close=99.2, idx=24))
+        self.assertTrue(entered["no_signal"])
+        self.assertEqual(entered["trace"]["step_key"], "DONE")
+        self.assertEqual(self.state().state, "DONE")
+        self.assertEqual(self.state().signal_entry, 99.3)
+
+        result = self.strategy.on_bar(bar_req(open_=99.2, high=99.25, low=99.0, close=99.05, idx=25))
+        self.assertTrue(result["no_signal"])
+        self.assertEqual(result["trace"]["step_key"], "SIGNAL_RESULT")
+        self.assertEqual(result["metrics"]["signal_result"], "success")
+        self.assertEqual(self.state().state, WAIT_BREAK_BELOW_MA20)
+
+    def test_done_observes_stop_loss(self):
+        self.warmup()
+        self.strategy.on_bar(bar_req(open_=100, high=100, low=99, close=99, idx=21))
+        self.strategy.on_bar(bar_req(open_=99.5, high=100.2, low=99.4, close=99.6, idx=22))
+        self.strategy.on_bar(bar_req(open_=99.4, high=99.6, low=99.4, close=99.45, idx=23))
+        self.strategy.on_bar(bar_req(open_=99.3, high=99.35, low=99.1, close=99.2, idx=24))
+
+        result = self.strategy.on_bar(bar_req(open_=99.2, high=99.5, low=99.1, close=99.45, idx=25))
+
+        self.assertTrue(result["no_signal"])
+        self.assertEqual(result["trace"]["step_key"], "SIGNAL_RESULT")
+        self.assertEqual(result["metrics"]["signal_result"], "failure")
+        self.assertEqual(self.state().state, WAIT_BREAK_BELOW_MA20)
 
     def test_stood_above_ma20_resets_and_requires_full_break(self):
         self.warmup()
@@ -228,7 +258,7 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(self.strategy.states[("live", "inst-1", "rb2601")].state, WAIT_BREAK_BELOW_MA20)
 
     def test_start_instance_applies_warmup_bars(self):
-        warmup = pullback_warmup_bars("rb2601", 40)
+        warmup = pullback_warmup_bars("rb2601", 20)
         warmup[-1].update({"open": 101, "high": 101, "low": 101, "close": 101})
         self.strategy.start_instance({
             "instance_id": "replay-1",
@@ -239,8 +269,14 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         })
 
         state = self.strategy.states[("replay", "replay-1", "rb2601")]
-        self.assertGreaterEqual(len(state.closes), 20)
-        req = bar_req(instance_id="replay-1", open_=100, high=100, low=99, close=99, idx=21)
+        self.assertEqual(len(state.closes), 20)
+        self.assertEqual(state.state, WAIT_BREAK_BELOW_MA20)
+        self.assertFalse(state.break_below_armed)
+
+        arm = bar_req(instance_id="replay-1", open_=101, high=101.2, low=100.9, close=101, idx=21)
+        arm["mode"] = "replay"
+        self.strategy.on_replay_bar(arm)
+        req = bar_req(instance_id="replay-1", open_=100, high=100, low=99, close=99, idx=22)
         req["mode"] = "replay"
         out = self.strategy.on_replay_bar(req)
         self.assertEqual(out["trace"]["step_key"], BROKEN_BELOW_MA20)
@@ -262,7 +298,7 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(self.state().last_bar_ts, 1_060)
 
     def test_starting_below_ma20_requires_full_bar_above_before_break_wait(self):
-        warmup = pullback_warmup_bars("rb2601", 40)
+        warmup = pullback_warmup_bars("rb2601", 20)
         self.strategy.start_instance({
             "instance_id": "replay-below",
             "strategy_id": "ma20.pullback_short",
@@ -402,8 +438,16 @@ class StrategyServiceRegistryTest(unittest.TestCase):
             "instance": {"strategy_id": "sample.momentum", "params": {}}
         }, None)
 
-        self.assertEqual(pullback["warmup_target"], 75)
+        baseline = service.GetStartRequirements({
+            "instance": {
+                "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
+                "params": {},
+            }
+        }, None)
+
+        self.assertEqual(pullback["warmup_target"], 55)
         self.assertTrue(pullback["requires_anchor_time"])
+        self.assertEqual(baseline["warmup_target"], 20)
         self.assertEqual(weak["warmup_target"], 208)
         self.assertEqual(sample["warmup_target"], 0)
         self.assertFalse(sample["requires_anchor_time"])

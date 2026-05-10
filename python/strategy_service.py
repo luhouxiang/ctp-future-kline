@@ -189,7 +189,7 @@ def _dumps(value: Any) -> bytes:
 WAIT_BREAK_BELOW_MA20: str = "WAIT_BREAK_BELOW_MA20"
 # 已经确认跌破 MA20：接下来等待价格反抽并触碰 MA20。
 BROKEN_BELOW_MA20: str = "BROKEN_BELOW_MA20"
-# 已找到触碰 MA20 的 K 线：接下来等待 tick 最新价跌破该触碰 K 的开盘价。
+# 已找到触碰 MA20 的 K 线：接下来等待后续 bar 跌破该触碰 K 的开盘价。
 WAIT_BREAK_TOUCH_OPEN: str = "WAIT_BREAK_TOUCH_OPEN"
 # 已发出信号，等待后续 K 线确认信号成功、失败或观察窗口结束。
 SIGNAL_ACTIVE: str = "SIGNAL_ACTIVE"
@@ -296,7 +296,7 @@ def _warmup_bar_time(bar: Any) -> str:
 def _bar_event_time(bar: Any, fallback: Any = "") -> str:
     if not isinstance(bar, dict):
         return str(fallback or "")
-    return str(bar.get("adjusted_time") or bar.get("plot_time") or bar.get("event_time") or fallback or "")
+    return str(bar.get("adjusted_time")) # or bar.get("plot_time") or bar.get("event_time") or fallback or "")
 
 
 def _instance_start_log_payload(instance: JSONObject) -> dict[str, Any]:
@@ -363,8 +363,8 @@ def _no_signal(
     # trace 是可选字段：只有在调用方传入时才添加，避免响应过于臃肿。
     if trace is not None:
         out["trace"] = trace
-    logger.info("no_signal_from_strategy: instance_id=%s symbol=%s event_time=%s reason=%s metrics=%s trace=%s",
-                out["instance_id"], out["symbol"], out["event_time"], reason, metrics, trace)
+    logger.info("no_signal_from_strategy: instance_id=%s,symbol=%s,event_time=%s,reason=%s",
+                out["instance_id"], out["symbol"], out["event_time"], reason)
     return out
 
 
@@ -649,7 +649,7 @@ class PullbackShortState:
     prev_close: float | None = None
     # 上一根 K 线对应的均线值，用于判断“从上向下跌破”。
     prev_ma: float | None = None
-    # 反抽触碰 MA 的那根 K 线的开盘价；后续 tick 跌破该价时触发做空。
+    # 反抽触碰 MA 的那根 K 线的开盘价；后续 bar 跌破该价时触发做空。
     touch_open: float | None = None
     # 反抽触碰 MA 的那根 K 线的最高价，用于记录形态信息。
     touch_high: float | None = None
@@ -665,6 +665,10 @@ class PullbackShortState:
     break_below_armed: bool = False
     # 信号入场价；进入 SIGNAL_ACTIVE 后才有值。
     signal_entry: float | None = None
+    # 触发做空的价格，先记录触碰K开盘价；下一根bar开盘后再确认 signal_entry。
+    signal_trigger_price: float | None = None
+    # 触发K线的波动尺度，下一根bar确认入场后用于重新计算止盈/止损。
+    signal_atr: float | None = None
     # 信号观察窗口内的目标止盈价，用来判断这个形态是否先兑现。
     signal_profit_target: float | None = None
     # 信号观察窗口内的反向失败价，用来标记信号是否先被破坏。
@@ -673,6 +677,27 @@ class PullbackShortState:
     signal_bars: int = 0
     # 信号触发时间，用于日志、trace 和回测展示。
     signal_time: str = ""
+
+
+@dataclass
+class PullbackBarContext:
+    """MA20 baseline 单根 bar 的解析结果，状态处理函数只消费这个上下文。"""
+
+    request: RequestDict
+    state: PullbackShortState
+    bar: BarDict
+    ma_period: int
+    max_wait_bars: int
+    ma_label: str
+    open_price: float
+    high: float
+    low: float
+    close: float
+    event_time: str
+    event_ts: float | None
+    previous_ma: float | None
+    previous_close: float | None
+    ma20: float
 
 
 @dataclass
@@ -734,11 +759,12 @@ class MA20PullbackShortStrategy(Strategy):
     第 1 阶段：等待 MA 数据足够。
     第 2 阶段：等待价格从上向下跌破 MA。
     第 3 阶段：跌破后，等待价格反抽，K 线最高价触碰/超过 MA。
-    第 4 阶段：找到触碰 K 后，等待 tick 最新价跌破该 K 线开盘价。
-    第 5 阶段：触发 SHORT，目标仓位 -1，状态置为 DONE。
+    第 4 阶段：找到触碰 K 后，等待后续 bar 跌破该 K 线开盘价。
+    第 5 阶段：触发 SHORT 后先进入 SIGNAL_ACTIVE，下一根 bar 开盘确认入场后进入 DONE。
+    DONE 表示已持仓观察中，止盈/止损/未决通过 signal_result 输出，不再作为独立状态。
 
     失败重置条件：
-    - 在等待 tick 跌破触碰 K 开盘价期间，如果某根 K 线开盘和收盘都重新站上 MA，形态失败；
+    - 在等待 bar 跌破触碰 K 开盘价期间，如果某根 K 线开盘和收盘都重新站上 MA，形态失败；
     - 如果等待 bar 数超过 max_wait_bars，也视为形态失败；
     - 失败后 reset_requires_full_break=True，要求下一轮用 full_break 重新确认下破。
 
@@ -775,8 +801,7 @@ class MA20PullbackShortStrategy(Strategy):
         params = _strategy_params_for_instance(self.definition, instance)
         if _int(params.get("warmup_target"), 0) > 0:
             return _int(params.get("warmup_target"), 0)
-        ma_period = max(20, _int(params.get("ma_period"), 20))
-        return max(40, ma_period + 20)
+        return max(2, _int(params.get("ma_period"), 20))
 
     def start_instance(self, instance: JSONObject) -> None:
         """启动一个策略实例，并为其订阅品种初始化状态。
@@ -787,7 +812,7 @@ class MA20PullbackShortStrategy(Strategy):
         - params: 策略参数，可包含 warmup_bars；
         - mode: live 或 replay。
         """
-        logger.info("ma20 pullback start_instance args=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
+        logger.info("start_instance args=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
         instance_id = instance.get("instance_id", "")
         symbols = instance.get("symbols") or []
         params = instance.get("params") or {}
@@ -798,7 +823,7 @@ class MA20PullbackShortStrategy(Strategy):
         with self._lock:
             for symbol in symbols:
                 self.states[(mode, instance_id, str(symbol))] = PullbackShortState()
-        # 如果启动实例时提供了历史 K 线，则先喂入状态机用于预热 MA 与状态。
+        # warmup 只补齐 MA 计算所需 closes，不推进交易状态。
         applied_counts = self._apply_warmup_bars(instance, params.get("warmup_bars") or [], mode)
         self.validate_warmup(instance, applied_counts)
 
@@ -821,14 +846,7 @@ class MA20PullbackShortStrategy(Strategy):
         return self.states[key]
 
     def _apply_warmup_bars(self, instance: JSONObject, bars: Any, mode: str) -> dict[str, int]:
-        """用 warmup_bars 预热策略状态。
-
-        warmup_bars 通常是策略启动前的一段历史 K 线，用于：
-        - 填充 closes，以便尽快计算 MA；
-        - 让状态机在正式接收实时行情前进入正确状态。
-
-        warmup=True 当前只作为语义标识传入 _on_bar_locked，原逻辑中未单独分支。
-        """
+        """用 warmup_bars 仅预热 MA 输入，不执行交易状态转移。"""
         counts: dict[str, int] = {}
         if not isinstance(bars, list) or not bars:
             return counts
@@ -836,24 +854,36 @@ class MA20PullbackShortStrategy(Strategy):
         symbols = instance.get("symbols") or []
         if symbols:
             symbol = str(symbols[0])
+        params = _strategy_params_for_instance(self.definition, instance)
+        ma_period = max(2, _int(params.get("ma_period"), 20))
+        target = self.required_warmup_bars(instance)
         for bar in bars:
-            # 非 dict 的 warmup 数据无法解析，直接跳过。
             if not isinstance(bar, dict):
                 continue
-            req = {
-                "instance": instance,
-                "symbol": str(bar.get("symbol") or symbol),
-                "mode": mode,
-                "event_time": _bar_event_time(bar),
-                "bar": bar,
-            }
-            try:
-                with self._lock:
-                    self._on_bar_locked(req, warmup=True)
-                counts[req["symbol"]] = counts.get(req["symbol"], 0) + 1
-            except Exception as exc:
-                # warmup 异常不阻断实例启动，只记录警告。
-                logger.warning("warmup bar ignored: %s", exc)
+            item_symbol = str(bar.get("symbol") or symbol)
+            if target > 0 and counts.get(item_symbol, 0) >= target:
+                continue
+            state = self.states.get((mode, instance.get("instance_id", ""), item_symbol))
+            if state is None:
+                continue
+            close = _float(bar.get("close"), None)
+            if close is None:
+                continue
+            event_ts = _event_ts(_bar_event_time(bar))
+            if event_ts is not None and state.last_bar_ts is not None and event_ts <= state.last_bar_ts:
+                continue
+            previous_ma = self._ma(state.closes, ma_period)
+            state.closes.append(close)
+            self._trim_closes(state, ma_period)
+            state.prev_close = close
+            state.prev_ma = previous_ma
+            if event_ts is not None:
+                state.last_bar_ts = event_ts
+            counts[item_symbol] = counts.get(item_symbol, 0) + 1
+            # 保留精确请求的最少K线，不为了后续状态判断额外喂历史形态。
+            state.state = WAIT_BREAK_BELOW_MA20
+            state.break_below_armed = False
+            state.reset_requires_full_break = False
         return counts
 
     def validate_warmup(self, instance: JSONObject, applied_counts: dict[str, int] | None = None) -> None:
@@ -940,6 +970,8 @@ class MA20PullbackShortStrategy(Strategy):
 
     def _clear_signal(self, state: PullbackShortState) -> None:
         state.signal_entry = None
+        state.signal_trigger_price = None
+        state.signal_atr = None
         state.signal_profit_target = None
         state.signal_adverse_target = None
         state.signal_bars = 0
@@ -948,7 +980,7 @@ class MA20PullbackShortStrategy(Strategy):
     def _start_short_signal(
         self,
         state: PullbackShortState,
-        entry_price: float,
+        trigger_price: float,
         high: float,
         low: float,
         event_time: str,
@@ -957,9 +989,11 @@ class MA20PullbackShortStrategy(Strategy):
         settings = self._signal_settings(request)
         atr = max(0.0001, high - low)
         state.state = SIGNAL_ACTIVE
-        state.signal_entry = entry_price
-        state.signal_profit_target = entry_price - settings["profit_atr_multiple"] * atr
-        state.signal_adverse_target = entry_price + settings["adverse_atr_multiple"] * atr
+        state.signal_entry = None
+        state.signal_trigger_price = trigger_price
+        state.signal_atr = atr
+        state.signal_profit_target = trigger_price - settings["profit_atr_multiple"] * atr
+        state.signal_adverse_target = trigger_price + settings["adverse_atr_multiple"] * atr
         state.signal_bars = 0
         state.signal_time = event_time
         return atr
@@ -968,6 +1002,8 @@ class MA20PullbackShortStrategy(Strategy):
         metrics = self._base_metrics(state, ma20, ma_period)
         metrics.update({
             "signal_entry": state.signal_entry,
+            "signal_trigger_price": state.signal_trigger_price,
+            "signal_atr": state.signal_atr,
             "profit_target": state.signal_profit_target,
             "adverse_target": state.signal_adverse_target,
             "signal_bars": state.signal_bars,
@@ -975,13 +1011,12 @@ class MA20PullbackShortStrategy(Strategy):
         })
         return metrics
 
-    def _evaluate_active_signal(
+    def _evaluate_done_signal(
         self,
         request: RequestDict,
         state: PullbackShortState,
         high: float,
         low: float,
-        close: float,
         ma20: float,
         ma_period: int,
     ) -> ResponseDict:
@@ -1013,7 +1048,7 @@ class MA20PullbackShortStrategy(Strategy):
             self._reset_after_signal_result(state)
             return _no_signal(request, "observation window ended without profit/adverse target", metrics, trace)
         metrics = self._signal_metrics(state, ma20, ma_period)
-        trace = _trace(request, "bar", SIGNAL_ACTIVE, "信号观察中", 5, "waiting", "waiting for signal result", checks, metrics)
+        trace = _trace(request, "bar", DONE, "持仓观察中", 5, "waiting", "waiting for signal result", checks, metrics)
         return _no_signal(request, "waiting for signal result", metrics, trace)
 
     def _ma_label(self, period: int) -> str:
@@ -1050,6 +1085,11 @@ class MA20PullbackShortStrategy(Strategy):
             "touch_ma20": state.touch_ma20,
             "touch_time": state.touch_time,
             "trigger_price": None,
+            "signal_trigger_price": state.signal_trigger_price,
+            "signal_entry": state.signal_entry,
+            "signal_atr": state.signal_atr,
+            "profit_target": state.signal_profit_target,
+            "adverse_target": state.signal_adverse_target,
             "wait_bars": state.wait_bars,
             "step_total": 5,
         }
@@ -1080,52 +1120,16 @@ class MA20PullbackShortStrategy(Strategy):
             self._base_metrics(state, ma20, ma_period),
         )
 
-    def _tick_trace(
-        self,
-        request: RequestDict,
-        state: PullbackShortState,
-        status: str,
-        reason: str,
-        checks: list[CheckDict],
-        last_price: float,
-    ) -> TraceDict:
-        """构造关键 tick 事件的 trace。
-
-        关键 tick 指：策略已经找到触碰 K，正在等待最新价跌破触碰 K 开盘价。
-        """
-        ma_period, _ = self._settings(request)
-        metrics = self._base_metrics(state, state.touch_ma20, ma_period)
-        metrics["trigger_price"] = last_price
-        return _trace(
-            request,
-            "key_tick",
-            WAIT_BREAK_TOUCH_OPEN,
-            "等待跌破触碰K开盘价",
-            4,
-            status,
-            reason,
-            checks,
-            metrics,
-        )
-
     def on_bar(self, request: RequestDict) -> ResponseDict:
         """线程安全地处理 K 线事件。"""
         with self._lock:
-            return self._on_bar_locked(request, warmup=False)
+            return self._on_bar_locked(request)
 
-    def _on_bar_locked(self, request: RequestDict, warmup: bool = False) -> ResponseDict:
-        """处理 K 线事件的核心状态机逻辑。
-
-        调用前应已持有 self._lock。
-
-        参数：
-            request: K 线请求，预期包含 bar.open/high/low/close。
-            warmup: 是否为预热 K 线。当前实现不基于该标志改变行为。
-        """
+    def _on_bar_locked(self, request: RequestDict) -> ResponseDict:
+        """解析单根 K 线并按当前状态分派到对应处理函数。"""
         bar = request.get("bar") or {}
         if not bar:
             return _no_signal(request, "no bar")
-        # open/high/low/close 是本策略处理 bar 的最低要求。
         _require_fields(bar, ("open", "high", "low", "close"))
 
         state = self._state_for(request)
@@ -1137,24 +1141,20 @@ class MA20PullbackShortStrategy(Strategy):
         close = _float(bar.get("close"))
         event_time = _bar_event_time(bar, request.get("event_time", ""))
         event_ts = _event_ts(event_time)
-        logger.info("symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
-                    request.get("symbol", ""), event_time, open_price, high, low, close)
+        logger.info("pullback_on_bar: symbol=%s event_time=%s state=%s close=%.4f",
+                    request.get("symbol", ""), event_time, state.state, close)
 
-        # 如果能解析出事件时间，则过滤重复或乱序 bar，避免状态机倒退或重复计数。
         if event_ts is not None and state.last_bar_ts is not None and event_ts <= state.last_bar_ts:
             return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state, state.prev_ma, ma_period))
         if event_ts is not None:
             state.last_bar_ts = event_ts
 
-        # 先用追加 close 之前的 closes 计算 previous_ma，用于判断上根 K 是否在 MA 上方。
         previous_ma = self._ma(state.closes, ma_period)
         previous_close = state.prev_close
-        # 将当前收盘价纳入均线样本，再计算当前 MA。
         state.closes.append(close)
         self._trim_closes(state, ma_period)
         ma20 = self._ma(state.closes, ma_period)
 
-        # MA 样本不足：只能更新 prev_close/prev_ma，并返回等待。
         if ma20 is None:
             state.prev_close = close
             state.prev_ma = ma20
@@ -1164,248 +1164,151 @@ class MA20PullbackShortStrategy(Strategy):
             trace = self._bar_trace(request, state, "WAIT_MA_READY", f"等待 {ma_label} 数据足够", 1, "waiting", "waiting for enough bars", checks, ma20, ma_period)
             return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace)
 
-        if state.state == SIGNAL_ACTIVE:
-            out = self._evaluate_active_signal(request, state, high, low, close, ma20, ma_period)
-            state.prev_close = close
-            state.prev_ma = ma20
-            return out
-
-        # 兼容旧状态：如果已经完成，则回到等待下一轮跌破。
-        if state.state == DONE:
+        ctx = PullbackBarContext(
+            request=request,
+            state=state,
+            bar=bar,
+            ma_period=ma_period,
+            max_wait_bars=max_wait_bars,
+            ma_label=ma_label,
+            open_price=open_price,
+            high=high,
+            low=low,
+            close=close,
+            event_time=event_time,
+            event_ts=event_ts,
+            previous_ma=previous_ma,
+            previous_close=previous_close,
+            ma20=ma20,
+        )
+        handlers = {
+            WAIT_BREAK_BELOW_MA20: self._handle_wait_break_below_ma20,
+            BROKEN_BELOW_MA20: self._handle_broken_below_ma20,
+            WAIT_BREAK_TOUCH_OPEN: self._handle_wait_break_touch_open,
+            SIGNAL_ACTIVE: self._handle_signal_active,
+            DONE: self._handle_done,
+        }
+        handler = handlers.get(state.state)
+        if handler is None:
             self._reset_after_signal_result(state)
-            state.prev_close = close
-            state.prev_ma = ma20
-            trace = self._bar_trace(request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ma_label}", 1, "waiting", "ready for next attempt", [], ma20, ma_period)
-            return _no_signal(request, "ready for next attempt", self._base_metrics(state, ma20, ma_period), trace)
-
-        # 默认 trace 信息。后续每个状态分支会按实际情况覆盖。
-        step_key = state.state
-        step_label = f"等待跌破 {ma_label}"
-        step_index = 1
-        status = "waiting"
-        reason = "no trade signal"
-        checks: list[CheckDict] = []
-        full_above = open_price > ma20 and high > ma20 and low > ma20 and close > ma20
-
-        if state.state == WAIT_BREAK_BELOW_MA20:
-            if not state.break_below_armed:
-                state.break_below_armed = full_above
-                checks = [
-                    _check(f"整根K线站上{ma_label}", full_above, close, ma20, close - ma20, f"等待出现 OHLC 全部在 {ma_label} 上方的K线")
-                ]
-                step_key = WAIT_BREAK_BELOW_MA20
-                step_label = f"等待先完整站上 {ma_label}"
-                step_index = 1
-                reason = "waiting for first full bar above MA"
-                logger.info(
-                    "Strategy.wait_arm: instance_id=%s symbol=%s event_time=%s ma=%.4f full_above=%s armed=%s",
-                    _instance_id(request),
-                    request.get("symbol", ""),
-                    event_time,
-                    ma20,
-                    full_above,
-                    state.break_below_armed,
-                )
-                state.prev_close = close
-                state.prev_ma = ma20
-                trace = self._bar_trace(request, state, step_key, step_label, step_index, status, reason, checks, ma20, ma_period)
-                return _no_signal(request, reason, self._base_metrics(state, ma20, ma_period), trace)
-            # full_break：整根 K 线开盘和收盘都在 MA 下方。
-            # 在形态失败重置后，代码要求用 full_break 重新确认跌破，避免在 MA 附近反复误触发。
-            full_break = open_price < ma20 and close < ma20
-            # cross_break：上根 close 在上根 MA 上方/等于 MA，当前 close 跌到当前 MA 下方。
-            # 这是首次确认跌破时使用的主要条件。
-            cross_break = previous_close is not None and previous_ma is not None and previous_close >= previous_ma and close < ma20
-            checks = [
-                _check(f"开盘低于{ma_label}", open_price < ma20, open_price, ma20, open_price - ma20),
-                _check(f"收盘低于{ma_label}", close < ma20, close, ma20, close - ma20),
-                _check("从上向下跌破", cross_break, close, ma20, close - ma20),
-            ]
-            if (state.reset_requires_full_break and full_break) or (not state.reset_requires_full_break and cross_break):
-                # 跌破确认后进入下一阶段：等待反抽触碰 MA。
-                state.state = BROKEN_BELOW_MA20
-                state.reset_requires_full_break = False
-                step_key = BROKEN_BELOW_MA20
-                step_label = f"已跌破，等待反抽触碰 {ma_label}"
-                step_index = 2
-                status = "passed"
-                reason = f"break below {ma_label} confirmed"
-            else:
-                # 条件未满足，继续停留在等待跌破阶段。
-                step_key = WAIT_BREAK_BELOW_MA20
-                step_label = f"等待跌破 {ma_label}"
-                step_index = 1
-
-        elif state.state == BROKEN_BELOW_MA20:
-            # 跌破后，等待价格向上反抽；只要当根 K 的最高价 >= MA，即认为触碰 MA。
-            checks = [
-                _check(f"最高价触碰{ma_label}", high >= ma20, high, ma20, high - ma20, f"等待反抽到{ma_label}附近")
-            ]
-            if high >= ma20:
-                # 记录触碰 K 的关键信息：后续 tick 跌破 touch_open 时触发 SHORT。
-                state.state = WAIT_BREAK_TOUCH_OPEN
-                state.touch_open = open_price
-                state.touch_high = high
-                state.touch_ma20 = ma20
-                state.touch_time = event_time
-                state.wait_bars = 1
-                step_key = WAIT_BREAK_TOUCH_OPEN
-                step_label = "等待跌破触碰K开盘价"
-                step_index = 3
-                status = "passed"
-                reason = f"{ma_label} touch bar found"
-            else:
-                # 还没有反抽触碰 MA，继续等待。
-                step_key = BROKEN_BELOW_MA20
-                step_label = f"已跌破，等待反抽触碰 {ma_label}"
-                step_index = 2
-
-        elif state.state == WAIT_BREAK_TOUCH_OPEN:
-            # stood_above：开盘和收盘均在 MA 上方，表示价格重新站上均线，做空形态失效。
-            stood_above = open_price > ma20 and close > ma20
-            wait_remaining = max_wait_bars - state.wait_bars
-            checks = [
-                _check(f"未重新站上{ma_label}", not stood_above, close, ma20, close - ma20, "重新站上则形态失败"),
-                _check("等待未超时", state.wait_bars < max_wait_bars, state.wait_bars, max_wait_bars, wait_remaining),
-                _check("触碰K开盘价有效", state.touch_open is not None, state.touch_open, "not null"),
-                _check("K线跌破触碰K开盘价", state.touch_open is not None and low <= state.touch_open, low, state.touch_open),
-            ]
-            if state.touch_open is not None and low <= state.touch_open:
-                atr = self._start_short_signal(state, state.touch_open, high, low, event_time, request)
-                metrics = self._signal_metrics(state, ma20, ma_period)
-                metrics.update(
-                    {
-                        "signal": "SHORT",
-                        "touch_open": state.touch_open,
-                        "touch_high": state.touch_high,
-                        "touch_ma20": state.touch_ma20,
-                        "touch_time": state.touch_time,
-                        "trigger_price": state.touch_open,
-                        "entry_price": state.touch_open,
-                        "atr": atr,
-                    }
-                )
-                trace = _trace(
-                    request,
-                    "bar",
-                    SHORT_SIGNAL,
-                    "做空信号",
-                    4,
-                    "passed",
-                    "SHORT: bar broke below MA touch bar open",
-                    checks,
-                    metrics,
-                    {"target_position": -1, "confidence": 0.8, "signal": "SHORT"},
-                )
-                state.prev_close = close
-                state.prev_ma = ma20
-                return {
-                    "no_signal": False,
-                    "instance_id": _instance_id(request),
-                    "symbol": request.get("symbol", ""),
-                    "event_time": request.get("event_time", ""),
-                    "target_position": -1,
-                    "confidence": 0.8,
-                    "reason": "SHORT: bar broke below MA touch bar open",
-                    "metrics": metrics,
-                    "trace": trace,
-                }
-            if stood_above:
-                # 价格重新站上 MA：形态失败，重置状态机。
-                self._reset_after_failure(state)
-                state.break_below_armed = True
-                step_key = WAIT_BREAK_BELOW_MA20
-                step_label = f"等待跌破 {ma_label}"
-                step_index = 1
-                status = "failed"
-                reason = f"reset: stood above {ma_label}"
-            else:
-                # 未重新站上 MA，则等待 bar 数加一。
-                state.wait_bars += 1
-                if state.wait_bars >= max_wait_bars:
-                    # 等待过久仍未由 tick 跌破 touch_open：形态过期，重置。
-                    self._reset_after_failure(state)
-                    step_key = WAIT_BREAK_BELOW_MA20
-                    step_label = f"等待跌破 {ma_label}"
-                    step_index = 1
-                    status = "failed"
-                    reason = "reset: wait bars exceeded"
-                else:
-                    # 继续等待关键 tick 跌破触碰 K 开盘价。
-                    step_key = WAIT_BREAK_TOUCH_OPEN
-                    step_label = "等待跌破触碰K开盘价"
-                    step_index = 3
-
-        # 处理完当前 bar 后，更新前值，供下一根 bar 判断 cross_break 使用。
+            out = _no_signal(request, "unknown state reset", self._base_metrics(state, ma20, ma_period))
+        else:
+            out = handler(ctx)
         state.prev_close = close
         state.prev_ma = ma20
-        trace = self._bar_trace(request, state, step_key, step_label, step_index, status, reason, checks, ma20, ma_period)
-        return _no_signal(request, reason, self._base_metrics(state, ma20, ma_period), trace)
+        return out
 
-    def on_tick(self, request: RequestDict) -> ResponseDict:
-        """处理 tick 事件。
+    def _handle_wait_break_below_ma20(self, ctx: PullbackBarContext) -> ResponseDict:
+        state = ctx.state
+        full_above = ctx.open_price > ctx.ma20 and ctx.high > ctx.ma20 and ctx.low > ctx.ma20 and ctx.close > ctx.ma20
+        if not state.break_below_armed:
+            state.break_below_armed = full_above
+            checks = [_check(f"整根K线站上{ctx.ma_label}", full_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, f"等待出现 OHLC 全部在 {ctx.ma_label} 上方的K线")]
+            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待先完整站上 {ctx.ma_label}", 1, "waiting", "waiting for first full bar above MA", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, "waiting for first full bar above MA", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
 
-        MA20 策略只有在状态机进入 WAIT_BREAK_TOUCH_OPEN 后才关心 tick。
-        触发条件是：最新价 last_price < 触碰 K 的开盘价 touch_open。
-        """
-        with self._lock:
-            tick = request.get("tick") or {}
-            _require_fields(tick, ("last_price",))
-            state = self._state_for(request)
-            ma_period, _ = self._settings(request)
-            # 尚未找到有效触碰 K 时，tick 不参与判断。
-            if state.state != WAIT_BREAK_TOUCH_OPEN or state.touch_open is None:
-                return _no_signal(request, "waiting for setup", self._base_metrics(state, None, ma_period))
+        full_break = ctx.open_price < ctx.ma20 and ctx.close < ctx.ma20
+        cross_break = ctx.previous_close is not None and ctx.previous_ma is not None and ctx.previous_close >= ctx.previous_ma and ctx.close < ctx.ma20
+        checks = [
+            _check(f"开盘低于{ctx.ma_label}", ctx.open_price < ctx.ma20, ctx.open_price, ctx.ma20, ctx.open_price - ctx.ma20),
+            _check(f"收盘低于{ctx.ma_label}", ctx.close < ctx.ma20, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
+            _check("从上向下跌破", cross_break, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
+        ]
+        if (state.reset_requires_full_break and full_break) or (not state.reset_requires_full_break and cross_break):
+            state.state = BROKEN_BELOW_MA20
+            state.reset_requires_full_break = False
+            trace = self._bar_trace(ctx.request, state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "passed", f"break below {ctx.ma_label} confirmed", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, f"break below {ctx.ma_label} confirmed", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "waiting", "no trade signal", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "no trade signal", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
 
-            last_price = _float(tick.get("last_price"))
-            checks = [
-                _check("最新价跌破触碰K开盘价", last_price < state.touch_open, last_price, state.touch_open, last_price - state.touch_open)
-            ]
-            if last_price >= state.touch_open:
-                # 最新价还没有跌破触碰 K 开盘价，继续等待。
-                trace = self._tick_trace(request, state, "waiting", "touch open not broken", checks, last_price)
-                return _no_signal(request, "touch open not broken", self._base_metrics(state, None, ma_period), trace)
+    def _handle_broken_below_ma20(self, ctx: PullbackBarContext) -> ResponseDict:
+        state = ctx.state
+        checks = [_check(f"最高价触碰{ctx.ma_label}", ctx.high >= ctx.ma20, ctx.high, ctx.ma20, ctx.high - ctx.ma20, f"等待反抽到{ctx.ma_label}附近")]
+        if ctx.high >= ctx.ma20:
+            state.state = WAIT_BREAK_TOUCH_OPEN
+            state.touch_open = ctx.open_price
+            state.touch_high = ctx.high
+            state.touch_ma20 = ctx.ma20
+            state.touch_time = ctx.event_time
+            state.wait_bars = 1
+            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "passed", f"{ctx.ma_label} touch bar found", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, f"{ctx.ma_label} touch bar found", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        trace = self._bar_trace(ctx.request, state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "waiting", "waiting for MA touch", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "waiting for MA touch", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
 
-            # 触发条件满足：生成 SHORT 信号，并进入信号结果观察。
-            atr_high = max(state.touch_high or last_price, last_price, state.touch_open or last_price)
-            atr_low = min(state.touch_open or last_price, last_price)
-            atr = self._start_short_signal(state, last_price, atr_high, atr_low, request.get("event_time", ""), request)
-            metrics = self._signal_metrics(state, state.touch_ma20, ma_period)
-            metrics.update(
-                {
-                    "signal": "SHORT",
-                    "touch_open": state.touch_open,
-                    "touch_high": state.touch_high,
-                    "touch_ma20": state.touch_ma20,
-                    "touch_time": state.touch_time,
-                    "trigger_price": last_price,
-                    "entry_price": last_price,
-                    "atr": atr,
-                }
-            )
-            trace = _trace(
-                request,
-                "key_tick",
-                SHORT_SIGNAL,
-                "做空信号",
-                5,
-                "passed",
-                "SHORT: tick broke below MA touch bar open",
-                checks,
-                metrics,
-                {"target_position": -1, "confidence": 0.8, "signal": "SHORT"},
-            )
+    def _handle_wait_break_touch_open(self, ctx: PullbackBarContext) -> ResponseDict:
+        state = ctx.state
+        stood_above = ctx.open_price > ctx.ma20 and ctx.close > ctx.ma20
+        wait_remaining = ctx.max_wait_bars - state.wait_bars
+        broke_touch_open = state.touch_open is not None and ctx.low <= state.touch_open
+        checks = [
+            _check(f"未重新站上{ctx.ma_label}", not stood_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, "重新站上则形态失败"),
+            _check("等待未超时", state.wait_bars < ctx.max_wait_bars, state.wait_bars, ctx.max_wait_bars, wait_remaining),
+            _check("触碰K开盘价有效", state.touch_open is not None, state.touch_open, "not null"),
+            _check("K线跌破触碰K开盘价", broke_touch_open, ctx.low, state.touch_open),
+        ]
+        if broke_touch_open:
+            atr = self._start_short_signal(state, state.touch_open, ctx.high, ctx.low, ctx.event_time, ctx.request)
+            metrics = self._signal_metrics(state, ctx.ma20, ctx.ma_period)
+            metrics.update({
+                "signal": "SHORT",
+                "touch_open": state.touch_open,
+                "touch_high": state.touch_high,
+                "touch_ma20": state.touch_ma20,
+                "touch_time": state.touch_time,
+                "trigger_price": state.touch_open,
+                "entry_price": state.touch_open,
+                "atr": atr,
+            })
+            trace = _trace(ctx.request, "bar", SIGNAL_ACTIVE, "做空信号已触发", 4, "passed", "SHORT: bar broke below MA touch bar open", checks, metrics, {"target_position": -1, "confidence": 0.8, "signal": "SHORT"})
             return {
                 "no_signal": False,
-                "instance_id": _instance_id(request),
-                "symbol": request.get("symbol", ""),
-                "event_time": request.get("event_time", ""),
+                "instance_id": _instance_id(ctx.request),
+                "symbol": ctx.request.get("symbol", ""),
+                "event_time": ctx.request.get("event_time", ""),
                 "target_position": -1,
                 "confidence": 0.8,
-                "reason": "SHORT: tick broke below MA touch bar open",
+                "reason": "SHORT: bar broke below MA touch bar open",
                 "metrics": metrics,
                 "trace": trace,
             }
+        if stood_above:
+            self._reset_after_failure(state)
+            state.break_below_armed = True
+            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "failed", f"reset: stood above {ctx.ma_label}", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, f"reset: stood above {ctx.ma_label}", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        state.wait_bars += 1
+        if state.wait_bars >= ctx.max_wait_bars:
+            self._reset_after_failure(state)
+            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "failed", "reset: wait bars exceeded", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, "reset: wait bars exceeded", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        trace = self._bar_trace(ctx.request, state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "waiting", "waiting for touch open break", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "waiting for touch open break", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+
+    def _handle_signal_active(self, ctx: PullbackBarContext) -> ResponseDict:
+        state = ctx.state
+        state.state = DONE
+        state.signal_entry = ctx.open_price
+        settings = self._signal_settings(ctx.request)
+        atr = max(0.0001, state.signal_atr or 0.0)
+        state.signal_profit_target = ctx.open_price - settings["profit_atr_multiple"] * atr
+        state.signal_adverse_target = ctx.open_price + settings["adverse_atr_multiple"] * atr
+        metrics = self._signal_metrics(state, ctx.ma20, ctx.ma_period)
+        metrics["signal"] = "SHORT"
+        checks = [_check("下一根K线开盘确认持仓", True, ctx.open_price, "entry open")]
+        trace = self._bar_trace(ctx.request, state, DONE, "已持仓，等待止盈/止损", 5, "passed", "short position confirmed at next bar open", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "short position confirmed at next bar open", metrics, trace)
+
+    def _handle_done(self, ctx: PullbackBarContext) -> ResponseDict:
+        return self._evaluate_done_signal(ctx.request, ctx.state, ctx.high, ctx.low, ctx.ma20, ctx.ma_period)
+
+    def on_tick(self, request: RequestDict) -> ResponseDict:
+        """baseline 策略只由 bar 驱动，tick 不参与入场。"""
+        with self._lock:
+            state = self._state_for(request)
+            ma_period, _ = self._settings(request)
+            return _no_signal(request, "bar driven strategy ignores ticks", self._base_metrics(state, None, ma_period))
 
     def on_replay_bar(self, request: RequestDict) -> ResponseDict:
         """回放 K 线事件复用实时 K 线逻辑。"""
@@ -1947,13 +1850,10 @@ class MA20WeakPullbackShortStrategy(Strategy):
         close = _float(bar.get("close"))
         event_time = _bar_event_time(bar, request.get("event_time", ""))
         logger.info(
-            "WeakStrategy.on_bar: instance_id=%s symbol=%s event_time=%s open=%.4f high=%.4f low=%.4f close=%.4f",
+            "WeakStrategy._on_bar_locked: instance_id=%s,symbol=%s,event_time=%s,close=%.4f",
             _instance_id(request),
             request.get("symbol", ""),
             event_time,
-            open_price,
-            high,
-            low,
             close,
         )
         event_ts = _event_ts(event_time)
@@ -2348,7 +2248,7 @@ class StrategyService:
         instance = request.get("instance") or {}
         out = self.factory.start_requirements(instance)
         logger.info(
-            "strategy start requirements: instance_id=%s strategy_id=%s mode=%s timeframe=%s warmup_target=%s requires_anchor_time=%s",
+            "strategy start requirements: instance_id=%s，strategy_id=%s，mode=%s，timeframe=%s，warmup_target=%s，requires_anchor_time=%s",
             instance.get("instance_id", ""),
             instance.get("strategy_id", ""),
             instance.get("mode", ""),
@@ -2361,15 +2261,10 @@ class StrategyService:
     def StartInstance(self, request: RequestDict, context: Any) -> ResponseDict:
         """启动策略实例，并把 instance 交给对应策略初始化。"""
         instance = request.get("instance") or {}
-        logger.info("strategy StartInstance request=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
+        logger.info("strategy StartInstance begin...")
         runtime = self.factory.start_instance(instance)
         logger.info(
-            "strategy instance started2: instance_id=%s strategy_id=%s symbols=%s mode=%s runtime_count=%s",
-            runtime.instance_id,
-            runtime.entry.strategy_id,
-            ",".join(runtime.symbols),
-            runtime.mode,
-            len(self.factory.instances),
+            "strategy StartInstance end.  runtime_count=%s", len(self.factory.instances),
         )
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
