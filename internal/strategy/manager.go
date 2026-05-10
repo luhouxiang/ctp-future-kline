@@ -279,11 +279,15 @@ func (m *Manager) startProcessLocked() error {
 	if err != nil {
 		return fmt.Errorf("open strategy log file failed: %w", err)
 	}
-	cmd := exec.Command("python", entry, "--addr", m.cfg.GRPCAddr, "--log-file", logPath)
+	pythonExe, cmdEnv := m.resolvePythonRuntime()
+	cmd := exec.Command(pythonExe, entry, "--addr", m.cfg.GRPCAddr, "--log-file", logPath)
 	cmd.Dir = workdir
+	cmd.Env = cmdEnv
 	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
 	cmd.Stderr = io.MultiWriter(os.Stderr, logFile)
 	logger.Info("starting python strategy service",
+		"python_executable", pythonExe,
+		"python_conda_env_path", strings.TrimSpace(m.cfg.PythonCondaEnvPath),
 		"entry", entry,
 		"workdir", workdir,
 		"grpc_addr", m.cfg.GRPCAddr,
@@ -309,6 +313,71 @@ func (m *Manager) startProcessLocked() error {
 		m.mu.Unlock()
 	}()
 	return nil
+}
+
+func (m *Manager) resolvePythonRuntime() (string, []string) {
+	pythonExe := strings.TrimSpace(m.cfg.PythonExecutable)
+	condaEnvPath := strings.TrimSpace(m.cfg.PythonCondaEnvPath)
+	if pythonExe == "" && condaEnvPath != "" {
+		pythonExe = filepath.Join(condaEnvPath, "python.exe")
+	}
+	if pythonExe == "" {
+		pythonExe = "python"
+	}
+	env := os.Environ()
+	if condaEnvPath == "" {
+		return pythonExe, env
+	}
+	env = setEnvValue(env, "CONDA_PREFIX", condaEnvPath)
+	env = setEnvValue(env, "CONDA_DEFAULT_ENV", filepath.Base(filepath.Clean(condaEnvPath)))
+	env = setEnvValue(env, "PYTHONNOUSERSITE", "1")
+	env = prependEnvPath(env, "PATH",
+		condaEnvPath,
+		filepath.Join(condaEnvPath, "Scripts"),
+		filepath.Join(condaEnvPath, "Library", "bin"),
+		filepath.Join(condaEnvPath, "Library", "usr", "bin"),
+		filepath.Join(condaEnvPath, "Library", "mingw-w64", "bin"),
+	)
+	return pythonExe, env
+}
+
+func setEnvValue(env []string, key string, value string) []string {
+	prefix := key + "="
+	upperPrefix := strings.ToUpper(prefix)
+	for i, item := range env {
+		if strings.HasPrefix(strings.ToUpper(item), upperPrefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
+}
+
+func prependEnvPath(env []string, key string, entries ...string) []string {
+	filtered := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	if len(filtered) == 0 {
+		return env
+	}
+	current := ""
+	prefix := key + "="
+	upperPrefix := strings.ToUpper(prefix)
+	for _, item := range env {
+		if strings.HasPrefix(strings.ToUpper(item), upperPrefix) {
+			current = item[len(prefix):]
+			break
+		}
+	}
+	if current != "" {
+		filtered = append(filtered, current)
+	}
+	return setEnvValue(env, key, strings.Join(filtered, string(os.PathListSeparator)))
 }
 
 func (m *Manager) restartServiceLocked(explicit bool) error {
@@ -531,21 +600,23 @@ func (m *Manager) Status() ManagerStatus {
 		}
 	}
 	return ManagerStatus{
-		Enabled:          m.cfg.IsEnabled(),
-		ProcessRunning:   m.cmd != nil || m.connReady,
-		Connected:        m.connReady,
-		GRPCAddr:         m.cfg.GRPCAddr,
-		PythonEntry:      m.cfg.PythonEntry,
-		LastError:        m.lastError,
-		LastHealthAt:     m.lastHealth,
-		LastRestartAt:    m.lastRestart,
-		UpdatedAt:        time.Now(),
-		Definitions:      defs,
-		Instances:        insts,
-		RunningCount:     running,
-		SignalCount:      sigs,
-		AuditCount:       audits,
-		BacktestRunCount: runs,
+		Enabled:            m.cfg.IsEnabled(),
+		ProcessRunning:     m.cmd != nil || m.connReady,
+		Connected:          m.connReady,
+		GRPCAddr:           m.cfg.GRPCAddr,
+		PythonExecutable:   m.cfg.PythonExecutable,
+		PythonCondaEnvPath: m.cfg.PythonCondaEnvPath,
+		PythonEntry:        m.cfg.PythonEntry,
+		LastError:          m.lastError,
+		LastHealthAt:       m.lastHealth,
+		LastRestartAt:      m.lastRestart,
+		UpdatedAt:          time.Now(),
+		Definitions:        defs,
+		Instances:          insts,
+		RunningCount:       running,
+		SignalCount:        sigs,
+		AuditCount:         audits,
+		BacktestRunCount:   runs,
 	}
 }
 

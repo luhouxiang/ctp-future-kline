@@ -21,6 +21,8 @@
 - 若未安装 grpcio，本文件仍可被导入，但启动服务会抛出 RuntimeError。
 """
 
+from __future__ import annotations
+
 # argparse：解析命令行参数，例如服务监听地址 --addr。
 import argparse
 # copy：复制策略定义与启动实例，避免运行实例之间共享可变 params/default_params。
@@ -33,6 +35,9 @@ import os
 import sys
 # time：生成更新时间、服务时间，并解析部分事件时间戳。
 import time
+# Callable/TypeAlias/Any：本服务的 gRPC 边界是 JSON dict，类型别名用来说明“有哪些形状”，
+# 但不假装每个外部请求都能在静态期完全确定字段。
+from collections.abc import Callable
 # futures.ThreadPoolExecutor：作为 gRPC server 的线程池执行器。
 from concurrent import futures
 # dataclass/field：用于简洁定义策略状态对象 PullbackShortState。
@@ -40,6 +45,7 @@ from dataclasses import dataclass, field
 from logging.handlers import RotatingFileHandler
 # RLock：可重入锁，用来保护多线程 gRPC 请求下的策略状态字典。
 from threading import RLock
+from typing import Any, Literal, TypeAlias
 
 from ma20_weak_pullback_baseline import build_strategy as build_ma20_weak_baseline_strategy
 from ma20_weak_pullback_hard_filter import build_strategy as build_ma20_weak_hard_filter_strategy
@@ -55,17 +61,36 @@ except ModuleNotFoundError:
 
 # 模块级 logger，供本文件所有函数/类复用。
 logger = logging.getLogger(__name__)
-DEFAULT_STRATEGY_LOG_FILE = os.path.join("flow", "strategy_logs", "strategy_service.log")
+DEFAULT_STRATEGY_LOG_FILE: str = os.path.join("flow", "strategy_logs", "strategy_service.log")
+
+# gRPC 层使用 JSON bytes 承载请求和响应；这些别名把“边界类型”显式写出来，
+# 读代码时先知道这是动态 JSON，再看各函数如何用 _float/_int/_require_fields 收窄。
+JSONPrimitive: TypeAlias = str | int | float | bool | None
+JSONValue: TypeAlias = JSONPrimitive | list["JSONValue"] | dict[str, "JSONValue"]
+JSONObject: TypeAlias = dict[str, Any]
+RequestDict: TypeAlias = dict[str, Any]
+ResponseDict: TypeAlias = dict[str, Any]
+MetricsDict: TypeAlias = dict[str, Any]
+TraceDict: TypeAlias = dict[str, Any]
+CheckDict: TypeAlias = dict[str, Any]
+BarDict: TypeAlias = dict[str, Any]
+TickDict: TypeAlias = dict[str, Any]
+StrategyDefinition: TypeAlias = dict[str, Any]
+StrategySettings: TypeAlias = dict[str, Any]
+ModeKey: TypeAlias = Literal["live", "replay"]
+TraceStatus: TypeAlias = Literal["waiting", "passed", "failed", "done"]
+StateKey: TypeAlias = tuple[ModeKey, str, str]
+RuntimeKey: TypeAlias = tuple[ModeKey, str]
 
 
-def _log_formatter():
+def _log_formatter() -> logging.Formatter:
     # 增加 datefmt 参数，格式：月-日 时:分:秒
     return logging.Formatter(
         "[%(asctime)s][%(levelname)s]%(filename)s:%(lineno)d %(message)s", datefmt="%m-%d %H:%M:%S"
     )
 
 
-def _configure_logging(log_file, level_name="INFO"):
+def _configure_logging(log_file: str | os.PathLike[str] | None, level_name: str | None = "INFO") -> None:
     """Configure console and UTF-8 rotating file logs for strategy execution."""
     level = getattr(logging, str(level_name or "INFO").upper(), logging.INFO)
     handlers = [logging.StreamHandler()]
@@ -80,7 +105,10 @@ def _configure_logging(log_file, level_name="INFO"):
     logging.basicConfig(level=level, handlers=handlers, force=True)
 
 
-def _ensure_logging_configured(log_file=DEFAULT_STRATEGY_LOG_FILE, level_name=None):
+def _ensure_logging_configured(
+    log_file: str | os.PathLike[str] | None = DEFAULT_STRATEGY_LOG_FILE,
+    level_name: str | None = None,
+) -> None:
     root = logging.getLogger()
     target_path = os.path.abspath(log_file) if log_file else ""
     level = getattr(logging, str(level_name or os.environ.get("STRATEGY_LOG_LEVEL", "INFO")).upper(), logging.INFO)
@@ -101,7 +129,7 @@ def _ensure_logging_configured(log_file=DEFAULT_STRATEGY_LOG_FILE, level_name=No
     root.addHandler(handler)
 
 
-def _log_strategy_phase(request, response):
+def _log_strategy_phase(request: RequestDict, response: ResponseDict | None) -> None:
     """Write one compact line for every strategy phase emitted by a decision."""
     trace = (response or {}).get("trace") or {}
     if not trace:
@@ -127,7 +155,7 @@ def _log_strategy_phase(request, response):
 # -----------------------------------------------------------------------------
 # JSON 编解码工具
 # -----------------------------------------------------------------------------
-def _loads(data):
+def _loads(data: bytes | bytearray | memoryview | None) -> RequestDict:
     """将 gRPC 收到的 bytes 请求体反序列化为 Python dict。
 
     参数：
@@ -145,7 +173,7 @@ def _loads(data):
     return json.loads(data.decode("utf-8"))
 
 
-def _dumps(value):
+def _dumps(value: Any) -> bytes:
     """将 Python 对象序列化为 UTF-8 JSON bytes，作为 gRPC 响应体。
 
     ensure_ascii=False：保留中文字符，便于调试时直接阅读。
@@ -158,31 +186,53 @@ def _dumps(value):
 # MA20 反抽做空策略的状态常量
 # -----------------------------------------------------------------------------
 # 初始状态：等待价格有效跌破 MA20。
-WAIT_BREAK_BELOW_MA20 = "WAIT_BREAK_BELOW_MA20"
+WAIT_BREAK_BELOW_MA20: str = "WAIT_BREAK_BELOW_MA20"
 # 已经确认跌破 MA20：接下来等待价格反抽并触碰 MA20。
-BROKEN_BELOW_MA20 = "BROKEN_BELOW_MA20"
+BROKEN_BELOW_MA20: str = "BROKEN_BELOW_MA20"
 # 已找到触碰 MA20 的 K 线：接下来等待 tick 最新价跌破该触碰 K 的开盘价。
-WAIT_BREAK_TOUCH_OPEN = "WAIT_BREAK_TOUCH_OPEN"
+WAIT_BREAK_TOUCH_OPEN: str = "WAIT_BREAK_TOUCH_OPEN"
 # 已发出信号，等待后续 K 线确认信号成功、失败或观察窗口结束。
-SIGNAL_ACTIVE = "SIGNAL_ACTIVE"
+SIGNAL_ACTIVE: str = "SIGNAL_ACTIVE"
 # 策略流程已完成：已经触发 SHORT 信号，后续不再重复触发。
-DONE = "DONE"
+DONE: str = "DONE"
 
 # MA20 弱反弹做空策略步骤：bar 驱动，不再依赖 tick 入场。
-TREND_STRUCTURE_FILTER = "TREND_STRUCTURE_FILTER"
-WAIT_PULLBACK_TOUCH_MA20 = "WAIT_PULLBACK_TOUCH_MA20"
-WAIT_BREAK_REACTION_LOW = "WAIT_BREAK_REACTION_LOW"
-SHORT_SIGNAL = "SHORT_SIGNAL"
-MA20_WEAK_STRATEGY_ID = "ma20.weak_pullback_short"
-MA20_WEAK_BASELINE_STRATEGY_ID = "ma20.weak_pullback_short.baseline"
-MA20_WEAK_HARD_FILTER_STRATEGY_ID = "ma20.weak_pullback_short.hard_filter"
-MA20_WEAK_SCORE_FILTER_STRATEGY_ID = "ma20.weak_pullback_short.score_filter"
+TREND_STRUCTURE_FILTER: str = "TREND_STRUCTURE_FILTER"
+WAIT_PULLBACK_TOUCH_MA20: str = "WAIT_PULLBACK_TOUCH_MA20"
+WAIT_BREAK_REACTION_LOW: str = "WAIT_BREAK_REACTION_LOW"
+SHORT_SIGNAL: str = "SHORT_SIGNAL"
+MA20_WEAK_STRATEGY_ID: str = "ma20.weak_pullback_short"
+MA20_WEAK_BASELINE_STRATEGY_ID: str = "ma20.weak_pullback_short.baseline"
+MA20_WEAK_HARD_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.hard_filter"
+MA20_WEAK_SCORE_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.score_filter"
+
+PullbackStateName: TypeAlias = Literal[
+    "WAIT_BREAK_BELOW_MA20",
+    "BROKEN_BELOW_MA20",
+    "WAIT_BREAK_TOUCH_OPEN",
+    "SIGNAL_ACTIVE",
+    "DONE",
+]
+WeakPullbackStateName: TypeAlias = Literal[
+    "WAIT_BREAK_BELOW_MA20",
+    "TREND_STRUCTURE_FILTER",
+    "WAIT_PULLBACK_TOUCH_MA20",
+    "WAIT_BREAK_REACTION_LOW",
+    "SIGNAL_ACTIVE",
+    "DONE",
+]
+WeakRegime: TypeAlias = Literal[
+    "",
+    "BEARISH_REVERSAL_CANDIDATE",
+    "WEAK_BEARISH_CANDIDATE",
+    "UNCLEAR",
+]
 
 
 # -----------------------------------------------------------------------------
 # 基础类型转换与请求字段读取工具
 # -----------------------------------------------------------------------------
-def _float(value, default=0.0):
+def _float(value: Any, default: float = 0.0) -> float:
     """安全地将任意值转换为 float，失败时返回默认值。
 
     这样可以避免行情字段为空字符串、None 或异常类型时导致策略直接崩溃。
@@ -193,7 +243,7 @@ def _float(value, default=0.0):
         return default
 
 
-def _int(value, default=0):
+def _int(value: Any, default: int = 0) -> int:
     """安全地将任意值转换为 int，失败时返回默认值。"""
     try:
         return int(value)
@@ -201,7 +251,7 @@ def _int(value, default=0):
         return default
 
 
-def _instance_id(request):
+def _instance_id(request: RequestDict) -> str:
     """从请求中读取策略实例 ID。
 
     请求结构预期类似：
@@ -212,7 +262,7 @@ def _instance_id(request):
     return (request.get("instance") or {}).get("instance_id", "")
 
 
-def _params(request):
+def _params(request: RequestDict) -> dict[str, Any]:
     """从请求中读取策略实例参数 params。
 
     返回值始终是 dict；如果 instance 或 params 缺失，则返回空字典。
@@ -220,36 +270,36 @@ def _params(request):
     return (request.get("instance") or {}).get("params") or {}
 
 
-def _mode_from_value(value):
+def _mode_from_value(value: Any) -> ModeKey:
     """归一化运行模式，作为运行实例和状态字典的 key。"""
     return "replay" if str(value or "").strip().lower() == "replay" else "live"
 
 
-def _instance_mode(instance):
+def _instance_mode(instance: JSONObject | None) -> ModeKey:
     """从策略实例配置中读取归一化运行模式。"""
     return _mode_from_value((instance or {}).get("mode"))
 
 
-def _normalize_symbols(symbols):
+def _normalize_symbols(symbols: Any) -> list[str]:
     """将实例 symbols 规范成字符串列表。"""
     if not isinstance(symbols, list):
         return []
     return [str(item) for item in symbols if str(item) != ""]
 
 
-def _warmup_bar_time(bar):
+def _warmup_bar_time(bar: Any) -> str:
     if not isinstance(bar, dict):
         return ""
     return _bar_event_time(bar)
 
 
-def _bar_event_time(bar, fallback=""):
+def _bar_event_time(bar: Any, fallback: Any = "") -> str:
     if not isinstance(bar, dict):
         return str(fallback or "")
     return str(bar.get("adjusted_time") or bar.get("plot_time") or bar.get("event_time") or fallback or "")
 
 
-def _instance_start_log_payload(instance):
+def _instance_start_log_payload(instance: JSONObject) -> dict[str, Any]:
     """提取实例启动日志摘要，避免直接打印全部 warmup_bars。"""
     params = dict(instance.get("params") or {})
     warmup_bars = params.get("warmup_bars")
@@ -279,7 +329,12 @@ def _instance_start_log_payload(instance):
     }
 
 
-def _no_signal(request, reason, metrics=None, trace=None):
+def _no_signal(
+    request: RequestDict,
+    reason: str,
+    metrics: MetricsDict | None = None,
+    trace: TraceDict | None = None,
+) -> ResponseDict:
     """构造统一的“无交易信号”响应。
 
     参数：
@@ -313,7 +368,18 @@ def _no_signal(request, reason, metrics=None, trace=None):
     return out
 
 
-def _trace(request, event_type, step_key, step_label, step_index, status, reason, checks=None, metrics=None, signal_preview=None):
+def _trace(
+    request: RequestDict,
+    event_type: str,
+    step_key: str,
+    step_label: str,
+    step_index: int,
+    status: str,
+    reason: str,
+    checks: list[CheckDict] | None = None,
+    metrics: MetricsDict | None = None,
+    signal_preview: dict[str, Any] | None = None,
+) -> TraceDict:
     """构造统一的策略流程追踪对象。
 
     trace 用于描述一次事件处理时，策略状态机位于哪一步、该步通过/等待/失败的原因，
@@ -350,7 +416,14 @@ def _trace(request, event_type, step_key, step_label, step_index, status, reason
     }
 
 
-def _check(name, passed, current=None, target=None, delta=None, description=""):
+def _check(
+    name: str,
+    passed: Any,
+    current: Any = None,
+    target: Any = None,
+    delta: Any = None,
+    description: str = "",
+) -> CheckDict:
     """构造一个条件检查项。
 
     参数：
@@ -388,34 +461,34 @@ class Strategy:
     """
 
     # 策略元数据，子类通常会覆盖。
-    definition = {}
+    definition: StrategyDefinition = {}
 
-    def start_instance(self, instance):
+    def start_instance(self, instance: JSONObject) -> None:
         """启动策略实例时调用。默认无状态策略不需要做任何事。"""
         return None
 
-    def stop_instance(self, instance_id):
+    def stop_instance(self, instance_id: str) -> None:
         """停止策略实例时调用。默认无状态策略不需要清理。"""
         return None
 
-    def required_warmup_bars(self, instance):
+    def required_warmup_bars(self, instance: JSONObject) -> int:
         """返回启动该策略实例前至少需要预热的 K 线数量。"""
         return 0
 
-    def validate_warmup(self, instance, applied_counts=None):
+    def validate_warmup(self, instance: JSONObject, applied_counts: dict[str, int] | None = None) -> None:
         """校验 warmup 后的运行状态。默认无额外校验。"""
         return None
 
-    def on_tick(self, request):
+    def on_tick(self, request: RequestDict) -> ResponseDict:
         """处理 tick 事件。默认忽略 tick。"""
         return _no_signal(request, "tick ignored")
 
-    def on_bar(self, request):
+    def on_bar(self, request: RequestDict) -> ResponseDict:
         logger.info("on_bar called with request: %s", request)
         """处理 K 线 bar 事件。默认忽略 bar。"""
         return _no_signal(request, "bar ignored")
 
-    def on_replay_bar(self, request):
+    def on_replay_bar(self, request: RequestDict) -> ResponseDict:
         """处理回放 K 线事件。默认复用 on_bar 逻辑。"""
         return self.on_bar(request)
 
@@ -423,7 +496,7 @@ class Strategy:
 # -----------------------------------------------------------------------------
 # 请求校验与时间处理工具
 # -----------------------------------------------------------------------------
-def _mode_key(request):
+def _mode_key(request: RequestDict) -> ModeKey:
     """将请求中的 mode 归一化为状态字典使用的 key。
 
     当前只区分两类：
@@ -435,7 +508,7 @@ def _mode_key(request):
     return _mode_from_value(request.get("mode"))
 
 
-def _require_fields(source, fields):
+def _require_fields(source: JSONObject, fields: tuple[str, ...]) -> None:
     """校验 source 中是否包含必填字段。
 
     若字段缺失、为 None 或空字符串，则抛出 ValueError。
@@ -446,14 +519,14 @@ def _require_fields(source, fields):
         raise ValueError(f"missing required field(s): {', '.join(missing)}")
 
 
-def _strategy_params_for_instance(definition, instance):
+def _strategy_params_for_instance(definition: StrategyDefinition | None, instance: JSONObject | None) -> dict[str, Any]:
     """合并策略默认参数与实例参数。"""
     params = dict((definition or {}).get("default_params") or {})
     params.update((instance or {}).get("params") or {})
     return params
 
 
-def _event_ts(value):
+def _event_ts(value: Any) -> float | None:
     """将事件时间转换为可比较的秒级时间戳。
 
     支持的输入：
@@ -505,7 +578,7 @@ class SampleMomentumStrategy(Strategy):
     """
 
     # definition 会被 ListStrategies 返回给外部系统。
-    definition = {
+    definition: StrategyDefinition = {
         "strategy_id": "sample.momentum",
         "display_name": "Sample Momentum",
         "entry_script": "python/strategy_service.py",
@@ -514,11 +587,11 @@ class SampleMomentumStrategy(Strategy):
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
-    def _decision(self, request):
+    def _decision(self, request: RequestDict) -> ResponseDict:
         """统一处理 bar/tick 两类事件并生成示例目标仓位。"""
         bar = request.get("bar") or {}
         tick = request.get("tick") or {}
-        metrics = {}
+        metrics: MetricsDict = {}
         # 默认保持当前仓位；只有 bar/tick 判断出方向时才覆盖。
         target = request.get("current_position", 0)
         if bar:
@@ -546,11 +619,11 @@ class SampleMomentumStrategy(Strategy):
             "metrics": metrics,
         }
 
-    def on_tick(self, request):
+    def on_tick(self, request: RequestDict) -> ResponseDict:
         """tick 事件复用 _decision。"""
         return self._decision(request)
 
-    def on_bar(self, request):
+    def on_bar(self, request: RequestDict) -> ResponseDict:
         """bar 事件复用 _decision。"""
         return self._decision(request)
 
@@ -567,7 +640,7 @@ class PullbackShortState:
     """
 
     # 当前状态机状态，默认等待第一次跌破 MA。
-    state: str = WAIT_BREAK_BELOW_MA20
+    state: PullbackStateName = WAIT_BREAK_BELOW_MA20
     # 最近收盘价序列，用来计算移动平均线。会被裁剪，避免无限增长。
     closes: list[float] = field(default_factory=list)
     # 已处理的最后一根 K 线时间戳，用于过滤重复或乱序 K 线。
@@ -590,37 +663,59 @@ class PullbackShortState:
     reset_requires_full_break: bool = False
     # 是否已经看到至少一根 OHLC 全部在 MA 上方的 K 线；只有 armed 后才允许等待“跌破 MA”。
     break_below_armed: bool = False
+    # 信号入场价；进入 SIGNAL_ACTIVE 后才有值。
     signal_entry: float | None = None
+    # 信号观察窗口内的目标止盈价，用来判断这个形态是否先兑现。
     signal_profit_target: float | None = None
+    # 信号观察窗口内的反向失败价，用来标记信号是否先被破坏。
     signal_adverse_target: float | None = None
+    # 信号触发后已经观察了多少根 bar。
     signal_bars: int = 0
+    # 信号触发时间，用于日志、trace 和回测展示。
     signal_time: str = ""
 
 
 @dataclass
 class WeakPullbackShortState:
-    """State for the automated weak MA20 pullback short strategy."""
+    """MA20 弱反弹做空策略在单个实例+品种+模式下的状态。
 
-    state: str = WAIT_BREAK_BELOW_MA20
+    这套状态来自前面的策略提示词：先排除“强上涨里的正常回撤”，再寻找结构破坏后的弱反弹。
+    因此它比基线策略多保存 MA60/MA120、结构低点、强弱评分和 reaction_low 等上下文。
+    """
+
+    # 当前状态机状态；取值在 WAIT_BREAK_BELOW_MA20/TREND_STRUCTURE_FILTER/
+    # WAIT_PULLBACK_TOUCH_MA20/WAIT_BREAK_REACTION_LOW/SIGNAL_ACTIVE/DONE 中切换。
+    state: WeakPullbackStateName = WAIT_BREAK_BELOW_MA20
+    # OHLC 序列用于计算 MA20/MA60/MA120、ATR 和结构低点；会被 _trim 控制长度。
     opens: list[float] = field(default_factory=list)
     highs: list[float] = field(default_factory=list)
     lows: list[float] = field(default_factory=list)
     closes: list[float] = field(default_factory=list)
+    # 最近处理过的 bar 时间戳，用于过滤重复或乱序事件。
     last_bar_ts: float | None = None
+    # 上一根 bar 的 close 和 MA20，用来判断“从上向下跌破 MA20”。
     prev_close: float | None = None
     prev_ma20: float | None = None
+    # 第一次跌破 MA20 的时间和样本索引；bars_since_break 统计结构确认等待时间。
     break_time: str = ""
     break_index: int = -1
     bars_since_break: int = 0
+    # reaction_low 是跌破后的反抽低点；弱反弹策略要求后续再次跌破它才入场。
     reaction_low: float | None = None
+    # 触碰 MA20 的反抽 K 线信息，用于 trace 解释“弱反弹”发生在哪里。
     touch_open: float | None = None
     touch_high: float | None = None
     touch_ma20: float | None = None
     touch_time: str = ""
+    # 触碰 MA20 后等待跌破 reaction_low 的 bar 数。
     trigger_wait_bars: int = 0
-    regime: str = ""
+    # regime 是结构过滤后的市场分类，当前可能是 BEARISH_REVERSAL_CANDIDATE、
+    # WEAK_BEARISH_CANDIDATE 或 UNCLEAR。
+    regime: WeakRegime = ""
+    # 两个评分不是为了预测涨跌，而是把提示词里的“强上涨停顿”和“弱势失败”拆成可审计指标。
     bullish_pause_score: float = 0.0
     bearish_failure_score: float = 0.0
+    # 信号触发后用于观察胜负的入场价、止盈价、失败价和观察计数。
     signal_entry: float | None = None
     signal_profit_target: float | None = None
     signal_adverse_target: float | None = None
@@ -652,7 +747,7 @@ class MA20PullbackShortStrategy(Strategy):
     - max_wait_bars：触碰 K 出现后最多等待多少根 bar，默认 6，最小 1。
     """
 
-    definition = {
+    definition: StrategyDefinition = {
         "strategy_id": "ma20.pullback_short",
         "display_name": "MA20 Pullback Short",
         "entry_script": "python/strategy_service.py",
@@ -667,23 +762,23 @@ class MA20PullbackShortStrategy(Strategy):
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
-    def __init__(self, definition=None):
+    def __init__(self, definition: StrategyDefinition | None = None) -> None:
         """初始化单个运行实例的状态容器与锁。"""
         if definition is not None:
             self.definition = definition
         # states 保存当前运行实例内每个 (mode, instance_id, symbol) 对应的 PullbackShortState。
-        self.states = {}
+        self.states: dict[StateKey, PullbackShortState] = {}
         # gRPC server 使用线程池处理请求，因此运行状态读写需要加锁。
-        self._lock = RLock()
+        self._lock: RLock = RLock()
 
-    def required_warmup_bars(self, instance):
+    def required_warmup_bars(self, instance: JSONObject) -> int:
         params = _strategy_params_for_instance(self.definition, instance)
         if _int(params.get("warmup_target"), 0) > 0:
             return _int(params.get("warmup_target"), 0)
         ma_period = max(20, _int(params.get("ma_period"), 20))
         return max(40, ma_period + 20)
 
-    def start_instance(self, instance):
+    def start_instance(self, instance: JSONObject) -> None:
         """启动一个策略实例，并为其订阅品种初始化状态。
 
         instance 预期包含：
@@ -707,7 +802,7 @@ class MA20PullbackShortStrategy(Strategy):
         applied_counts = self._apply_warmup_bars(instance, params.get("warmup_bars") or [], mode)
         self.validate_warmup(instance, applied_counts)
 
-    def stop_instance(self, instance_id):
+    def stop_instance(self, instance_id: str) -> None:
         """停止策略实例，并清理该实例下所有 symbol/mode 的状态。"""
         with self._lock:
             # 复制 keys 后再删除，避免遍历字典时修改字典。
@@ -715,7 +810,7 @@ class MA20PullbackShortStrategy(Strategy):
                 if len(key) >= 2 and key[1] == instance_id:
                     del self.states[key]
 
-    def _state_for(self, request):
+    def _state_for(self, request: RequestDict) -> PullbackShortState:
         """根据请求定位策略状态；不存在说明实例未显式启动或 symbol 不匹配。"""
         key = (_mode_key(request), _instance_id(request), request.get("symbol", ""))
         if key not in self.states:
@@ -725,7 +820,7 @@ class MA20PullbackShortStrategy(Strategy):
             )
         return self.states[key]
 
-    def _apply_warmup_bars(self, instance, bars, mode):
+    def _apply_warmup_bars(self, instance: JSONObject, bars: Any, mode: str) -> dict[str, int]:
         """用 warmup_bars 预热策略状态。
 
         warmup_bars 通常是策略启动前的一段历史 K 线，用于：
@@ -734,7 +829,7 @@ class MA20PullbackShortStrategy(Strategy):
 
         warmup=True 当前只作为语义标识传入 _on_bar_locked，原逻辑中未单独分支。
         """
-        counts = {}
+        counts: dict[str, int] = {}
         if not isinstance(bars, list) or not bars:
             return counts
         symbol = ""
@@ -761,7 +856,7 @@ class MA20PullbackShortStrategy(Strategy):
                 logger.warning("warmup bar ignored: %s", exc)
         return counts
 
-    def validate_warmup(self, instance, applied_counts=None):
+    def validate_warmup(self, instance: JSONObject, applied_counts: dict[str, int] | None = None) -> None:
         target = self.required_warmup_bars(instance)
         if target <= 0:
             return
@@ -771,7 +866,7 @@ class MA20PullbackShortStrategy(Strategy):
         applied_counts = applied_counts or {}
         params = _strategy_params_for_instance(self.definition, instance)
         ma_period = max(2, _int(params.get("ma_period"), 20))
-        missing = []
+        missing: list[str] = []
         with self._lock:
             for symbol in symbols:
                 key = (mode, instance_id, str(symbol))
@@ -787,7 +882,7 @@ class MA20PullbackShortStrategy(Strategy):
                 f"mode={mode} ma_period={ma_period} warmup_target={target} symbols={','.join(missing)}"
             )
 
-    def _settings(self, request):
+    def _settings(self, request: RequestDict) -> tuple[int, int]:
         """读取并规范化策略参数。"""
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
@@ -797,7 +892,7 @@ class MA20PullbackShortStrategy(Strategy):
         max_wait_bars = max(1, _int(params.get("max_wait_bars"), 6))
         return ma_period, max_wait_bars
 
-    def _signal_settings(self, request):
+    def _signal_settings(self, request: RequestDict) -> StrategySettings:
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return {
@@ -806,13 +901,13 @@ class MA20PullbackShortStrategy(Strategy):
             "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
         }
 
-    def _ma(self, closes, period):
+    def _ma(self, closes: list[float], period: int) -> float | None:
         """计算最近 period 个收盘价的简单移动平均线 SMA。"""
         if len(closes) < period:
             return None
         return sum(closes[-period:]) / period
 
-    def _reset_after_failure(self, state):
+    def _reset_after_failure(self, state: PullbackShortState) -> None:
         """形态失败后的状态重置。
 
         重置内容：
@@ -831,7 +926,7 @@ class MA20PullbackShortStrategy(Strategy):
         state.break_below_armed = False
         self._clear_signal(state)
 
-    def _reset_after_signal_result(self, state):
+    def _reset_after_signal_result(self, state: PullbackShortState) -> None:
         """信号成功/失败/超时结束后，回到等待下一次 MA 跌破。"""
         state.state = WAIT_BREAK_BELOW_MA20
         state.touch_open = None
@@ -843,14 +938,22 @@ class MA20PullbackShortStrategy(Strategy):
         state.break_below_armed = False
         self._clear_signal(state)
 
-    def _clear_signal(self, state):
+    def _clear_signal(self, state: PullbackShortState) -> None:
         state.signal_entry = None
         state.signal_profit_target = None
         state.signal_adverse_target = None
         state.signal_bars = 0
         state.signal_time = ""
 
-    def _start_short_signal(self, state, entry_price, high, low, event_time, request):
+    def _start_short_signal(
+        self,
+        state: PullbackShortState,
+        entry_price: float,
+        high: float,
+        low: float,
+        event_time: str,
+        request: RequestDict,
+    ) -> float:
         settings = self._signal_settings(request)
         atr = max(0.0001, high - low)
         state.state = SIGNAL_ACTIVE
@@ -861,7 +964,7 @@ class MA20PullbackShortStrategy(Strategy):
         state.signal_time = event_time
         return atr
 
-    def _signal_metrics(self, state, ma20, ma_period):
+    def _signal_metrics(self, state: PullbackShortState, ma20: float | None, ma_period: int) -> MetricsDict:
         metrics = self._base_metrics(state, ma20, ma_period)
         metrics.update({
             "signal_entry": state.signal_entry,
@@ -872,7 +975,16 @@ class MA20PullbackShortStrategy(Strategy):
         })
         return metrics
 
-    def _evaluate_active_signal(self, request, state, high, low, close, ma20, ma_period):
+    def _evaluate_active_signal(
+        self,
+        request: RequestDict,
+        state: PullbackShortState,
+        high: float,
+        low: float,
+        close: float,
+        ma20: float,
+        ma_period: int,
+    ) -> ResponseDict:
         settings = self._signal_settings(request)
         state.signal_bars += 1
         hit_adverse = state.signal_adverse_target is not None and high >= state.signal_adverse_target
@@ -904,11 +1016,11 @@ class MA20PullbackShortStrategy(Strategy):
         trace = _trace(request, "bar", SIGNAL_ACTIVE, "信号观察中", 5, "waiting", "waiting for signal result", checks, metrics)
         return _no_signal(request, "waiting for signal result", metrics, trace)
 
-    def _ma_label(self, period):
+    def _ma_label(self, period: int) -> str:
         """根据均线周期生成展示标签，例如 period=20 时为 MA20。"""
         return f"MA{period}"
 
-    def _trim_closes(self, state, ma_period):
+    def _trim_closes(self, state: PullbackShortState, ma_period: int) -> None:
         """裁剪 closes 序列，避免历史收盘价无限增长。
 
         需要保留 ma_period + 1 个值，是因为：
@@ -919,7 +1031,12 @@ class MA20PullbackShortStrategy(Strategy):
         if len(state.closes) > keep:
             state.closes = state.closes[-keep:]
 
-    def _base_metrics(self, state, ma20=None, ma_period=20):
+    def _base_metrics(
+        self,
+        state: PullbackShortState,
+        ma20: float | None = None,
+        ma_period: int = 20,
+    ) -> MetricsDict:
         """生成 MA20 策略通用诊断指标。"""
         return {
             "signal": "",
@@ -937,7 +1054,19 @@ class MA20PullbackShortStrategy(Strategy):
             "step_total": 5,
         }
 
-    def _bar_trace(self, request, state, step_key, step_label, step_index, status, reason, checks, ma20=None, ma_period=20):
+    def _bar_trace(
+        self,
+        request: RequestDict,
+        state: PullbackShortState,
+        step_key: str,
+        step_label: str,
+        step_index: int,
+        status: str,
+        reason: str,
+        checks: list[CheckDict],
+        ma20: float | None = None,
+        ma_period: int = 20,
+    ) -> TraceDict:
         """构造 bar 事件的 trace。"""
         return _trace(
             request,
@@ -951,7 +1080,15 @@ class MA20PullbackShortStrategy(Strategy):
             self._base_metrics(state, ma20, ma_period),
         )
 
-    def _tick_trace(self, request, state, status, reason, checks, last_price):
+    def _tick_trace(
+        self,
+        request: RequestDict,
+        state: PullbackShortState,
+        status: str,
+        reason: str,
+        checks: list[CheckDict],
+        last_price: float,
+    ) -> TraceDict:
         """构造关键 tick 事件的 trace。
 
         关键 tick 指：策略已经找到触碰 K，正在等待最新价跌破触碰 K 开盘价。
@@ -971,12 +1108,12 @@ class MA20PullbackShortStrategy(Strategy):
             metrics,
         )
 
-    def on_bar(self, request):
+    def on_bar(self, request: RequestDict) -> ResponseDict:
         """线程安全地处理 K 线事件。"""
         with self._lock:
             return self._on_bar_locked(request, warmup=False)
 
-    def _on_bar_locked(self, request, warmup=False):
+    def _on_bar_locked(self, request: RequestDict, warmup: bool = False) -> ResponseDict:
         """处理 K 线事件的核心状态机逻辑。
 
         调用前应已持有 self._lock。
@@ -1047,7 +1184,7 @@ class MA20PullbackShortStrategy(Strategy):
         step_index = 1
         status = "waiting"
         reason = "no trade signal"
-        checks = []
+        checks: list[CheckDict] = []
         full_above = open_price > ma20 and high > ma20 and low > ma20 and close > ma20
 
         if state.state == WAIT_BREAK_BELOW_MA20:
@@ -1205,7 +1342,7 @@ class MA20PullbackShortStrategy(Strategy):
         trace = self._bar_trace(request, state, step_key, step_label, step_index, status, reason, checks, ma20, ma_period)
         return _no_signal(request, reason, self._base_metrics(state, ma20, ma_period), trace)
 
-    def on_tick(self, request):
+    def on_tick(self, request: RequestDict) -> ResponseDict:
         """处理 tick 事件。
 
         MA20 策略只有在状态机进入 WAIT_BREAK_TOUCH_OPEN 后才关心 tick。
@@ -1270,7 +1407,7 @@ class MA20PullbackShortStrategy(Strategy):
                 "trace": trace,
             }
 
-    def on_replay_bar(self, request):
+    def on_replay_bar(self, request: RequestDict) -> ResponseDict:
         """回放 K 线事件复用实时 K 线逻辑。"""
         return self.on_bar(request)
 
@@ -1278,7 +1415,7 @@ class MA20PullbackShortStrategy(Strategy):
 class MA20WeakBaselineStrategy(MA20PullbackShortStrategy):
     """The baseline MA20 break-touch-break strategy as a selectable variant."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         definition = dict(MA20PullbackShortStrategy.definition)
         definition.update({
             "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
@@ -1297,14 +1434,18 @@ class MA20WeakBaselineStrategy(MA20PullbackShortStrategy):
 
 
 class MA20WeakPullbackShortStrategy(Strategy):
-    """Automated MA20 weak pullback short strategy.
+    """MA20 弱反弹做空策略。
 
-    The strategy rejects strong uptrend pullbacks first, then requires structure
-    break before waiting for a weak MA20 touch and a break of the reaction low.
-    It is bar-driven so historical replay and backtests can reproduce entries.
+    这版策略对应“弱反弹做空”的提示词目标：不是看到价格碰 MA20 就空，而是先确认上涨结构被破坏，
+    再把反抽 MA20 当成弱反弹，最后用跌破 reaction_low 作为入场确认。
+
+    为什么只用 bar 驱动：
+    - 历史回放和回测只有 bar 时也能完全复现入场，不依赖实时 tick 采样；
+    - 反抽做空的核心判断是结构、均线和反应低点，bar 级别更稳定；
+    - tick 在这里容易把 MA20 附近的噪声放大成不可复现的入场。
     """
 
-    definition = {
+    definition: StrategyDefinition = {
         "strategy_id": MA20_WEAK_STRATEGY_ID,
         "display_name": "MA20 Weak Pullback Short",
         "entry_script": "python/strategy_service.py",
@@ -1327,17 +1468,17 @@ class MA20WeakPullbackShortStrategy(Strategy):
         "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
     }
 
-    def __init__(self, definition=None, use_score_filter=None):
+    def __init__(self, definition: StrategyDefinition | None = None, use_score_filter: bool | None = None) -> None:
         if definition is not None:
             self.definition = definition
         if use_score_filter is not None:
             default_params = dict(self.definition.get("default_params") or {})
             default_params["use_score_filter"] = bool(use_score_filter)
             self.definition = {**self.definition, "default_params": default_params}
-        self.states = {}
-        self._lock = RLock()
+        self.states: dict[StateKey, WeakPullbackShortState] = {}
+        self._lock: RLock = RLock()
 
-    def required_warmup_bars(self, instance):
+    def required_warmup_bars(self, instance: JSONObject) -> int:
         params = _strategy_params_for_instance(self.definition, instance)
         if _int(params.get("warmup_target"), 0) > 0:
             return _int(params.get("warmup_target"), 0)
@@ -1345,7 +1486,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
         slope = max(5, _int(params.get("slope_lookback_bars"), 5))
         return max(140, ma120 + slope + 20)
 
-    def start_instance(self, instance):
+    def start_instance(self, instance: JSONObject) -> None:
         logger.info("ma20 weak pullback start_instance args=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
         instance_id = instance.get("instance_id", "")
         symbols = instance.get("symbols") or [""]
@@ -1356,13 +1497,13 @@ class MA20WeakPullbackShortStrategy(Strategy):
         applied_counts = self._apply_warmup_bars(instance, (instance.get("params") or {}).get("warmup_bars") or [], mode)
         self.validate_warmup(instance, applied_counts)
 
-    def stop_instance(self, instance_id):
+    def stop_instance(self, instance_id: str) -> None:
         with self._lock:
             for key in list(self.states):
                 if len(key) >= 2 and key[1] == instance_id:
                     del self.states[key]
 
-    def _state_for(self, request):
+    def _state_for(self, request: RequestDict) -> WeakPullbackShortState:
         key = (_mode_key(request), _instance_id(request), request.get("symbol", ""))
         if key not in self.states:
             raise ValueError(
@@ -1371,7 +1512,12 @@ class MA20WeakPullbackShortStrategy(Strategy):
             )
         return self.states[key]
 
-    def _settings(self, request):
+    def _settings(self, request: RequestDict) -> StrategySettings:
+        """读取弱反弹策略参数并做下限保护。
+
+        参数可能来自 Go 前端配置、实例启动参数或默认定义。这里统一转成 int/bool，
+        是为了让后续状态机只面对已规范化的值，避免每个判断分支都重复处理空值和字符串。
+        """
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return {
@@ -1387,10 +1533,10 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "use_score_filter": bool(params.get("use_score_filter", True)),
         }
 
-    def _apply_warmup_bars(self, instance, bars, mode):
+    def _apply_warmup_bars(self, instance: JSONObject, bars: Any, mode: str) -> dict[str, int]:
         instance_id = instance.get("instance_id", "")
         params = instance.get("params") or {}
-        counts = {}
+        counts: dict[str, int] = {}
         for idx, bar in enumerate(bars):
             try:
                 symbol = str(bar.get("symbol") or (instance.get("symbols") or [""])[0])
@@ -1412,7 +1558,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
                 logger.warning("weak pullback warmup bar ignored: %s", exc)
         return counts
 
-    def validate_warmup(self, instance, applied_counts=None):
+    def validate_warmup(self, instance: JSONObject, applied_counts: dict[str, int] | None = None) -> None:
         target = self.required_warmup_bars(instance)
         if target <= 0:
             return
@@ -1429,7 +1575,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "swing": max(2, _int(params.get("swing_lookback_bars"), 20)),
             "slope": max(1, _int(params.get("slope_lookback_bars"), 5)),
         }
-        missing = []
+        missing: list[str] = []
         with self._lock:
             for symbol in symbols:
                 key = (mode, instance_id, str(symbol))
@@ -1446,22 +1592,29 @@ class MA20WeakPullbackShortStrategy(Strategy):
                 f"mode={mode} warmup_target={target} symbols={','.join(missing)}"
             )
 
-    def _sma(self, values, period):
+    def _sma(self, values: list[float], period: int) -> float | None:
+        """简单移动平均线；样本不足时返回 None，让调用方明确进入等待状态。"""
         if len(values) < period:
             return None
         return sum(values[-period:]) / period
 
-    def _slope(self, values, period, lookback):
+    def _slope(self, values: list[float], period: int, lookback: int) -> float:
+        """计算均线斜率的近似值，用来区分“强上涨回撤”和“转弱候选”。
+
+        这里不做复杂线性回归，是因为提示词要求的是可解释的结构过滤：
+        当前 MA 与 lookback 前 MA 的差值已经足够说明均线方向。
+        """
         if len(values) < period + lookback:
             return 0.0
         now = sum(values[-period:]) / period
         prev = sum(values[-period - lookback:-lookback]) / period
         return (now - prev) / lookback
 
-    def _atr(self, state, period):
+    def _atr(self, state: WeakPullbackShortState, period: int) -> float | None:
+        """计算平均真实波幅 ATR，作为信号观察期止盈/失败阈值的尺度。"""
         if len(state.closes) < period + 1:
             return None
-        trs = []
+        trs: list[float] = []
         start = len(state.closes) - period
         for idx in range(start, len(state.closes)):
             prev_close = state.closes[idx - 1] if idx > 0 else state.closes[idx]
@@ -1472,13 +1625,15 @@ class MA20WeakPullbackShortStrategy(Strategy):
             ))
         return sum(trs) / len(trs)
 
-    def _last_swing_low(self, state, lookback):
+    def _last_swing_low(self, state: WeakPullbackShortState, lookback: int) -> float | None:
+        """取当前 bar 之前的近期低点，作为“上涨结构是否被破坏”的参照。"""
         if len(state.lows) < 2:
             return None
         prior = state.lows[:-1]
         return min(prior[-lookback:]) if prior else None
 
-    def _indicators(self, state, settings):
+    def _indicators(self, state: WeakPullbackShortState, settings: StrategySettings) -> MetricsDict:
+        """集中计算指标，避免状态机各分支重复读取不同版本的 MA/ATR。"""
         ma20 = self._sma(state.closes, settings["ma20"])
         ma60 = self._sma(state.closes, settings["ma60"])
         ma120 = self._sma(state.closes, settings["ma120"])
@@ -1493,14 +1648,15 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "last_swing_low": self._last_swing_low(state, settings["swing"]),
         }
 
-    def _trim(self, state, settings):
+    def _trim(self, state: WeakPullbackShortState, settings: StrategySettings) -> None:
+        """裁剪 OHLC 序列，保留足够指标窗口但避免服务长期运行时内存无限增长。"""
         keep = max(settings["ma120"] + settings["slope"] + 2, settings["swing"] + 2, settings["atr"] + 2)
         for name in ("opens", "highs", "lows", "closes"):
             values = getattr(state, name)
             if len(values) > keep:
                 setattr(state, name, values[-keep:])
 
-    def _base_metrics(self, state, ind=None):
+    def _base_metrics(self, state: WeakPullbackShortState, ind: MetricsDict | None = None) -> MetricsDict:
         ind = ind or {}
         return {
             "signal": "",
@@ -1531,10 +1687,27 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "step_total": 6,
         }
 
-    def _bar_trace(self, request, state, key, label, index, status, reason, checks, ind=None, preview=None):
+    def _bar_trace(
+        self,
+        request: RequestDict,
+        state: WeakPullbackShortState,
+        key: str,
+        label: str,
+        index: int,
+        status: str,
+        reason: str,
+        checks: list[CheckDict],
+        ind: MetricsDict | None = None,
+        preview: dict[str, Any] | None = None,
+    ) -> TraceDict:
         return _trace(request, "bar", key, label, index, status, reason, checks, self._base_metrics(state, ind), preview)
 
-    def _reset(self, state):
+    def _reset(self, state: WeakPullbackShortState) -> None:
+        """重置形态状态，但保留 OHLC 历史样本。
+
+        这样做是为了让下一轮形态马上能继续使用已经计算出的 MA/ATR/结构低点；
+        如果把样本也清空，策略会在每次失败后重新等待很长的 warmup。
+        """
         state.state = WAIT_BREAK_BELOW_MA20
         state.break_time = ""
         state.break_index = -1
@@ -1550,14 +1723,14 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.bearish_failure_score = 0.0
         self._clear_signal(state)
 
-    def _clear_signal(self, state):
+    def _clear_signal(self, state: WeakPullbackShortState) -> None:
         state.signal_entry = None
         state.signal_profit_target = None
         state.signal_adverse_target = None
         state.signal_bars = 0
         state.signal_time = ""
 
-    def _signal_settings(self, request):
+    def _signal_settings(self, request: RequestDict) -> StrategySettings:
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return {
@@ -1566,7 +1739,14 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
         }
 
-    def _start_short_signal(self, state, entry_price, atr, event_time, request):
+    def _start_short_signal(
+        self,
+        state: WeakPullbackShortState,
+        entry_price: float,
+        atr: float | None,
+        event_time: str,
+        request: RequestDict,
+    ) -> float:
         settings = self._signal_settings(request)
         atr = max(0.0001, atr or 0.0)
         state.state = SIGNAL_ACTIVE
@@ -1577,7 +1757,14 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.signal_time = event_time
         return atr
 
-    def _evaluate_active_signal(self, request, state, high, low, ind):
+    def _evaluate_active_signal(
+        self,
+        request: RequestDict,
+        state: WeakPullbackShortState,
+        high: float,
+        low: float,
+        ind: MetricsDict,
+    ) -> ResponseDict:
         settings = self._signal_settings(request)
         state.signal_bars += 1
         hit_adverse = state.signal_adverse_target is not None and high >= state.signal_adverse_target
@@ -1608,7 +1795,12 @@ class MA20WeakPullbackShortStrategy(Strategy):
         trace = self._bar_trace(request, state, SIGNAL_ACTIVE, "信号观察中", 6, "waiting", "waiting for signal result", checks, ind)
         return _no_signal(request, "waiting for signal result", self._base_metrics(state, ind), trace)
 
-    def _strong_uptrend(self, close, ind):
+    def _strong_uptrend(self, close: float, ind: MetricsDict) -> bool:
+        """判断是否仍是强上涨回撤。
+
+        提示词里要求避免把强趋势中的正常回踩误判成做空机会，所以这里要求
+        MA20 > MA60 > MA120、长中期均线仍向上、并且收盘仍在 MA60 上方。
+        """
         ma20, ma60, ma120 = ind.get("ma20"), ind.get("ma60"), ind.get("ma120")
         return (
             ma20 is not None and ma60 is not None and ma120 is not None
@@ -1618,11 +1810,13 @@ class MA20WeakPullbackShortStrategy(Strategy):
             and close > ma60
         )
 
-    def _structure_broken(self, close, ind):
+    def _structure_broken(self, close: float, ind: MetricsDict) -> bool:
+        """用收盘跌破近期 swing low 表示上涨结构被破坏。"""
         last_swing_low = ind.get("last_swing_low")
         return last_swing_low is not None and close < last_swing_low
 
-    def _classify_regime(self, close, ind):
+    def _classify_regime(self, close: float, ind: MetricsDict) -> WeakRegime:
+        """把结构破坏后的市场状态压缩为少数可审计标签。"""
         if self._structure_broken(close, ind) and ind.get("ma20_slope", 0) < 0:
             return "BEARISH_REVERSAL_CANDIDATE"
         ma60 = ind.get("ma60")
@@ -1630,7 +1824,21 @@ class MA20WeakPullbackShortStrategy(Strategy):
             return "WEAK_BEARISH_CANDIDATE"
         return "UNCLEAR"
 
-    def _scores(self, state, open_price, low, close, ind):
+    def _scores(
+        self,
+        state: WeakPullbackShortState,
+        open_price: float,
+        low: float,
+        close: float,
+        ind: MetricsDict,
+    ) -> tuple[float, float]:
+        """计算“多头停顿分”和“空头失败分”。
+
+        这不是机器学习评分，而是把提示词里的硬条件拆成可解释的加分项：
+        strong uptrend、快速收回 MA20、结构未破坏会增加多头停顿分；
+        结构破坏、均线转弱、跌破 reaction_low 会增加空头失败分。
+        score_filter 变体要求 bear >= bull，hard_filter 变体则跳过这道评分闸门。
+        """
         bull = 0.0
         bear = 0.0
         if self._strong_uptrend(close, ind):
@@ -1668,7 +1876,21 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.bearish_failure_score = bear
         return bull, bear
 
-    def _handle_structure_filter(self, request, state, open_price, low, close, ind, settings):
+    def _handle_structure_filter(
+        self,
+        request: RequestDict,
+        state: WeakPullbackShortState,
+        open_price: float,
+        low: float,
+        close: float,
+        ind: MetricsDict,
+        settings: StrategySettings,
+    ) -> ResponseDict:
+        """执行趋势/结构过滤。
+
+        这个阶段是弱反弹策略和基线策略最大的区别：基线只看跌破-反抽-再跌破，
+        弱反弹策略先确认“上涨结构真的坏了”，否则 MA20 附近的反抽大概率只是强趋势中的停顿。
+        """
         strong_up = self._strong_uptrend(close, ind)
         structure = self._structure_broken(close, ind)
         bull, bear = self._scores(state, open_price, low, close, ind)
@@ -1708,11 +1930,11 @@ class MA20WeakPullbackShortStrategy(Strategy):
         trace = self._bar_trace(request, state, TREND_STRUCTURE_FILTER, "趋势/结构过滤通过", 2, "passed", regime, checks, ind)
         return _no_signal(request, regime, self._base_metrics(state, ind), trace)
 
-    def on_bar(self, request):
+    def on_bar(self, request: RequestDict) -> ResponseDict:
         with self._lock:
             return self._on_bar_locked(request)
 
-    def _on_bar_locked(self, request):
+    def _on_bar_locked(self, request: RequestDict) -> ResponseDict:
         bar = request.get("bar") or {}
         if not bar:
             return _no_signal(request, "no bar")
@@ -1756,7 +1978,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
             trace = self._bar_trace(request, state, "WAIT_MA_READY", "等待 MA20/MA60/MA120 数据足够", 1, "waiting", "waiting for enough bars", checks, ind)
             return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ind), trace)
 
-        def finish(out):
+        def finish(out: ResponseDict) -> ResponseDict:
             state.prev_close = close
             state.prev_ma20 = ma20
             return out
@@ -1886,18 +2108,18 @@ class MA20WeakPullbackShortStrategy(Strategy):
 
         return finish(_no_signal(request, "unknown state", self._base_metrics(state, ind)))
 
-    def on_tick(self, request):
+    def on_tick(self, request: RequestDict) -> ResponseDict:
         state = self._state_for(request)
         return _no_signal(request, "bar driven strategy ignores ticks", self._base_metrics(state))
 
-    def on_replay_bar(self, request):
+    def on_replay_bar(self, request: RequestDict) -> ResponseDict:
         return self.on_bar(request)
 
 
 class MA20WeakPullbackVariantStrategy(MA20WeakPullbackShortStrategy):
     """Hard/score filtered weak pullback variants exposed as separate strategies."""
 
-    def __init__(self, strategy_id, display_name, algorithm, use_score_filter):
+    def __init__(self, strategy_id: str, display_name: str, algorithm: str, use_score_filter: bool) -> None:
         definition = dict(MA20WeakPullbackShortStrategy.definition)
         default_params = dict(definition.get("default_params") or {})
         default_params.update({
@@ -1913,12 +2135,12 @@ class MA20WeakPullbackVariantStrategy(MA20WeakPullbackShortStrategy):
         super().__init__(definition=definition, use_score_filter=use_score_filter)
 
 
-def _clone_definition(definition):
+def _clone_definition(definition: StrategyDefinition | None) -> StrategyDefinition:
     """复制策略定义，避免运行实例修改 default_params 时污染注册表。"""
     return copy.deepcopy(definition or {})
 
 
-def _clone_strategy_template(strategy):
+def _clone_strategy_template(strategy: Strategy) -> Strategy:
     """基于注册模板创建一个新的运行策略对象。"""
     definition = _clone_definition(getattr(strategy, "definition", {}))
     if isinstance(strategy, MA20WeakPullbackShortStrategy):
@@ -1935,29 +2157,29 @@ class StrategyRegistryEntry:
     """工厂注册表中的策略定义项。"""
 
     strategy_id: str
-    definition: dict
+    definition: StrategyDefinition
     template: Strategy
 
-    def create_runtime(self):
+    def create_runtime(self) -> Strategy:
         return _clone_strategy_template(self.template)
 
-    def required_warmup_bars(self, instance):
+    def required_warmup_bars(self, instance: JSONObject) -> int:
         return max(0, _int(self.template.required_warmup_bars(instance), 0))
 
 
 class StrategyRuntimeInstance:
     """一次 StartInstance 对应的运行实例。"""
 
-    def __init__(self, entry, instance):
-        self.entry = entry
-        self.instance = copy.deepcopy(instance or {})
-        self.instance_id = str(self.instance.get("instance_id") or "")
-        self.mode = _instance_mode(self.instance)
-        self.symbols = _normalize_symbols(self.instance.get("symbols") or [])
-        self.strategy = entry.create_runtime()
+    def __init__(self, entry: StrategyRegistryEntry, instance: JSONObject) -> None:
+        self.entry: StrategyRegistryEntry = entry
+        self.instance: JSONObject = copy.deepcopy(instance or {})
+        self.instance_id: str = str(self.instance.get("instance_id") or "")
+        self.mode: str = _instance_mode(self.instance)
+        self.symbols: list[str] = _normalize_symbols(self.instance.get("symbols") or [])
+        self.strategy: Strategy = entry.create_runtime()
         self.strategy.start_instance(self.instance)
 
-    def _assert_symbol_allowed(self, request):
+    def _assert_symbol_allowed(self, request: RequestDict) -> None:
         symbol = str(request.get("symbol") or "")
         if self.symbols and symbol and symbol not in self.symbols:
             raise ValueError(
@@ -1965,15 +2187,15 @@ class StrategyRuntimeInstance:
                 f"instance_id={self.instance_id} mode={self.mode} symbol={symbol} symbols={','.join(self.symbols)}"
             )
 
-    def on_tick(self, request):
+    def on_tick(self, request: RequestDict) -> ResponseDict:
         self._assert_symbol_allowed(request)
         return self.strategy.on_tick(request)
 
-    def on_bar(self, request):
+    def on_bar(self, request: RequestDict) -> ResponseDict:
         self._assert_symbol_allowed(request)
         return self.strategy.on_bar(request)
 
-    def on_replay_bar(self, request):
+    def on_replay_bar(self, request: RequestDict) -> ResponseDict:
         self._assert_symbol_allowed(request)
         return self.strategy.on_replay_bar(request)
 
@@ -1981,20 +2203,20 @@ class StrategyRuntimeInstance:
 class StrategyFactory:
     """单例策略工厂：注册策略定义，并维护已启动的运行实例。"""
 
-    def __init__(self):
-        self._strategies = {}
-        self._instances = {}
-        self._lock = RLock()
+    def __init__(self) -> None:
+        self._strategies: dict[str, StrategyRegistryEntry] = {}
+        self._instances: dict[RuntimeKey, StrategyRuntimeInstance] = {}
+        self._lock: RLock = RLock()
 
     @property
-    def strategies(self):
+    def strategies(self) -> dict[str, StrategyRegistryEntry]:
         return self._strategies
 
     @property
-    def instances(self):
+    def instances(self) -> dict[RuntimeKey, StrategyRuntimeInstance]:
         return self._instances
 
-    def register(self, strategy):
+    def register(self, strategy: Strategy) -> None:
         strategy_id = str(strategy.definition.get("strategy_id") or "")
         if not strategy_id:
             raise ValueError("strategy definition missing strategy_id")
@@ -2005,7 +2227,7 @@ class StrategyFactory:
         )
 
     @classmethod
-    def builtin(cls):
+    def builtin(cls) -> "StrategyFactory":
         factory = cls()
         for strategy in (
             SampleMomentumStrategy(),
@@ -2018,16 +2240,16 @@ class StrategyFactory:
             factory.register(strategy)
         return factory
 
-    def list_definitions(self):
+    def list_definitions(self) -> list[StrategyDefinition]:
         return [_clone_definition(entry.definition) for entry in self._strategies.values()]
 
-    def load_strategy(self, strategy_id):
+    def load_strategy(self, strategy_id: Any) -> StrategyRegistryEntry:
         strategy_id = str(strategy_id or "")
         if strategy_id not in self._strategies:
             raise ValueError(f"unknown strategy_id: {strategy_id}")
         return self._strategies[strategy_id]
 
-    def start_requirements(self, instance):
+    def start_requirements(self, instance: JSONObject) -> dict[str, Any]:
         entry = self.load_strategy((instance or {}).get("strategy_id", ""))
         warmup_target = entry.required_warmup_bars(instance or {})
         return {
@@ -2035,19 +2257,19 @@ class StrategyFactory:
             "requires_anchor_time": warmup_target > 0,
         }
 
-    def _key_for_instance(self, instance):
+    def _key_for_instance(self, instance: JSONObject | None) -> RuntimeKey:
         instance_id = str((instance or {}).get("instance_id") or "")
         if not instance_id:
             raise ValueError("missing required field(s): instance.instance_id")
         return (_instance_mode(instance), instance_id)
 
-    def _key_for_request(self, request):
+    def _key_for_request(self, request: RequestDict) -> RuntimeKey:
         instance_id = _instance_id(request)
         if not instance_id:
             raise ValueError("missing required field(s): instance.instance_id")
         return (_mode_key(request), instance_id)
 
-    def start_instance(self, instance):
+    def start_instance(self, instance: JSONObject) -> StrategyRuntimeInstance:
         entry = self.load_strategy((instance or {}).get("strategy_id", ""))
         key = self._key_for_instance(instance)
         runtime = StrategyRuntimeInstance(entry, instance)
@@ -2055,7 +2277,7 @@ class StrategyFactory:
             self._instances[key] = runtime
         return runtime
 
-    def stop_instance(self, instance_id):
+    def stop_instance(self, instance_id: Any) -> int:
         instance_id = str(instance_id or "")
         removed = 0
         with self._lock:
@@ -2067,7 +2289,7 @@ class StrategyFactory:
                 removed += 1
         return removed
 
-    def runtime_for_request(self, request):
+    def runtime_for_request(self, request: RequestDict) -> StrategyRuntimeInstance:
         key = self._key_for_request(request)
         with self._lock:
             runtime = self._instances.get(key)
@@ -2079,7 +2301,7 @@ class StrategyFactory:
             )
         return runtime
 
-    def dispatch(self, method_name, request):
+    def dispatch(self, method_name: str, request: RequestDict) -> ResponseDict:
         runtime = self.runtime_for_request(request)
         return getattr(runtime, method_name)(request)
 
@@ -2094,24 +2316,24 @@ class StrategyService:
     add_unary 会把这些方法包装成 gRPC unary-unary handler。
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """初始化单例策略工厂并注册内置策略。"""
         _ensure_logging_configured()
-        self.factory = StrategyFactory.builtin()
-        self.strategies = self.factory.strategies
+        self.factory: StrategyFactory = StrategyFactory.builtin()
+        self.strategies: dict[str, StrategyRegistryEntry] = self.factory.strategies
         logger.info("strategy registry initialized2: %s", ",".join(sorted(self.strategies)))
 
-    def Ping(self, request, context):
+    def Ping(self, request: RequestDict, context: Any) -> ResponseDict:
         """健康检查接口。"""
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def ListStrategies(self, request, context):
+    def ListStrategies(self, request: RequestDict, context: Any) -> ResponseDict:
         """返回当前服务支持的策略元数据列表。"""
         return {
             "strategies": self.factory.list_definitions()
         }
 
-    def LoadStrategy(self, request, context):
+    def LoadStrategy(self, request: RequestDict, context: Any) -> ResponseDict:
         """加载/校验指定策略。
 
         当前实现中的策略均已在 __init__ 注册，因此这里只校验 strategy_id 是否存在。
@@ -2121,7 +2343,7 @@ class StrategyService:
         logger.info("strategy loaded: %s", strategy_id)
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def GetStartRequirements(self, request, context):
+    def GetStartRequirements(self, request: RequestDict, context: Any) -> ResponseDict:
         """返回启动该实例前需要满足的 warmup 条件。"""
         instance = request.get("instance") or {}
         out = self.factory.start_requirements(instance)
@@ -2136,7 +2358,7 @@ class StrategyService:
         )
         return out
 
-    def StartInstance(self, request, context):
+    def StartInstance(self, request: RequestDict, context: Any) -> ResponseDict:
         """启动策略实例，并把 instance 交给对应策略初始化。"""
         instance = request.get("instance") or {}
         logger.info("strategy StartInstance request=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
@@ -2151,7 +2373,7 @@ class StrategyService:
         )
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def StopInstance(self, request, context):
+    def StopInstance(self, request: RequestDict, context: Any) -> ResponseDict:
         """停止策略实例。
 
         工厂会清理该 instance_id 在所有 mode 下的运行对象。
@@ -2161,19 +2383,19 @@ class StrategyService:
         logger.info("strategy instance stopped: instance_id=%s runtime_removed=%s", instance_id, removed)
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}
 
-    def OnTick(self, request, context):
+    def OnTick(self, request: RequestDict, context: Any) -> ResponseDict:
         """接收 tick 事件并分发给请求中指定的策略。"""
         return self._run_and_log_phase(request, lambda req: self.factory.dispatch("on_tick", req))
 
-    def OnBar(self, request, context):
+    def OnBar(self, request: RequestDict, context: Any) -> ResponseDict:
         """接收实时 K 线事件并分发给请求中指定的策略。"""
         return self._run_and_log_phase(request, lambda req: self.factory.dispatch("on_bar", req))
 
-    def OnReplayBar(self, request, context):
+    def OnReplayBar(self, request: RequestDict, context: Any) -> ResponseDict:
         """接收回放 K 线事件并分发给请求中指定的策略。"""
         return self._run_and_log_phase(request, lambda req: self.factory.dispatch("on_replay_bar", req))
 
-    def RunBacktest(self, request, context):
+    def RunBacktest(self, request: RequestDict, context: Any) -> ResponseDict:
         """运行回测的占位接口。
 
         当前只返回固定 mock 结果，表示接口链路可用；
@@ -2186,7 +2408,7 @@ class StrategyService:
             "result": {"equity_curve": [], "trades": []},
         }
 
-    def GetBacktestResult(self, request, context):
+    def GetBacktestResult(self, request: RequestDict, context: Any) -> ResponseDict:
         """查询回测结果的占位接口。"""
         return {
             "run_id": request.get("run_id", ""),
@@ -2195,7 +2417,7 @@ class StrategyService:
             "result": {"equity_curve": [], "trades": []},
         }
 
-    def RunParameterSweep(self, request, context):
+    def RunParameterSweep(self, request: RequestDict, context: Any) -> ResponseDict:
         """参数扫描/优化的占位接口。
 
         request.grid 预期是一个参数名到候选值列表的 dict。
@@ -2207,16 +2429,16 @@ class StrategyService:
             "summary": {"candidates": sum(len(v) for v in request.get("grid", {}).values()), "note": "mock optimizer stub"},
         }
 
-    def _strategy_for_instance(self, instance):
+    def _strategy_for_instance(self, instance: JSONObject) -> StrategyRegistryEntry:
         """根据 instance.strategy_id 获取策略注册项。"""
         strategy_id = instance.get("strategy_id", "")
         return self.factory.load_strategy(strategy_id)
 
-    def _strategy_for_request(self, request):
+    def _strategy_for_request(self, request: RequestDict) -> StrategyRuntimeInstance:
         """从请求定位已启动运行实例。"""
         return self.factory.runtime_for_request(request)
 
-    def _run_and_log_phase(self, request, fn):
+    def _run_and_log_phase(self, request: RequestDict, fn: Callable[[RequestDict], ResponseDict]) -> ResponseDict:
         out = fn(request)
         _log_strategy_phase(request, out)
         return out
@@ -2225,7 +2447,12 @@ class StrategyService:
 # -----------------------------------------------------------------------------
 # gRPC handler 构建
 # -----------------------------------------------------------------------------
-def add_unary(handler, service_name, method_name, fn):
+def add_unary(
+    handler: StrategyService,
+    service_name: str,
+    method_name: str,
+    fn: Callable[[RequestDict, Any], ResponseDict],
+) -> Any:
     """把普通 Python 方法包装成 gRPC unary-unary handler。
 
     参数：
@@ -2248,7 +2475,7 @@ def add_unary(handler, service_name, method_name, fn):
         raise RuntimeError("grpcio is required to run the strategy service")
     full_name = f"{service_name}/{method_name}"
 
-    def invoke(request, context):
+    def invoke(request: bytes, context: Any) -> ResponseDict:
         """gRPC 实际调用的内部函数。"""
         try:
             return fn(_loads(request), context)
@@ -2272,7 +2499,7 @@ def add_unary(handler, service_name, method_name, fn):
     )
 
 
-def build_server():
+def build_server() -> Any:
     """创建并配置 gRPC server。"""
     if grpc is None:
         raise RuntimeError("grpcio is required to run the strategy service")
@@ -2327,7 +2554,7 @@ def build_server():
 # -----------------------------------------------------------------------------
 # 命令行入口
 # -----------------------------------------------------------------------------
-def main():
+def main() -> None:
     """命令行启动入口。
 
     示例：

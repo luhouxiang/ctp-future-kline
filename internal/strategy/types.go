@@ -27,6 +27,10 @@ type ManagerStatus struct {
 	Connected bool `json:"connected"`
 	// GRPCAddr 是当前 gRPC 服务地址。
 	GRPCAddr string `json:"grpc_addr"`
+	// PythonExecutable 是当前使用的 Python 解释器路径。
+	PythonExecutable string `json:"python_executable"`
+	// PythonCondaEnvPath 是当前注入的 conda 环境根目录。
+	PythonCondaEnvPath string `json:"python_conda_env_path"`
 	// PythonEntry 是策略进程入口脚本。
 	PythonEntry string `json:"python_entry"`
 	// LastError 是最近一次策略侧错误。

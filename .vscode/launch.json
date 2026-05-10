@@ -1,27 +1,27 @@
 {
   "version": "0.2.0",
   "configurations": [
-    {
-      "name": "Go运行",
-      "type": "node-terminal",
-      "request": "launch",
-      "cwd": "${workspaceFolder}",
-      "command": "$env:PATH = \"${workspaceFolder};$env:PATH\"; .\\ctp-future-kline-release.exe -config \"${workspaceFolder}\\config\\config.json\"",
-      "presentation": {
-        "order": 1
-      }
-    },
-    {
-      "name": "Go编译运行",
-      "type": "node-terminal",
-      "request": "launch",
-      "cwd": "${workspaceFolder}",
-      "preLaunchTask": "go: build release",
-      "command": "$env:PATH = \"${workspaceFolder};$env:PATH\"; .\\ctp-future-kline-release.exe -config \"${workspaceFolder}\\config\\config.json\"",
-      "presentation": {
-        "order": 2
-      }
-    },
+    // {
+    //   "name": "Go运行",
+    //   "type": "node-terminal",
+    //   "request": "launch",
+    //   "cwd": "${workspaceFolder}",
+    //   "command": "$env:PATH = \"${workspaceFolder};$env:PATH\"; .\\ctp-future-kline-release.exe -config \"${workspaceFolder}\\config\\config.json\"",
+    //   "presentation": {
+    //     "order": 1
+    //   }
+    // },
+    // {
+    //   "name": "Go编译运行",
+    //   "type": "node-terminal",
+    //   "request": "launch",
+    //   "cwd": "${workspaceFolder}",
+    //   "preLaunchTask": "go: build release",
+    //   "command": "$env:PATH = \"${workspaceFolder};$env:PATH\"; .\\ctp-future-kline-release.exe -config \"${workspaceFolder}\\config\\config.json\"",
+    //   "presentation": {
+    //     "order": 2
+    //   }
+    // },
     {
       "name": "Go调试",
       "type": "go",
@@ -105,18 +105,18 @@
         "INFO"
       ]
     }
-  ],
-  "compounds": [
-    {
-      "name": "一键启动",
-      "configurations": [
-        "Go编译运行",
-        "Vue编译运行"
-      ],
-      "stopAll": true,
-      "presentation": {
-        "order": 5
-      }
-    }
-  ]
+  ]//,
+  // "compounds": [
+  //   {
+  //     "name": "一键启动",
+  //     "configurations": [
+  //       "Go编译运行",
+  //       "Vue编译运行"
+  //     ],
+  //     "stopAll": true,
+  //     "presentation": {
+  //       "order": 5
+  //     }
+  //   }
+  // ]
 }

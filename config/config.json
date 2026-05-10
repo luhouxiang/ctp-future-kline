@@ -43,6 +43,8 @@
     "enabled": true,
     "grpc_addr": "127.0.0.1:50051",
     "auto_start": true,
+    "python_executable": "D:\\ProgramData\\anaconda3\\envs\\pydev3.14\\python.exe",
+    "python_conda_env_path": "D:\\ProgramData\\anaconda3\\envs\\pydev3.14",
     "python_entry": "python/strategy_service.py",
     "python_workdir": ".",
     "healthcheck_interval_ms": 2000,

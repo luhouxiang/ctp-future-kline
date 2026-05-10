@@ -129,6 +129,8 @@ go run . -config ./config/config.json -no-open
     "enabled": false,
     "grpc_addr": "127.0.0.1:50051",
     "auto_start": true,
+    "python_executable": "D:\\ProgramData\\anaconda3\\envs\\pydev3.14\\python.exe",
+    "python_conda_env_path": "D:\\ProgramData\\anaconda3\\envs\\pydev3.14",
     "python_entry": "python/strategy_service.py",
     "python_workdir": ".",
     "healthcheck_interval_ms": 2000,
@@ -277,6 +279,7 @@ go run ./cmd/rename_mm_tables \
 ## 策略服务
 
 - Go 主进程会按 `strategy.python_entry` 托管拉起 Python gRPC 服务
+- 如需固定使用 conda 环境，可在 `strategy.python_executable` 与 `strategy.python_conda_env_path` 中指定解释器和环境目录；启动子进程时会自动注入 `CONDA_PREFIX`、`CONDA_DEFAULT_ENV` 与该环境的 `PATH`
 - Python 只输出目标仓位，不直接下单
 - Go 侧当前提供的是模拟执行骨架与审计日志，回放模式默认阻断真实执行
 - 示例 Python 服务见 [python/strategy_service.py](python/strategy_service.py)

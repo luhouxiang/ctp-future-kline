@@ -238,6 +238,10 @@ type StrategyConfig struct {
 	GRPCAddr string `json:"grpc_addr"`
 	// AutoStart 控制启动时是否自动拉起 Python 策略进程。
 	AutoStart *bool `json:"auto_start"`
+	// PythonExecutable 是启动策略服务时使用的 Python 解释器路径。
+	PythonExecutable string `json:"python_executable"`
+	// PythonCondaEnvPath 是策略服务使用的 conda 环境根目录。
+	PythonCondaEnvPath string `json:"python_conda_env_path"`
 	// PythonEntry 是 Python 策略服务入口脚本。
 	PythonEntry string `json:"python_entry"`
 	// PythonWorkdir 是启动 Python 策略服务时的工作目录。
@@ -704,6 +708,13 @@ func (c *AppConfig) Validate() error {
 	if c.Strategy.GRPCAddr == "" {
 		c.Strategy.GRPCAddr = "127.0.0.1:50051"
 	}
+	c.Strategy.PythonExecutable = stringsTrim(c.Strategy.PythonExecutable)
+	c.Strategy.PythonCondaEnvPath = stringsTrim(c.Strategy.PythonCondaEnvPath)
+	c.Strategy.PythonEntry = stringsTrim(c.Strategy.PythonEntry)
+	c.Strategy.PythonWorkdir = stringsTrim(c.Strategy.PythonWorkdir)
+	if c.Strategy.PythonExecutable == "" && c.Strategy.PythonCondaEnvPath != "" {
+		c.Strategy.PythonExecutable = filepath.Join(c.Strategy.PythonCondaEnvPath, "python.exe")
+	}
 	if c.Strategy.HealthcheckIntervalMS <= 0 {
 		c.Strategy.HealthcheckIntervalMS = 2000
 	}
@@ -718,6 +729,15 @@ func (c *AppConfig) Validate() error {
 	}
 	if c.Strategy.RequestTimeoutMS <= 0 {
 		return errors.New("strategy.request_timeout_ms must be > 0")
+	}
+	if c.Strategy.PythonCondaEnvPath != "" {
+		info, err := os.Stat(c.Strategy.PythonCondaEnvPath)
+		if err != nil {
+			return fmt.Errorf("strategy.python_conda_env_path invalid: %w", err)
+		}
+		if !info.IsDir() {
+			return errors.New("strategy.python_conda_env_path must be a directory")
+		}
 	}
 	if c.Trade.Enabled == nil {
 		v := false
