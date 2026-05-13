@@ -22,6 +22,12 @@ from strategy_service import (  # noqa: E402
     PullbackShortState,
     WeakPullbackShortState,
 )
+from strategy_http import AsyncStrategyRunner, build_app  # noqa: E402
+
+try:
+    import falcon.testing  # noqa: E402
+except ModuleNotFoundError:  # pragma: no cover - HTTP runtime tests require falcon
+    falcon = None
 
 
 def bar_req(instance_id="inst-1", symbol="rb2601", open_=100, high=100, low=100, close=100, idx=1, params=None):
@@ -529,6 +535,105 @@ class StrategyServiceRegistryTest(unittest.TestCase):
         self.assertEqual(definitions[MA20_WEAK_BASELINE_STRATEGY_ID], "python/ma20_weak_pullback_baseline.py")
         self.assertEqual(definitions[MA20_WEAK_HARD_FILTER_STRATEGY_ID], "python/ma20_weak_pullback_hard_filter.py")
         self.assertEqual(definitions[MA20_WEAK_SCORE_FILTER_STRATEGY_ID], "python/ma20_weak_pullback_score_filter.py")
+
+
+@unittest.skipIf(falcon is None, "falcon is required for HTTP runtime tests")
+class StrategyHTTPRuntimeTest(unittest.TestCase):
+    def make_client(self):
+        service = StrategyService()
+        app = build_app(service=service, runner=AsyncStrategyRunner(service, ttl_seconds=600))
+        return falcon.testing.TestClient(app), service
+
+    def sample_instance(self, instance_id="http-1"):
+        return {
+            "instance_id": instance_id,
+            "strategy_id": "sample.momentum",
+            "mode": "live",
+            "symbols": ["rb2601"],
+            "timeframe": "1m",
+            "params": {},
+        }
+
+    def test_http_list_start_push_result_round_trip(self):
+        client, _ = self.make_client()
+
+        listed = client.simulate_post("/registry/list", json={})
+        self.assertEqual(listed.status_code, 200)
+        self.assertTrue(any(item["strategy_id"] == "sample.momentum" for item in listed.json["strategies"]))
+
+        instance = self.sample_instance()
+        started = client.simulate_post("/runtime/start", json={"instance": instance})
+        self.assertEqual(started.status_code, 200)
+        self.assertTrue(started.json["ok"])
+
+        pushed = client.simulate_post("/runtime/on_bar", json={
+            "instance": instance,
+            "symbol": "rb2601",
+            "event_time": "2026-01-01T09:01:00+08:00",
+            "mode": "live",
+            "current_position": 0,
+            "bar": {
+                "adjusted_time": "2026-01-01T09:01:00+08:00",
+                "data_time": "2026-01-01T09:01:00+08:00",
+                "open": 100,
+                "high": 101,
+                "low": 98,
+                "close": 99,
+            },
+        })
+        self.assertEqual(pushed.status_code, 200)
+        self.assertEqual(pushed.json["status"], "queued")
+
+        result = client.simulate_post("/runtime/result", json={"push_id": pushed.json["push_id"], "wait_ms": 1000})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json["status"], "done")
+        self.assertEqual(result.json["result"]["target_position"], -1)
+
+    def test_http_unknown_push_id_returns_404(self):
+        client, _ = self.make_client()
+
+        result = client.simulate_post("/runtime/result", json={"push_id": "missing", "wait_ms": 1})
+
+        self.assertEqual(result.status_code, 404)
+        self.assertEqual(result.json["status"], "expired")
+
+    def test_http_async_error_is_returned_by_result(self):
+        client, _ = self.make_client()
+        instance = self.sample_instance("missing-runtime")
+
+        pushed = client.simulate_post("/runtime/on_bar", json={
+            "instance": instance,
+            "symbol": "rb2601",
+            "event_time": "2026-01-01T09:01:00+08:00",
+            "mode": "live",
+            "bar": {
+                "adjusted_time": "2026-01-01T09:01:00+08:00",
+                "open": 100,
+                "high": 100,
+                "low": 100,
+                "close": 100,
+            },
+        })
+        self.assertEqual(pushed.status_code, 200)
+
+        result = client.simulate_post("/runtime/result", json={"push_id": pushed.json["push_id"], "wait_ms": 1000})
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(result.json["status"], "error")
+        self.assertIn("not started", result.json["error"])
+
+    def test_http_repeated_start_replaces_runtime(self):
+        client, service = self.make_client()
+        instance = self.sample_instance("http-repeat")
+
+        first_start = client.simulate_post("/runtime/start", json={"instance": instance})
+        self.assertEqual(first_start.status_code, 200)
+        first = service.factory.instances[("live", "http-repeat")]
+
+        second_start = client.simulate_post("/runtime/start", json={"instance": instance})
+        self.assertEqual(second_start.status_code, 200)
+        second = service.factory.instances[("live", "http-repeat")]
+
+        self.assertIsNot(first, second)
 
 
 if __name__ == "__main__":

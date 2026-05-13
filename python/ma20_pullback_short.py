@@ -3,7 +3,7 @@
 
 本模块实现两类策略：
 - `MA20PullbackShortStrategy`：原始 MA20 跌破-反抽-再跌破做空算法；
-- `MA20WeakBaselineStrategy`：弱反弹策略族里的 baseline 变体，复用同一套父类状态机。
+- `MA20WeakPullbackBaselineStrategy`：弱反弹策略族里的 baseline 变体，复用同一套父类状态机。
 
 核心设计原因：
 - 只使用 bar 驱动：回放和实盘能走同一条逻辑，不再依赖 tick 采样时机；
@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
@@ -36,6 +35,7 @@ from strategy_common import (
     _normalize_symbols,
     _params,
     _require_fields,
+    _rfc3339_utc_now,
     _strategy_params_for_instance,
     _trace,
 )
@@ -182,7 +182,8 @@ class MA20PullbackShortStrategy(Strategy):
             "profit_atr_multiple": 1.0,
             "adverse_atr_multiple": 0.8,
         },
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # Go 侧 StrategyDefinition.updated_at 是 time.Time；带 Z 的 RFC3339 能避免 JSON 解码失败。
+        "updated_at": _rfc3339_utc_now(),
     }
 
     def __init__(self, definition: StrategyDefinition | None = None) -> None:
@@ -191,7 +192,7 @@ class MA20PullbackShortStrategy(Strategy):
             self.definition = definition
         # states 保存当前运行实例内每个 (mode, instance_id, symbol) 对应的 PullbackShortState。
         self.states: dict[StateKey, PullbackShortState] = {}
-        # gRPC server 使用线程池处理请求，因此运行状态读写需要加锁。
+        # HTTP 服务会并发处理请求，因此运行状态读写需要加锁。
         self._lock: RLock = RLock()
 
     def required_warmup_bars(self, instance: JSONObject) -> int:
@@ -558,7 +559,7 @@ class MA20PullbackShortStrategy(Strategy):
         """
         bar = request.get("bar") or {}
         if not bar:
-            return _no_signal(request, "no bar")
+            return _no_signal(request, "no bar", None, None)
         _require_fields(bar, ("open", "high", "low", "close"))
 
         state = self._state_for(request)
@@ -574,7 +575,7 @@ class MA20PullbackShortStrategy(Strategy):
                     request.get("symbol", ""), event_time, state.state, close)
 
         if event_ts is not None and state.last_bar_ts is not None and event_ts <= state.last_bar_ts:
-            return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state, state.prev_ma, ma_period))
+            return _no_signal(request, "duplicate or out-of-order bar", self._base_metrics(state, state.prev_ma, ma_period), None, False)
         if event_ts is not None:
             state.last_bar_ts = event_ts
 
@@ -591,7 +592,7 @@ class MA20PullbackShortStrategy(Strategy):
                 _check("MA样本数量", len(state.closes) >= ma_period, len(state.closes), ma_period, len(state.closes) - ma_period, "等待收集足够K线计算均线")
             ]
             trace = self._bar_trace(request, state, "WAIT_MA_READY", f"等待 {ma_label} 数据足够", 1, "waiting", "waiting for enough bars", checks, ma20, ma_period)
-            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace)
+            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace, None, False)
 
         ctx = PullbackBarContext(
             request=request,
@@ -621,7 +622,7 @@ class MA20PullbackShortStrategy(Strategy):
         handler = handlers.get(state.state)
         if handler is None:
             self._reset_after_signal_result(state)
-            out = _no_signal(request, "unknown state reset", self._base_metrics(state, ma20, ma_period))
+            out = _no_signal(request, "unknown state reset", self._base_metrics(state, ma20, ma_period), None, False)
         else:
             out = handler(ctx)
         state.prev_close = close
@@ -641,7 +642,7 @@ class MA20PullbackShortStrategy(Strategy):
             state.break_below_armed = full_above
             checks = [_check(f"整根K线站上{ctx.ma_label}", full_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, f"等待出现 OHLC 全部在 {ctx.ma_label} 上方的K线")]
             trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待先完整站上 {ctx.ma_label}", 1, "waiting", "waiting for first full bar above MA", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, "waiting for first full bar above MA", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+            return _no_signal(ctx.request, "waiting for first full bar above MA", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
 
         full_break = ctx.open_price < ctx.ma20 and ctx.close < ctx.ma20
         cross_break = ctx.previous_close is not None and ctx.previous_ma is not None and ctx.previous_close >= ctx.previous_ma and ctx.close < ctx.ma20
@@ -654,9 +655,9 @@ class MA20PullbackShortStrategy(Strategy):
             state.state = BROKEN_BELOW_MA20
             state.reset_requires_full_break = False
             trace = self._bar_trace(ctx.request, state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "passed", f"break below {ctx.ma_label} confirmed", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, f"break below {ctx.ma_label} confirmed", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+            return _no_signal(ctx.request, f"break below {ctx.ma_label} confirmed", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
         trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "waiting", "no trade signal", checks, ctx.ma20, ctx.ma_period)
-        return _no_signal(ctx.request, "no trade signal", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        return _no_signal(ctx.request, "no trade signal", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
 
     def _handle_broken_below_ma20(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 2：跌破后等待反抽触碰 MA。
@@ -676,7 +677,7 @@ class MA20PullbackShortStrategy(Strategy):
             trace = self._bar_trace(ctx.request, state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "passed", f"{ctx.ma_label} touch bar found", checks, ctx.ma20, ctx.ma_period)
             return _no_signal(ctx.request, f"{ctx.ma_label} touch bar found", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
         trace = self._bar_trace(ctx.request, state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "waiting", "waiting for MA touch", checks, ctx.ma20, ctx.ma_period)
-        return _no_signal(ctx.request, "waiting for MA touch", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        return _no_signal(ctx.request, "waiting for MA touch", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
 
     def _handle_wait_break_touch_open(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 3：触碰 MA 后等待跌破触碰 K 开盘价。
@@ -768,22 +769,37 @@ class MA20PullbackShortStrategy(Strategy):
         return self.on_bar(request)
 
 
-class MA20WeakBaselineStrategy(MA20PullbackShortStrategy):
-    """The baseline MA20 break-touch-break strategy as a selectable variant."""
+class MA20WeakPullbackBaselineStrategy(MA20PullbackShortStrategy):
+    """页面中的 `MA20 Weak Pullback Baseline` 可选择策略类。
 
-    def __init__(self) -> None:
-        definition = dict(MA20PullbackShortStrategy.definition)
-        definition.update({
-            "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
-            "display_name": "MA20 Weak Pullback Baseline",
-            "default_params": {
-                "ma_period": 20,
-                "max_wait_bars": 6,
-                "observation_bars": 24,
-                "profit_atr_multiple": 1.0,
-                "adverse_atr_multiple": 0.8,
-                "algorithm": "baseline",
-            },
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        })
+    这个类显式存在，是为了让页面策略项和代码类一一对应：
+    用户看到 baseline，就能在代码里找到 baseline class。
+
+    它继承 `MA20PullbackShortStrategy`，而不是弱反弹 hard/score 的结构过滤状态机，
+    是因为 baseline 的定义就是“跌破 MA -> 反抽触碰 MA -> 跌破触碰 K 开盘价”，
+    不包含 MA60/MA120 结构过滤、reaction_low 或评分闸门。
+    """
+
+    def __init__(self, definition: StrategyDefinition | None = None) -> None:
+        if definition is None:
+            definition = dict(MA20PullbackShortStrategy.definition)
+            definition.update({
+                "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
+                "display_name": "MA20 Weak Pullback Baseline",
+                "entry_script": "python/ma20_weak_pullback_baseline.py",
+                "default_params": {
+                    "ma_period": 20,
+                    "max_wait_bars": 6,
+                    "observation_bars": 24,
+                    "profit_atr_multiple": 1.0,
+                    "adverse_atr_multiple": 0.8,
+                    "algorithm": "baseline",
+                },
+                "updated_at": _rfc3339_utc_now(),
+            })
         super().__init__(definition=definition)
+
+
+# 兼容旧入口文件和旧导入名。新代码应使用 MA20WeakPullbackBaselineStrategy，
+# 这样类名和页面上的策略名称保持一致。
+MA20WeakBaselineStrategy = MA20WeakPullbackBaselineStrategy

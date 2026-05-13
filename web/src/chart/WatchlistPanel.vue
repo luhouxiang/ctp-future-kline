@@ -342,13 +342,12 @@ const latestStrategyTrace = computed(() => {
 
 const latestStrategyTimeText = computed(() => formatTraceTime(latestStrategyTrace.value?.event_time))
 
-const ma20Steps = [
+const ma20BaselineSteps = [
   { key: 'WAIT_BREAK_BELOW_MA20', label: '等待跌破 MA20', index: 1 },
   { key: 'BROKEN_BELOW_MA20', label: '已跌破，等待反抽触碰 MA20', index: 2 },
   { key: 'WAIT_BREAK_TOUCH_OPEN', label: '等待跌破触碰K开盘价', index: 3 },
-  { key: 'SHORT_SIGNAL', label: '做空信号', index: 4 },
-  { key: 'SIGNAL_ACTIVE', label: '信号观察中', index: 5 },
-  { key: 'SIGNAL_RESULT', label: '信号结果', index: 5 },
+  { key: 'SIGNAL_ACTIVE', label: '做空信号已触发', index: 4 },
+  { key: 'DONE', label: '已持仓，等待止盈/止损', index: 5 },
 ]
 
 const ma20WeakSteps = [
@@ -368,8 +367,10 @@ const strategyStepRows = computed(() => {
   const activeInstance = strategyInstances.value.find((item) => String(item?.instance_id || '') === activeStrategyInstanceId.value) || runningStrategyInstances.value[0] || null
   const strategyID = String(trace.strategy_id || activeInstance?.strategy_id || '')
   let base = [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
-  if (strategyID === 'ma20.weak_pullback_short' || strategyID.startsWith('ma20.weak_pullback_short.')) base = ma20WeakSteps
-  else if (strategyID === 'ma20.pullback_short' || !strategyID) base = ma20Steps
+  // ma20.weak_pullback_short.baseline 虽然带 weak 前缀，但算法本身已经重构成 baseline 的 5 状态机。
+  // 这里显式区分 baseline 与 hard/score 变体，避免前端把不存在的趋势过滤步骤展示给用户。
+  if (strategyID === 'ma20.pullback_short' || strategyID === 'ma20.weak_pullback_short.baseline' || !strategyID) base = ma20BaselineSteps
+  else if (strategyID === 'ma20.weak_pullback_short' || strategyID.startsWith('ma20.weak_pullback_short.')) base = ma20WeakSteps
   return base.map((step) => {
     let state = 'waiting'
     if (currentIndex > step.index || String(trace.status || '') === 'done') state = 'done'
@@ -565,7 +566,7 @@ function formatBacktestSummary(summary) {
       <div class="tv-quote-card">
         <div class="tv-channel-settings-head">
           <span>策略运行</span>
-          <button type="button" class="tv-strategy-run-btn" @click.stop="emit('strategy-run-click', $event)">运行策略</button>
+          <button type="button" class="tv-strategy-run-btn" @click.stop="emit('strategy-run-click', $event)">运行此策略</button>
         </div>
         <div class="tv-quote-strip">
           <span class="tv-quote-strip-label">连接</span>
@@ -634,8 +635,7 @@ function formatBacktestSummary(summary) {
               v-if="String(item.status || '') === 'running'"
               type="button"
               class="tv-strategy-stop-btn"
-              @click.stop
-              @click="emit('strategy-instance-stop', item.instance_id)"
+              @click.stop="emit('strategy-instance-stop', item.instance_id)"
             >
               停止
             </button>

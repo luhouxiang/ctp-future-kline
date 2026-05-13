@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import json
 import logging
-import time
 from dataclasses import dataclass, field
 from threading import RLock
 from typing import Any
@@ -38,11 +37,14 @@ from strategy_common import (
     _normalize_symbols,
     _params,
     _require_fields,
+    _rfc3339_utc_now,
     _strategy_params_for_instance,
     _trace,
 )
 from strategy_types import (
     DONE,
+    MA20_WEAK_HARD_FILTER_STRATEGY_ID,
+    MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
     MA20_WEAK_STRATEGY_ID,
     SHORT_SIGNAL,
     SIGNAL_ACTIVE,
@@ -149,7 +151,8 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "trigger_wait_bars": 6,
             "use_score_filter": True,
         },
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # Go 侧 StrategyDefinition.updated_at 是 time.Time；带 Z 的 RFC3339 能避免 JSON 解码失败。
+        "updated_at": _rfc3339_utc_now(),
     }
 
     def __init__(self, definition: StrategyDefinition | None = None, use_score_filter: bool | None = None) -> None:
@@ -862,13 +865,67 @@ class MA20WeakPullbackShortStrategy(Strategy):
 
 
 class MA20WeakPullbackVariantStrategy(MA20WeakPullbackShortStrategy):
-    """弱反弹过滤变体。
+    """弱反弹过滤变体基类。
 
     这个类只改 strategy_id/display_name/algorithm/use_score_filter，不改状态机。
-    这样 hard-filter 和 score-filter 的回测差异可以归因到过滤条件，而不是实现分叉。
+    具体可选择策略由下面的 HardFilter/ScoreFilter 两个显式类承载。
+    保留本类是为了避免入口文件或旧代码还在通过参数构造变体时失效。
     """
 
-    def __init__(self, strategy_id: str, display_name: str, algorithm: str, use_score_filter: bool) -> None:
+    def __init__(
+        self,
+        strategy_id: str | None = None,
+        display_name: str = "",
+        algorithm: str = "",
+        use_score_filter: bool | None = None,
+        definition: StrategyDefinition | None = None,
+    ) -> None:
+        if definition is None:
+            definition = dict(MA20WeakPullbackShortStrategy.definition)
+            default_params = dict(definition.get("default_params") or {})
+            default_params.update({
+                "algorithm": algorithm,
+                "use_score_filter": bool(use_score_filter),
+            })
+            definition.update({
+                "strategy_id": strategy_id or "",
+                "display_name": display_name,
+                "default_params": default_params,
+                "updated_at": _rfc3339_utc_now(),
+            })
+        if use_score_filter is None:
+            default_params = definition.get("default_params") or {}
+            use_score_filter = bool(default_params.get("use_score_filter", True))
+        super().__init__(definition=definition, use_score_filter=use_score_filter)
+
+
+class MA20WeakPullbackHardFilterStrategy(MA20WeakPullbackShortStrategy):
+    """页面中的 `MA20 Weak Pullback Hard Filter` 可选择策略类。
+
+    这个类显式存在，是为了让页面上的 hard-filter 策略项能直接对应到代码。
+    它继承 `MA20WeakPullbackShortStrategy`，复用弱反弹的结构过滤状态机；
+    与 score-filter 的差异只在默认关闭 `use_score_filter`。
+    """
+
+    def __init__(self, definition: StrategyDefinition | None = None) -> None:
+        if definition is None:
+            definition = self._definition(
+                MA20_WEAK_HARD_FILTER_STRATEGY_ID,
+                "MA20 Weak Pullback Hard Filter",
+                "hard_filter",
+                False,
+                "python/ma20_weak_pullback_hard_filter.py",
+            )
+        super().__init__(definition=definition, use_score_filter=False)
+
+    @staticmethod
+    def _definition(
+        strategy_id: str,
+        display_name: str,
+        algorithm: str,
+        use_score_filter: bool,
+        entry_script: str,
+    ) -> StrategyDefinition:
         definition = dict(MA20WeakPullbackShortStrategy.definition)
         default_params = dict(definition.get("default_params") or {})
         default_params.update({
@@ -878,7 +935,27 @@ class MA20WeakPullbackVariantStrategy(MA20WeakPullbackShortStrategy):
         definition.update({
             "strategy_id": strategy_id,
             "display_name": display_name,
+            "entry_script": entry_script,
             "default_params": default_params,
-            "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+            "updated_at": _rfc3339_utc_now(),
         })
-        super().__init__(definition=definition, use_score_filter=use_score_filter)
+        return definition
+
+
+class MA20WeakPullbackScoreFilterStrategy(MA20WeakPullbackShortStrategy):
+    """页面中的 `MA20 Weak Pullback Score Filter` 可选择策略类。
+
+    它和 hard-filter 继承同一个弱反弹基类，状态机完全一致；
+    唯一区别是默认打开 score filter，要求空头失败分不低于多头停顿分后才允许做空。
+    """
+
+    def __init__(self, definition: StrategyDefinition | None = None) -> None:
+        if definition is None:
+            definition = MA20WeakPullbackHardFilterStrategy._definition(
+                MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
+                "MA20 Weak Pullback Score Filter",
+                "score_filter",
+                True,
+                "python/ma20_weak_pullback_score_filter.py",
+            )
+        super().__init__(definition=definition, use_score_filter=True)

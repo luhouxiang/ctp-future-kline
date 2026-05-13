@@ -2,7 +2,8 @@
 """MA20 弱反弹 score-filter 变体入口。
 
 这个入口把“带评分闸门的弱反弹做空”暴露成独立策略。
-它不复制算法代码，只通过 `use_score_filter=True` 打开评分条件，避免多个入口文件各自维护状态机细节。
+它不复制算法代码，只通过 `MA20WeakPullbackScoreFilterStrategy` 默认打开评分条件，
+避免多个入口文件各自维护状态机细节。
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ def build_strategy(runtime: Any) -> Any:
     score-filter 保留同一套弱反弹状态机，但做空前要求 bearish_failure_score 至少不低于
     bullish_pause_score。这个条件来自提示词中的核心约束：不要把强上涨中的普通停顿误判为空头机会。
     """
-    strategy = runtime.MA20WeakPullbackVariantStrategy(STRATEGY_ID, DISPLAY_NAME, ALGORITHM, True)
+    strategy = runtime.MA20WeakPullbackScoreFilterStrategy()
     # entry_script 保持为变体入口文件，外部定义和日志才能反查到用户配置的具体策略。
     strategy.definition = {**strategy.definition, "entry_script": ENTRY_SCRIPT}
     return strategy

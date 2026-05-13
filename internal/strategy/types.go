@@ -1,6 +1,11 @@
 package strategy
 
-import "time"
+import (
+	"encoding/json"
+	"fmt"
+	"strings"
+	"time"
+)
 
 const (
 	InstanceStatusStopped = "stopped"
@@ -23,10 +28,10 @@ type ManagerStatus struct {
 	Enabled bool `json:"enabled"`
 	// ProcessRunning 表示 Python 策略进程是否存活。
 	ProcessRunning bool `json:"process_running"`
-	// Connected 表示 Go 侧是否已连上策略 gRPC 服务。
+	// Connected 表示 Go 侧是否已连上策略 HTTP 服务。
 	Connected bool `json:"connected"`
-	// GRPCAddr 是当前 gRPC 服务地址。
-	GRPCAddr string `json:"grpc_addr"`
+	// HTTPAddr 是当前 HTTP 服务地址。
+	HTTPAddr string `json:"http_addr"`
 	// PythonExecutable 是当前使用的 Python 解释器路径。
 	PythonExecutable string `json:"python_executable"`
 	// PythonCondaEnvPath 是当前注入的 conda 环境根目录。
@@ -62,6 +67,62 @@ type StrategyDefinition struct {
 	Version       string         `json:"version"`
 	DefaultParams map[string]any `json:"default_params"`
 	UpdatedAt     time.Time      `json:"updated_at"`
+}
+
+func (d *StrategyDefinition) UnmarshalJSON(data []byte) error {
+	type rawDefinition struct {
+		StrategyID    string          `json:"strategy_id"`
+		DisplayName   string          `json:"display_name"`
+		EntryScript   string          `json:"entry_script"`
+		Version       string          `json:"version"`
+		DefaultParams map[string]any  `json:"default_params"`
+		UpdatedAt     json.RawMessage `json:"updated_at"`
+	}
+
+	var raw rawDefinition
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return err
+	}
+
+	d.StrategyID = raw.StrategyID
+	d.DisplayName = raw.DisplayName
+	d.EntryScript = raw.EntryScript
+	d.Version = raw.Version
+	d.DefaultParams = raw.DefaultParams
+
+	if len(raw.UpdatedAt) == 0 || string(raw.UpdatedAt) == "null" {
+		d.UpdatedAt = time.Time{}
+		return nil
+	}
+	updatedAt, err := parseStrategyDefinitionUpdatedAt(raw.UpdatedAt)
+	if err != nil {
+		return err
+	}
+	d.UpdatedAt = updatedAt
+	return nil
+}
+
+func parseStrategyDefinitionUpdatedAt(raw json.RawMessage) (time.Time, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err != nil {
+		return time.Time{}, err
+	}
+	text = strings.TrimSpace(text)
+	if text == "" {
+		return time.Time{}, nil
+	}
+
+	// Python 旧调试进程曾返回没有时区的时间字符串；Go 的 time.Time 默认只接受 RFC3339。
+	// 这里兼容旧格式，是为了避免一个展示字段解析失败导致整批 Python ListStrategies 被丢弃。
+	if ts, err := time.Parse(time.RFC3339Nano, text); err == nil {
+		return ts, nil
+	}
+	for _, layout := range []string{"2006-01-02T15:04:05", "2006-01-02 15:04:05"} {
+		if ts, err := time.ParseInLocation(layout, text, time.Local); err == nil {
+			return ts, nil
+		}
+	}
+	return time.Time{}, fmt.Errorf("parse strategy definition updated_at %q failed", text)
 }
 
 type StrategyInstance struct {

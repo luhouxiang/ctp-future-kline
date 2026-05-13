@@ -253,7 +253,7 @@ func (s *Server) strategyStartupCheck() startupCheckItem {
 		Title:     "策略服务",
 		Level:     level,
 		Status:    status,
-		Detail:    "gRPC " + emptyDash(st.GRPCAddr) + "，定义 " + intText(st.Definitions) + "，实例 " + intText(st.Instances) + "。未连接时策略、回测和信号不可用。",
+		Detail:    "HTTP " + emptyDash(st.HTTPAddr) + "，定义 " + intText(st.Definitions) + "，实例 " + intText(st.Instances) + "。未连接时策略、回测和信号不可用。",
 		UpdatedAt: timeText(st.LastHealthAt),
 	}
 }

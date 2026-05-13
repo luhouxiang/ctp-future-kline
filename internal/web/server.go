@@ -302,7 +302,7 @@ func (s *Server) startBackgroundServices() {
 		}
 	}
 	if s.strategy != nil {
-		s.runStartupTask("strategy", "策略服务", "后台启动或连接 Python gRPC 策略服务。", func() error {
+		s.runStartupTask("strategy", "策略服务", "后台启动或连接 Python HTTP 策略服务。", func() error {
 			if err := s.strategy.Start(); err != nil {
 				logger.Error("start strategy manager failed", "error", err)
 				return err
@@ -1710,6 +1710,9 @@ func (s *Server) handleFrontend() http.Handler {
 		}
 		full := filepath.Join(distDir, requestPath)
 		if info, err := os.Stat(full); err == nil && !info.IsDir() {
+			// 调试模式下前端经常重新 build。assets 文件名虽带 hash，但 index.html 可能仍指向旧包；
+			// 这里要求浏览器重新校验静态资源，避免页面继续运行旧 JS 后表现为按钮状态不更新。
+			w.Header().Set("Cache-Control", "no-cache")
 			http.ServeFile(w, r, full)
 			return
 		}
@@ -1718,6 +1721,9 @@ func (s *Server) handleFrontend() http.Handler {
 }
 
 func (s *Server) serveIndexWithWebDefaults(w http.ResponseWriter, r *http.Request, indexPath string) {
+	// index.html 是前端资源入口，必须在本地调试时每次取最新版本；
+	// 否则 Go/JS 已重新构建，浏览器仍可能加载旧 bundle，导致启动/停止交互看似“改了也无效”。
+	w.Header().Set("Cache-Control", "no-store")
 	content, err := os.ReadFile(indexPath)
 	if err != nil {
 		http.ServeFile(w, r, indexPath)

@@ -2,12 +2,12 @@
 """策略服务共享类型与状态常量。
 
 这个文件只放“跨模块共享、但没有运行逻辑”的定义：
-- JSON 边界类型：Go 侧通过 gRPC 传入的是 JSON bytes，Python 内部统一用 dict/list 表达；
+- JSON 边界类型：Go 侧通过 HTTP 传入的是 JSON 请求体，Python 内部统一用 dict/list 表达；
 - 状态常量：策略状态要同时出现在算法、metrics、trace、单测和前端展示中，集中定义可以避免拼写分叉；
 - 策略 ID：注册表、入口文件和测试都引用这些 ID，集中定义后变体新增/改名更容易审计。
 
 为什么不把这些定义留在各个策略文件：
-拆分 `strategy_service.py` 后，策略、注册表、gRPC 门面都需要同一批类型和常量。
+拆分 `strategy_service.py` 后，策略、注册表、运行时门面都需要同一批类型和常量。
 如果每个文件各自定义字符串，最容易出现“代码能跑但 trace.step_key 和测试/前端不一致”的隐性错误。
 """
 
@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any, Literal, TypeAlias
 
-# JSONPrimitive/JSONValue 用来描述 gRPC JSON 边界的真实形状。
+# JSONPrimitive/JSONValue 用来描述 JSON 边界的真实形状。
 # 这里不强行建模所有字段，是因为 Go 侧和回测/前端会带不同字段进来；
 # 策略函数通过 _float/_int/_require_fields 在使用点做收窄，比伪造一个不完整 TypedDict 更可靠。
 JSONPrimitive: TypeAlias = str | int | float | bool | None

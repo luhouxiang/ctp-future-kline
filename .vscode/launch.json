@@ -49,38 +49,38 @@
         "order": 2
       }
     },
-    {
-      "name": "Vue编译运行",
-      "type": "node",
-      "request": "launch",
-      "cwd": "${workspaceFolder}/web",
-      "runtimeExecutable": "npm",
-      "runtimeArgs": [
-        "run",
-        "dev",
-        "--",
-        "--strictPort"
-      ],
-      "windows": {
-        "runtimeExecutable": "npm.cmd"
-      },
-      "postDebugTask": "vue: dev stop",
-      "console": "internalConsole",
-      "outputCapture": "std",
-      "internalConsoleOptions": "openOnSessionStart",
-      "skipFiles": [
-        "<node_internals>/**"
-      ],
-      "serverReadyAction": {
-        "pattern": "Local:\\s+(https?://\\S+)",
-        "uriFormat": "%s",
-        "action": "debugWithChrome",
-        "webRoot": "${workspaceFolder}/web"
-      },
-      "presentation": {
-        "order": 4
-      }
-    },
+    // {
+    //   "name": "Vue编译运行",
+    //   "type": "node",
+    //   "request": "launch",
+    //   "cwd": "${workspaceFolder}/web",
+    //   "runtimeExecutable": "npm",
+    //   "runtimeArgs": [
+    //     "run",
+    //     "dev",
+    //     "--",
+    //     "--strictPort"
+    //   ],
+    //   "windows": {
+    //     "runtimeExecutable": "npm.cmd"
+    //   },
+    //   "postDebugTask": "vue: dev stop",
+    //   "console": "internalConsole",
+    //   "outputCapture": "std",
+    //   "internalConsoleOptions": "openOnSessionStart",
+    //   "skipFiles": [
+    //     "<node_internals>/**"
+    //   ],
+    //   "serverReadyAction": {
+    //     "pattern": "Local:\\s+(https?://\\S+)",
+    //     "uriFormat": "%s",
+    //     "action": "debugWithChrome",
+    //     "webRoot": "${workspaceFolder}/web"
+    //   },
+    //   "presentation": {
+    //     "order": 4
+    //   }
+    // },
     {
       "name": "策略调试",
       "type": "debugpy",

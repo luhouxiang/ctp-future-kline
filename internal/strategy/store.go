@@ -71,6 +71,49 @@ updated_at=VALUES(updated_at)
 	return err
 }
 
+// ReplaceDefinitions 用 Python ListStrategies 的完整结果替换本地策略定义表。
+//
+// 这样做的原因是策略定义的权威来源已经改为 Python：
+// 如果只 Upsert，不删除旧行，Python 删除或重命名某个算法后，页面仍可能从数据库看到过期策略。
+// 全量替换让本地表只作为最近一次 Python 同步结果的缓存，而不是 Go 侧的兜底策略清单。
+func (s *Store) ReplaceDefinitions(defs []StrategyDefinition) error {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	if _, err = tx.Exec(`DELETE FROM strategy_definitions`); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`
+INSERT INTO strategy_definitions(strategy_id,display_name,entry_script,version,default_params_json,updated_at)
+VALUES(?,?,?,?,?,?)
+`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	now := time.Now()
+	for _, def := range defs {
+		if def.UpdatedAt.IsZero() {
+			def.UpdatedAt = now
+		}
+		params, marshalErr := json.Marshal(def.DefaultParams)
+		if marshalErr != nil {
+			err = marshalErr
+			return err
+		}
+		if _, err = stmt.Exec(def.StrategyID, def.DisplayName, def.EntryScript, def.Version, string(params), def.UpdatedAt); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (s *Store) ListDefinitions() ([]StrategyDefinition, error) {
 	rows, err := s.db.Query(`SELECT strategy_id,display_name,entry_script,version,default_params_json,updated_at FROM strategy_definitions ORDER BY strategy_id ASC`)
 	if err != nil {

@@ -10,13 +10,13 @@
 - 交易日历导入、刷新与启动自动维护
 - K 线检索与图表展示（前端）
 - 运行状态实时推送（HTTP + WebSocket）
-- Python gRPC 策略服务、策略实例管理、模拟执行与回测入口
+- Python HTTP 策略服务、策略实例管理、模拟执行与回测入口
 
 ## 目录结构
 
 - `main.go`: 程序入口
 - `internal/quotes`: CTP 连接、行情聚合、L9 计算、状态管理
-- `internal/strategy`: Python 策略服务管理、gRPC 调用、策略实例、模拟执行与审计
+- `internal/strategy`: Python 策略服务管理、HTTP 调用、策略实例、模拟执行与审计
 - `internal/web`: HTTP API、WebSocket、静态资源服务
 - `internal/importer`: 通达信历史数据导入
 - `internal/klinequery`: K 线查询与指标计算
@@ -127,7 +127,7 @@ go run . -config ./config/config.json -no-open
   },
   "strategy": {
     "enabled": false,
-    "grpc_addr": "127.0.0.1:50051",
+    "http_addr": "127.0.0.1:50051",
     "auto_start": true,
     "python_executable": "D:\\ProgramData\\anaconda3\\envs\\pydev3.14\\python.exe",
     "python_conda_env_path": "D:\\ProgramData\\anaconda3\\envs\\pydev3.14",
@@ -278,12 +278,12 @@ go run ./cmd/rename_mm_tables \
 
 ## 策略服务
 
-- Go 主进程会按 `strategy.python_entry` 托管拉起 Python gRPC 服务
+- Go 主进程会按 `strategy.python_entry` 托管拉起 Python HTTP 策略服务
 - 如需固定使用 conda 环境，可在 `strategy.python_executable` 与 `strategy.python_conda_env_path` 中指定解释器和环境目录；启动子进程时会自动注入 `CONDA_PREFIX`、`CONDA_DEFAULT_ENV` 与该环境的 `PATH`
 - Python 只输出目标仓位，不直接下单
 - Go 侧当前提供的是模拟执行骨架与审计日志，回放模式默认阻断真实执行
 - 示例 Python 服务见 [python/strategy_service.py](python/strategy_service.py)
-- 运行示例服务前需安装 `grpcio`
+- 运行示例服务前需安装 `falcon` 与 `uvicorn`
 
 ## 运行状态字段（核心）
 

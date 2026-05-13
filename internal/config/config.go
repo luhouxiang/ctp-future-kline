@@ -234,8 +234,8 @@ type LogConfig struct {
 type StrategyConfig struct {
 	// Enabled 控制是否启用策略子系统。
 	Enabled *bool `json:"enabled"`
-	// GRPCAddr 是 Go 侧连接 Python 策略服务的地址。
-	GRPCAddr string `json:"grpc_addr"`
+	// HTTPAddr 是 Go 侧连接 Python HTTP 策略服务的地址。
+	HTTPAddr string `json:"http_addr"`
 	// AutoStart 控制启动时是否自动拉起 Python 策略进程。
 	AutoStart *bool `json:"auto_start"`
 	// PythonExecutable 是启动策略服务时使用的 Python 解释器路径。
@@ -248,7 +248,7 @@ type StrategyConfig struct {
 	PythonWorkdir string `json:"python_workdir"`
 	// HealthcheckIntervalMS 是策略服务健康检查周期。
 	HealthcheckIntervalMS int `json:"healthcheck_interval_ms"`
-	// RequestTimeoutMS 是 gRPC 请求超时时间。
+	// RequestTimeoutMS 是策略 HTTP 请求超时时间。
 	RequestTimeoutMS int `json:"request_timeout_ms"`
 	// BacktestOutputDir 是策略回测结果输出目录。
 	BacktestOutputDir string `json:"backtest_output_dir"`
@@ -705,8 +705,9 @@ func (c *AppConfig) Validate() error {
 		v := true
 		c.Strategy.AutoStart = &v
 	}
-	if c.Strategy.GRPCAddr == "" {
-		c.Strategy.GRPCAddr = "127.0.0.1:50051"
+	c.Strategy.HTTPAddr = stringsTrim(c.Strategy.HTTPAddr)
+	if c.Strategy.HTTPAddr == "" {
+		c.Strategy.HTTPAddr = "127.0.0.1:50051"
 	}
 	c.Strategy.PythonExecutable = stringsTrim(c.Strategy.PythonExecutable)
 	c.Strategy.PythonCondaEnvPath = stringsTrim(c.Strategy.PythonCondaEnvPath)

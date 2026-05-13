@@ -7,9 +7,9 @@
 - runtime key 使用 (mode, instance_id)，保证同一个实例 ID 在 live/replay 下互不影响；
 - symbol 级别状态由具体策略维护，注册表只校验请求的 symbol 是否属于启动时声明的订阅列表。
 
-为什么不让 gRPC Service 直接持有策略对象：
-gRPC 层应该只负责协议和错误边界，策略实例的复制、warmup、stop 清理属于运行时生命周期。
-把生命周期集中到这里，可以避免后续新增 REST、CLI 或回测入口时重复实现 StartInstance 语义。
+为什么不让传输层直接持有策略对象：
+HTTP/CLI 等入口都只应该负责协议和错误边界，策略实例的复制、warmup、stop 清理属于运行时生命周期。
+把生命周期集中到这里，可以避免后续新增入口时重复实现 StartInstance 语义。
 """
 
 from __future__ import annotations
@@ -19,14 +19,15 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
-from ma20_pullback_short import MA20PullbackShortStrategy, MA20WeakBaselineStrategy
-from ma20_weak_pullback import MA20WeakPullbackShortStrategy, MA20WeakPullbackVariantStrategy
+from ma20_pullback_short import MA20PullbackShortStrategy, MA20WeakPullbackBaselineStrategy
+from ma20_weak_pullback import (
+    MA20WeakPullbackHardFilterStrategy,
+    MA20WeakPullbackScoreFilterStrategy,
+    MA20WeakPullbackShortStrategy,
+)
 from strategy_common import Strategy, _instance_id, _instance_mode, _int, _mode_key, _normalize_symbols
 from strategy_sample import SampleMomentumStrategy
 from strategy_types import (
-    MA20_WEAK_BASELINE_STRATEGY_ID,
-    MA20_WEAK_HARD_FILTER_STRATEGY_ID,
-    MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
     JSONObject,
     RequestDict,
     ResponseDict,
@@ -42,29 +43,13 @@ def _builtin_strategies() -> tuple[Strategy, ...]:
     这里统一修正 entry_script，是为了让 ListStrategies 返回用户实际选择的入口文件，
     同时保持算法实现只有一份，减少变体之间行为漂移。
     """
-    baseline = MA20WeakBaselineStrategy()
-    baseline.definition = {**baseline.definition, "entry_script": "python/ma20_weak_pullback_baseline.py"}
-    hard_filter = MA20WeakPullbackVariantStrategy(
-        MA20_WEAK_HARD_FILTER_STRATEGY_ID,
-        "MA20 Weak Pullback Hard Filter",
-        "hard_filter",
-        False,
-    )
-    hard_filter.definition = {**hard_filter.definition, "entry_script": "python/ma20_weak_pullback_hard_filter.py"}
-    score_filter = MA20WeakPullbackVariantStrategy(
-        MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
-        "MA20 Weak Pullback Score Filter",
-        "score_filter",
-        True,
-    )
-    score_filter.definition = {**score_filter.definition, "entry_script": "python/ma20_weak_pullback_score_filter.py"}
     return (
-        SampleMomentumStrategy(),
-        MA20PullbackShortStrategy(),
-        MA20WeakPullbackShortStrategy(),
-        baseline,
-        hard_filter,
-        score_filter,
+        # SampleMomentumStrategy(),
+        # MA20PullbackShortStrategy(),
+        # MA20WeakPullbackShortStrategy(),
+        MA20WeakPullbackBaselineStrategy(),
+        # MA20WeakPullbackHardFilterStrategy(),
+        # MA20WeakPullbackScoreFilterStrategy(),
     )
 
 
@@ -84,10 +69,10 @@ def _clone_strategy_template(strategy: Strategy) -> Strategy:
     这里按具体策略类重新构造，是为了把“模板元数据”和“运行状态”彻底分开。
     """
     definition = _clone_definition(getattr(strategy, "definition", {}))
-    if isinstance(strategy, MA20WeakPullbackShortStrategy):
-        return MA20WeakPullbackShortStrategy(definition=definition)
     if isinstance(strategy, MA20PullbackShortStrategy):
-        return MA20PullbackShortStrategy(definition=definition)
+        return strategy.__class__(definition=definition)
+    if isinstance(strategy, MA20WeakPullbackShortStrategy):
+        return strategy.__class__(definition=definition)
     if isinstance(strategy, SampleMomentumStrategy):
         return SampleMomentumStrategy()
     return strategy.__class__()
@@ -200,7 +185,7 @@ class StrategyFactory:
         return [_clone_definition(entry.definition) for entry in self._strategies.values()]
 
     def load_strategy(self, strategy_id: Any) -> StrategyRegistryEntry:
-        """按 strategy_id 获取注册项；未知策略直接抛 ValueError 交给 gRPC 层转 INVALID_ARGUMENT。"""
+        """按 strategy_id 获取注册项；未知策略直接抛 ValueError 交给上层入口映射成请求错误。"""
         strategy_id = str(strategy_id or "")
         if strategy_id not in self._strategies:
             raise ValueError(f"unknown strategy_id: {strategy_id}")
@@ -278,5 +263,5 @@ class StrategyFactory:
 
 
 # -----------------------------------------------------------------------------
-# 策略服务门面：把 gRPC 方法映射到具体策略
+# 策略服务门面：把入口方法映射到具体策略
 # -----------------------------------------------------------------------------

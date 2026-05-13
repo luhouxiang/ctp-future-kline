@@ -1,5 +1,5 @@
 // manager.go 是策略子系统的主控入口。
-// 它负责启动或连接 Python 策略进程，维护 gRPC 连接与健康检查，并对外提供策略定义、实例和信号管理能力。
+// 它负责启动或连接 Python 策略进程，维护 HTTP 连接与健康检查，并对外提供策略定义、实例和信号管理能力。
 package strategy
 
 import (
@@ -30,12 +30,15 @@ type strategyServiceProcessInfo struct {
 	CommandLine  string `json:"CommandLine"`
 }
 
+const minRuntimeStartTimeout = 30 * time.Second
+
 type Manager struct {
 	cfg   config.StrategyConfig
 	store *Store
 	exec  *ExecutionEngine
 
 	mu          sync.RWMutex
+	restoreMu   sync.Mutex
 	cmd         *exec.Cmd
 	connReady   bool
 	lastError   string
@@ -86,9 +89,6 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 			m.instances[item.InstanceID] = item
 		}
 	}
-	if err := m.ensureLocalDefinitions(); err != nil {
-		logger.Warn("seed local strategy definitions failed", "error", err)
-	}
 	SetDefaultSink(m)
 	return m, nil
 }
@@ -132,13 +132,12 @@ func (m *Manager) Start() error {
 			return err
 		}
 	} else if err := m.connectWithRetry(0); err != nil {
+		// 外部调试模式下 Python 进程可能晚于 Go 启动。
+		// 这里不能直接让 Start 失败，否则 forwardStrategyEvents 不会启动，后续即使重连成功也无法把 trace 推到页面。
 		m.setError(err)
-		return err
+		logger.Warn("strategy http unavailable on startup; health loop will keep reconnecting", "error", err, "http_addr", m.strategyHTTPAddr())
 	}
 	go m.healthLoop()
-	if err := m.syncDefinitions(); err != nil {
-		logger.Warn("strategy definition sync failed", "error", err)
-	}
 	return nil
 }
 
@@ -246,15 +245,24 @@ func (m *Manager) healthLoop() {
 		if m == nil || !m.cfg.IsEnabled() {
 			return
 		}
-		if _, err := m.ping(); err != nil {
-			m.setError(err)
-			m.mu.Lock()
-			m.connReady = false
-			m.mu.Unlock()
-			_ = m.connect()
+		m.mu.RLock()
+		ready := m.connReady
+		m.mu.RUnlock()
+		if ready {
 			continue
 		}
+		if err := m.connect(); err != nil {
+			m.setError(err)
+		}
 	}
+}
+
+func (m *Manager) strategyHTTPAddr() string {
+	addr := strings.TrimSpace(m.cfg.HTTPAddr)
+	if addr == "" {
+		addr = "127.0.0.1:50051"
+	}
+	return addr
 }
 
 func (m *Manager) startProcessLocked() error {
@@ -280,7 +288,8 @@ func (m *Manager) startProcessLocked() error {
 		return fmt.Errorf("open strategy log file failed: %w", err)
 	}
 	pythonExe, cmdEnv := m.resolvePythonRuntime()
-	cmd := exec.Command(pythonExe, entry, "--addr", m.cfg.GRPCAddr, "--log-file", logPath)
+	httpAddr := m.strategyHTTPAddr()
+	cmd := exec.Command(pythonExe, entry, "--addr", httpAddr, "--log-file", logPath)
 	cmd.Dir = workdir
 	cmd.Env = cmdEnv
 	cmd.Stdout = io.MultiWriter(os.Stdout, logFile)
@@ -290,7 +299,7 @@ func (m *Manager) startProcessLocked() error {
 		"python_conda_env_path", strings.TrimSpace(m.cfg.PythonCondaEnvPath),
 		"entry", entry,
 		"workdir", workdir,
-		"grpc_addr", m.cfg.GRPCAddr,
+		"http_addr", httpAddr,
 		"log_file", logPath,
 	)
 	if err := cmd.Start(); err != nil {
@@ -385,7 +394,7 @@ func (m *Manager) restartServiceLocked(explicit bool) error {
 		return err
 	}
 	if explicit {
-		logger.Info("restarting python strategy service", "grpc_addr", m.cfg.GRPCAddr)
+		logger.Info("restarting python strategy service", "http_addr", m.strategyHTTPAddr())
 	}
 	if err := m.startProcessLocked(); err != nil {
 		return err
@@ -395,7 +404,7 @@ func (m *Manager) restartServiceLocked(explicit bool) error {
 	processRunning := m.cmd != nil && m.cmd.Process != nil
 	m.mu.RUnlock()
 	if !processRunning {
-		return fmt.Errorf("python strategy service exited immediately; check grpc_addr=%s and strategy log", m.cfg.GRPCAddr)
+		return fmt.Errorf("python strategy service exited immediately; check http_addr=%s and strategy log", m.strategyHTTPAddr())
 	}
 	if err := m.connectWithRetry(5 * time.Second); err != nil {
 		return err
@@ -408,10 +417,11 @@ func (m *Manager) ensureServiceStarted(logAlreadyRunning bool) error {
 	if entry == "" {
 		entry = filepath.Join("python", "strategy_service.py")
 	}
-	if info, ok, err := findExistingPythonStrategyService(entry, m.cfg.GRPCAddr); err != nil {
-		logger.Warn("probe existing python strategy service failed", "error", err, "grpc_addr", m.cfg.GRPCAddr)
+	httpAddr := m.strategyHTTPAddr()
+	if info, ok, err := findExistingPythonStrategyService(entry, httpAddr); err != nil {
+		logger.Warn("probe existing python strategy service failed", "error", err, "http_addr", httpAddr)
 	} else if ok {
-		fields := []any{"pid", info.ProcessID, "grpc_addr", m.cfg.GRPCAddr}
+		fields := []any{"pid", info.ProcessID, "http_addr", httpAddr}
 		if startedAt := parseWMICreationTime(info.CreationDate); !startedAt.IsZero() {
 			fields = append(fields, "started_at", startedAt.Format(time.RFC3339))
 		}
@@ -430,7 +440,7 @@ func (m *Manager) ensureServiceStarted(logAlreadyRunning bool) error {
 	processRunning := m.cmd != nil && m.cmd.Process != nil
 	m.mu.RUnlock()
 	if !processRunning {
-		return fmt.Errorf("python strategy service exited immediately; check grpc_addr=%s and strategy log", m.cfg.GRPCAddr)
+		return fmt.Errorf("python strategy service exited immediately; check http_addr=%s and strategy log", httpAddr)
 	}
 	return m.connectWithRetry(5 * time.Second)
 }
@@ -456,18 +466,18 @@ func (m *Manager) stopManagedProcess() error {
 	if entry == "" {
 		entry = filepath.Join("python", "strategy_service.py")
 	}
-	if err := stopExistingPythonStrategyService(entry, m.cfg.GRPCAddr); err != nil {
+	if err := stopExistingPythonStrategyService(entry, m.strategyHTTPAddr()); err != nil {
 		return err
 	}
 	return nil
 }
 
-func findExistingPythonStrategyService(entry string, grpcAddr string) (strategyServiceProcessInfo, bool, error) {
+func findExistingPythonStrategyService(entry string, httpAddr string) (strategyServiceProcessInfo, bool, error) {
 	scriptName := strings.ToLower(strings.TrimSpace(filepath.Base(entry)))
 	if scriptName == "" {
 		scriptName = "strategy_service.py"
 	}
-	addrText := strings.TrimSpace(grpcAddr)
+	addrText := strings.TrimSpace(httpAddr)
 	ps := fmt.Sprintf(`$item = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like '*%s*' -and $_.CommandLine -like '*--addr %s*' } | Sort-Object CreationDate | Select-Object -First 1 ProcessId,CreationDate,CommandLine; if ($null -eq $item) { '' } else { $item | ConvertTo-Json -Compress }`, scriptName, addrText)
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
 	out, err := cmd.CombinedOutput()
@@ -497,12 +507,12 @@ func parseWMICreationTime(value string) time.Time {
 	return ts
 }
 
-func stopExistingPythonStrategyService(entry string, grpcAddr string) error {
+func stopExistingPythonStrategyService(entry string, httpAddr string) error {
 	scriptName := strings.ToLower(strings.TrimSpace(filepath.Base(entry)))
 	if scriptName == "" {
 		scriptName = "strategy_service.py"
 	}
-	addrText := strings.TrimSpace(grpcAddr)
+	addrText := strings.TrimSpace(httpAddr)
 	ps := fmt.Sprintf(`$items = Get-CimInstance Win32_Process -Filter "Name = 'python.exe'" | Where-Object { $_.CommandLine -like '*%s*' -and $_.CommandLine -like '*--addr %s*' }; if (-not $items) { 'no existing python strategy service'; exit 0 }; foreach ($item in $items) { 'stopping pid=' + $item.ProcessId + ' cmd=' + $item.CommandLine; Stop-Process -Id $item.ProcessId -Force; 'stopped pid=' + $item.ProcessId }`, scriptName, addrText)
 	logger.Info("stop existing python strategy service command", "shell", "powershell", "command", ps)
 	cmd := exec.Command("powershell", "-NoProfile", "-Command", ps)
@@ -519,29 +529,40 @@ func stopExistingPythonStrategyService(entry string, grpcAddr string) error {
 }
 
 func (m *Manager) connect() error {
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.RequestTimeoutMS)*time.Millisecond)
-	defer cancel()
-	conn, err := DialStrategyService(ctx, m.cfg.GRPCAddr)
+	addr := m.strategyHTTPAddr()
+	ctx, cancel := context.WithTimeout(context.Background(), m.requestTimeout())
+	client := NewStrategyServiceClient(addr, nil)
+	_, err := client.Ping(ctx)
+	cancel()
 	if err != nil {
-		return err
-	}
-	client := NewStrategyServiceClient(conn)
-	if _, err := client.Ping(ctx); err != nil {
-		_ = conn.Close()
+		logger.Warn("strategy http ping failed", "http_addr", addr, "error", err)
 		return err
 	}
 	m.mu.Lock()
+	becameReady := !m.connReady
 	if m.connClose != nil {
 		_ = m.connClose()
 	}
 	m.client = client
 	m.connReady = true
-	m.connClose = conn.Close
+	m.connClose = nil
 	m.lastError = ""
 	m.lastHealth = time.Now()
 	m.mu.Unlock()
 	m.broadcast("strategy_status_update", m.Status())
+	if becameReady {
+		m.afterStrategyServiceConnected("http_connect")
+	}
 	return nil
+}
+
+func (m *Manager) afterStrategyServiceConnected(reason string) {
+	if _, err := m.syncDefinitions(); err != nil {
+		logger.Warn("strategy definition sync failed after python connection", "reason", reason, "error", err)
+	}
+	if err := m.restoreRunningInstances(reason); err != nil {
+		logger.Warn("restore running strategy instances failed after python connection", "reason", reason, "error", err)
+	}
 }
 
 func (m *Manager) ping() (HealthResponse, error) {
@@ -549,7 +570,7 @@ func (m *Manager) ping() (HealthResponse, error) {
 	client := m.client
 	m.mu.RUnlock()
 	if client == nil {
-		return HealthResponse{}, fmt.Errorf("strategy grpc client not connected")
+		return HealthResponse{}, fmt.Errorf("strategy http client not connected")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.RequestTimeoutMS)*time.Millisecond)
 	defer cancel()
@@ -564,36 +585,46 @@ func (m *Manager) ping() (HealthResponse, error) {
 	return resp, err
 }
 
-func (m *Manager) syncDefinitions() error {
+func (m *Manager) syncDefinitions() ([]StrategyDefinition, error) {
+	if m.store == nil {
+		return nil, fmt.Errorf("strategy store not configured")
+	}
 	m.mu.RLock()
 	client := m.client
 	m.mu.RUnlock()
 	if client == nil {
-		return fmt.Errorf("strategy grpc client not connected")
+		return nil, fmt.Errorf("strategy http client not connected")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.RequestTimeoutMS)*time.Millisecond)
 	defer cancel()
 	resp, err := client.ListStrategies(ctx)
 	if err != nil {
-		return err
+		return nil, err
 	}
+	items := make([]StrategyDefinition, 0, len(resp.Strategies))
+	now := time.Now()
 	for _, item := range resp.Strategies {
 		if item.UpdatedAt.IsZero() {
-			item.UpdatedAt = time.Now()
+			item.UpdatedAt = now
 		}
-		if err := m.store.UpsertDefinition(item); err != nil {
-			return err
-		}
+		items = append(items, item)
 	}
-	m.broadcast("strategy_status_update", m.Status())
-	return nil
+	if err := m.store.ReplaceDefinitions(items); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 func (m *Manager) Status() ManagerStatus {
-	defs, insts, sigs, audits, runs, _ := m.store.Counts()
+	defs, insts := 0, 0
+	var sigs, audits, runs int64
+	if m.store != nil {
+		defs, insts, sigs, audits, runs, _ = m.store.Counts()
+	}
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	running := 0
+	httpAddr := m.strategyHTTPAddr()
 	for _, inst := range m.instances {
 		if inst.Status == InstanceStatusRunning {
 			running++
@@ -603,7 +634,7 @@ func (m *Manager) Status() ManagerStatus {
 		Enabled:            m.cfg.IsEnabled(),
 		ProcessRunning:     m.cmd != nil || m.connReady,
 		Connected:          m.connReady,
-		GRPCAddr:           m.cfg.GRPCAddr,
+		HTTPAddr:           httpAddr,
 		PythonExecutable:   m.cfg.PythonExecutable,
 		PythonCondaEnvPath: m.cfg.PythonCondaEnvPath,
 		PythonEntry:        m.cfg.PythonEntry,
@@ -621,92 +652,29 @@ func (m *Manager) Status() ManagerStatus {
 }
 
 func (m *Manager) ListDefinitions() ([]StrategyDefinition, error) {
-	if err := m.ensureLocalDefinitions(); err != nil {
-		logger.Warn("ensure local strategy definitions failed", "error", err)
+	if m.store == nil {
+		return []StrategyDefinition{}, nil
 	}
-	if err := m.syncDefinitions(); err != nil {
-		logger.Warn("strategy definition sync skipped", "error", err)
+	items, err := m.store.ListDefinitions()
+	if err == nil && len(items) > 0 {
+		return items, nil
 	}
-	return m.store.ListDefinitions()
-}
-
-func (m *Manager) ensureLocalDefinitions() error {
-	for _, item := range localStrategyDefinitions() {
-		if item.UpdatedAt.IsZero() {
-			item.UpdatedAt = time.Now()
+	items, err = m.syncDefinitions()
+	if err != nil {
+		logger.Warn("strategy definitions unavailable; reconnecting before returning list", "error", err)
+		if connectErr := m.connect(); connectErr == nil {
+			items, err = m.syncDefinitions()
+		} else {
+			err = connectErr
 		}
-		if err := m.store.UpsertDefinition(item); err != nil {
-			return err
+		if err != nil {
+			// 策略列表必须反映 Python ListStrategies 当前导出的算法，而不是 Go 侧兜底定义。
+			// Python 未连接时返回空列表，避免数据库旧行继续展示当前 Python 服务未必提供的策略。
+			logger.Warn("strategy definitions unavailable from python; returning empty list", "error", err)
+			return []StrategyDefinition{}, nil
 		}
 	}
-	return nil
-}
-
-func localStrategyDefinitions() []StrategyDefinition {
-	now := time.Now()
-	return []StrategyDefinition{
-		{
-			StrategyID:  MA20WeakBaselineStrategyID,
-			DisplayName: "MA20 Weak Pullback Baseline",
-			EntryScript: "python/ma20_weak_pullback_baseline.py",
-			Version:     "1.0.0",
-			DefaultParams: map[string]any{
-				"ma_period":            20,
-				"max_wait_bars":        6,
-				"observation_bars":     24,
-				"profit_atr_multiple":  1.0,
-				"adverse_atr_multiple": 0.8,
-				"algorithm":            MA20AlgoBaseline,
-			},
-			UpdatedAt: now,
-		},
-		{
-			StrategyID:  MA20WeakHardFilterStrategyID,
-			DisplayName: "MA20 Weak Pullback Hard Filter",
-			EntryScript: "python/ma20_weak_pullback_hard_filter.py",
-			Version:     "1.0.0",
-			DefaultParams: map[string]any{
-				"ma20_period":          20,
-				"ma60_period":          60,
-				"ma120_period":         120,
-				"atr_period":           14,
-				"observation_bars":     24,
-				"profit_atr_multiple":  1.0,
-				"adverse_atr_multiple": 0.8,
-				"swing_lookback_bars":  20,
-				"slope_lookback_bars":  5,
-				"structure_wait_bars":  3,
-				"touch_wait_bars":      12,
-				"trigger_wait_bars":    6,
-				"use_score_filter":     false,
-				"algorithm":            MA20AlgoHardFilter,
-			},
-			UpdatedAt: now,
-		},
-		{
-			StrategyID:  MA20WeakScoreFilterStrategyID,
-			DisplayName: "MA20 Weak Pullback Score Filter",
-			EntryScript: "python/ma20_weak_pullback_score_filter.py",
-			Version:     "1.0.0",
-			DefaultParams: map[string]any{
-				"ma20_period":          20,
-				"ma60_period":          60,
-				"ma120_period":         120,
-				"atr_period":           14,
-				"observation_bars":     24,
-				"profit_atr_multiple":  1.0,
-				"adverse_atr_multiple": 0.8,
-				"swing_lookback_bars":  20,
-				"slope_lookback_bars":  5,
-				"structure_wait_bars":  3,
-				"touch_wait_bars":      12,
-				"trigger_wait_bars":    6,
-				"use_score_filter":     true,
-				"algorithm":            MA20AlgoScoreFilter,
-			},
-			UpdatedAt: now,
-		},
-	}
+	return items, nil
 }
 
 func (m *Manager) ListInstances() ([]StrategyInstance, error) {
@@ -720,7 +688,27 @@ func (m *Manager) ListInstances() ([]StrategyInstance, error) {
 	for _, item := range items {
 		m.instances[item.InstanceID] = item
 	}
-	return items, nil
+	out := make([]StrategyInstance, len(items))
+	for i, item := range items {
+		out[i] = sanitizeStrategyInstanceForList(item)
+	}
+	return out, nil
+}
+
+func sanitizeStrategyInstanceForList(inst StrategyInstance) StrategyInstance {
+	if len(inst.Params) == 0 {
+		return inst
+	}
+	if _, ok := inst.Params["warmup_bars"]; !ok {
+		return inst
+	}
+	params := cloneStrategyParams(inst.Params)
+	// warmup_bars 是启动 Python runtime 时的内部大对象，页面只需要看到实例和状态。
+	// 历史实例若把它持久化，列表接口会变成 MB 级，拖慢启动/停止后的刷新并让按钮看似无响应。
+	delete(params, "warmup_bars")
+	params["warmup_bars_omitted"] = true
+	inst.Params = params
+	return inst
 }
 
 func (m *Manager) SaveInstance(inst StrategyInstance) error {
@@ -796,26 +784,31 @@ func (m *Manager) callStartInstance(inst StrategyInstance) error {
 	client := m.client
 	m.mu.RUnlock()
 	if client == nil {
-		return fmt.Errorf("strategy grpc client not connected")
+		return fmt.Errorf("strategy http client not connected")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(m.cfg.RequestTimeoutMS)*time.Millisecond)
+	ctx, cancel := context.WithTimeout(context.Background(), m.runtimeStartTimeout())
 	defer cancel()
-	plan, err := m.buildRuntimeStartPlan(ctx, client, inst)
-	if err != nil {
-		return err
-	}
-	logger.Info("strategy StartInstance call",
-		"instance_id", plan.Instance.InstanceID,
-		"strategy_id", plan.Instance.StrategyID,
-		"mode", plan.Instance.Mode,
-		"symbols", plan.Instance.Symbols,
-		"timeframe", plan.Instance.Timeframe,
-		"warmup_target", plan.Requirements.WarmupTarget,
-		"requires_anchor_time", plan.Requirements.RequiresAnchorTime,
-		"params", plan.Instance.Params,
-	)
+	_, err := m.startRuntimeInstance(ctx, client, inst)
+	return err
+}
 
-	return client.StartInstance(ctx, StartInstanceRequest{Instance: plan.Instance})
+func (m *Manager) requestTimeout() time.Duration {
+	timeout := time.Duration(m.cfg.RequestTimeoutMS) * time.Millisecond
+	if timeout <= 0 {
+		return 3 * time.Second
+	}
+	return timeout
+}
+
+func (m *Manager) runtimeStartTimeout() time.Duration {
+	timeout := m.requestTimeout()
+	// StartInstance 比 Ping/ListStrategies 重：它会先问 Python warmup 需求、从数据库补齐 K 线，
+	// 再把 warmup_bars 发送给 Python。调试模式下 Python 首次构造 runtime 还会被 debugpy 放大耗时。
+	// 不能沿用 3 秒普通请求超时，否则 Python 已经启动完成时 Go 可能先判 DeadlineExceeded，页面就显示启动失败。
+	if timeout < minRuntimeStartTimeout {
+		return minRuntimeStartTimeout
+	}
+	return timeout
 }
 
 func (m *Manager) StopInstance(instanceID string) error {
@@ -863,6 +856,73 @@ func (m *Manager) ListTraces(instanceID string, symbol string, limit int) ([]Str
 	return m.store.ListTraces(strings.TrimSpace(instanceID), strings.TrimSpace(symbol), limit)
 }
 
+func (m *Manager) restoreRunningInstances(reason string) error {
+	m.mu.RLock()
+	client := m.client
+	m.mu.RUnlock()
+	if client == nil {
+		return fmt.Errorf("strategy http client not connected")
+	}
+	return m.restoreRunningInstancesWithClient(context.Background(), client, reason)
+}
+
+func (m *Manager) restoreRunningInstancesWithClient(ctx context.Context, client runtimeStartClient, reason string) error {
+	m.restoreMu.Lock()
+	defer m.restoreMu.Unlock()
+	if m == nil || m.store == nil {
+		return nil
+	}
+	items, err := m.store.ListInstances()
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	restored := 0
+	for _, inst := range items {
+		if inst.Status != InstanceStatusRunning {
+			continue
+		}
+		// Python runtime 是进程内状态，Go 重启或 Python 重启后不会自动拥有数据库里的 running 实例。
+		// 因此每次 HTTP 从断开变为可用时，都要把这些实例重新 StartInstance 一遍；否则页面能看到运行实例，
+		// 但 Python 收到 OnBar 时会报 “runtime instance not started”，最终没有策略过程 trace。
+		startCtx := ctx
+		cancel := func() {}
+		if _, ok := startCtx.Deadline(); !ok {
+			startCtx, cancel = context.WithTimeout(startCtx, m.runtimeStartTimeout())
+		}
+		_, startErr := m.startRuntimeInstance(startCtx, client, inst)
+		cancel()
+		if startErr != nil {
+			logger.Warn("restore running strategy instance failed", "instance_id", inst.InstanceID, "strategy_id", inst.StrategyID, "reason", reason, "error", startErr)
+			if firstErr == nil {
+				firstErr = startErr
+			}
+			m.setInstanceError(inst.InstanceID, startErr)
+			continue
+		}
+		now := time.Now()
+		inst.LastStartedAt = &now
+		inst.LastError = ""
+		if saveErr := m.store.SaveInstance(inst); saveErr != nil {
+			if firstErr == nil {
+				firstErr = saveErr
+			}
+			m.setError(saveErr)
+			continue
+		}
+		m.mu.Lock()
+		m.instances[inst.InstanceID] = inst
+		m.mu.Unlock()
+		m.persistInstanceRestoreTrace(inst, reason)
+		restored++
+	}
+	if restored > 0 {
+		logger.Info("restored running strategy instances after python connection", "count", restored, "reason", reason)
+		m.broadcast("strategy_status_update", m.Status())
+	}
+	return firstErr
+}
+
 func (m *Manager) OrdersStatus() OrdersStatus {
 	return m.exec.Status()
 }
@@ -875,7 +935,7 @@ func (m *Manager) RunBacktest(req BacktestRequest) (StrategyRun, error) {
 	client := m.client
 	m.mu.RUnlock()
 	if client == nil {
-		return StrategyRun{}, fmt.Errorf("strategy grpc client not connected")
+		return StrategyRun{}, fmt.Errorf("strategy http client not connected")
 	}
 	if strings.TrimSpace(req.RunID) == "" {
 		req.RunID = mustRunID("backtest")
@@ -1188,7 +1248,7 @@ func (m *Manager) RunParameterSweep(req ParameterSweepRequest) (StrategyRun, err
 	client := m.client
 	m.mu.RUnlock()
 	if client == nil {
-		return StrategyRun{}, fmt.Errorf("strategy grpc client not connected")
+		return StrategyRun{}, fmt.Errorf("strategy http client not connected")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
@@ -1595,6 +1655,11 @@ type runtimeStartPlanner interface {
 	GetStartRequirements(context.Context, StartRequirementsRequest) (StartRequirementsResponse, error)
 }
 
+type runtimeStartClient interface {
+	runtimeStartPlanner
+	StartInstance(context.Context, StartInstanceRequest) error
+}
+
 type RuntimeStartPlan struct {
 	Instance     StrategyInstance
 	Requirements StartRequirementsResponse
@@ -1602,7 +1667,7 @@ type RuntimeStartPlan struct {
 
 func (m *Manager) buildRuntimeStartPlan(ctx context.Context, client runtimeStartPlanner, inst StrategyInstance) (RuntimeStartPlan, error) {
 	if client == nil {
-		return RuntimeStartPlan{}, fmt.Errorf("strategy grpc client not connected")
+		return RuntimeStartPlan{}, fmt.Errorf("strategy http client not connected")
 	}
 	if err := client.LoadStrategy(ctx, LoadStrategyRequest{StrategyID: inst.StrategyID}); err != nil {
 		logger.Error("LoadStrategy err: ", err)
@@ -1618,6 +1683,27 @@ func (m *Manager) buildRuntimeStartPlan(ctx context.Context, client runtimeStart
 		return RuntimeStartPlan{}, err
 	}
 	return RuntimeStartPlan{Instance: runtimeInst, Requirements: requirements}, nil
+}
+
+func (m *Manager) startRuntimeInstance(ctx context.Context, client runtimeStartClient, inst StrategyInstance) (RuntimeStartPlan, error) {
+	plan, err := m.buildRuntimeStartPlan(ctx, client, inst)
+	if err != nil {
+		return RuntimeStartPlan{}, err
+	}
+	logger.Info("strategy StartInstance call",
+		"instance_id", plan.Instance.InstanceID,
+		"strategy_id", plan.Instance.StrategyID,
+		"mode", plan.Instance.Mode,
+		"symbols", plan.Instance.Symbols,
+		"timeframe", plan.Instance.Timeframe,
+		"warmup_target", plan.Requirements.WarmupTarget,
+		"requires_anchor_time", plan.Requirements.RequiresAnchorTime,
+		// "params", plan.Instance.Params,
+	)
+	if err := client.StartInstance(ctx, StartInstanceRequest{Instance: plan.Instance}); err != nil {
+		return RuntimeStartPlan{}, err
+	}
+	return plan, nil
 }
 
 func (m *Manager) prepareRuntimeStartInstance(inst StrategyInstance, requirements StartRequirementsResponse) (StrategyInstance, error) {
@@ -1861,6 +1947,18 @@ func (m *Manager) persistInstanceStartTrace(inst StrategyInstance) {
 	if !ok {
 		return
 	}
+	m.persistTrace(inst, firstSymbol(inst.Symbols), inst.Mode, trace.EventTime, trace)
+}
+
+func (m *Manager) persistInstanceRestoreTrace(inst StrategyInstance, reason string) {
+	trace, ok := initialTraceForInstance(inst)
+	if !ok {
+		return
+	}
+	trace.EventTime = time.Now()
+	trace.Reason = "python runtime restored after http reconnect"
+	trace.Metrics["restore_reason"] = strings.TrimSpace(reason)
+	trace.Metrics["restored_at"] = trace.EventTime.Format(time.RFC3339Nano)
 	m.persistTrace(inst, firstSymbol(inst.Symbols), inst.Mode, trace.EventTime, trace)
 }
 

@@ -1,5 +1,5 @@
 ﻿<script setup>
-import { computed, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref, watch } from 'vue'
 import TopToolbar from './TopToolbar.vue'
 import LeftDrawToolbar from './LeftDrawToolbar.vue'
 import WatchlistPanel from './WatchlistPanel.vue'
@@ -14,7 +14,6 @@ import {
   buildChartStrategyInstance,
   formatStrategyAnchorTime,
   saveAndStartStrategyInstance,
-  selectPreferredStrategyDefinition,
   strategyDefaultParamsText,
 } from './strategyRuntime'
 
@@ -56,6 +55,7 @@ const strategyTraces = ref([])
 const strategyBacktests = ref([])
 const selectedStrategyInstanceId = ref('')
 const strategyStarting = ref(false)
+const STRATEGY_RUNTIME_REFRESH_TIMEOUT_MS = 8_000
 const ma20ReplayReportRunning = ref(false)
 const ma20ReplayReportTaskID = ref("")
 const strategyContextMenu = reactive({
@@ -65,6 +65,7 @@ const strategyContextMenu = reactive({
   anchor: null,
   loading: false,
   selectedDefinition: null,
+  startingStrategyID: '',
   paramsText: '',
   error: '',
 })
@@ -524,6 +525,23 @@ function currentTradeSymbol() {
   return String(scope.symbol || '').trim()
 }
 
+async function fetchWithTimeout(url, options = {}, timeoutMS = STRATEGY_RUNTIME_REFRESH_TIMEOUT_MS) {
+  if (!timeoutMS || typeof AbortController === 'undefined') return fetch(url, options)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMS)
+  try {
+    return await fetch(url, { ...options, signal: controller.signal })
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+async function fetchJSONWithTimeout(url, timeoutMS = STRATEGY_RUNTIME_REFRESH_TIMEOUT_MS) {
+  const resp = await fetchWithTimeout(url, {}, timeoutMS)
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`)
+  return resp.json()
+}
+
 function syncTradeFormWithScope(force = false) {
   const symbol = currentTradeSymbol()
   if (!symbol) return
@@ -635,44 +653,72 @@ async function fetchLineOrders() {
   }
 }
 
-async function fetchStrategyDefinitions() {
+async function fetchStrategyDefinitions(options = {}) {
+  const strict = !!options.strict
   try {
     const resp = await fetch('/api/strategy/definitions')
-    if (!resp.ok) return
+    if (!resp.ok) {
+      if (strict) throw new Error(await resp.text())
+      return
+    }
     const data = await resp.json()
     strategyDefinitions.value = Array.isArray(data.items) ? data.items : []
-  } catch {
+    if (strict && !strategyDefinitions.value.length) {
+      try {
+        const statusResp = await fetch('/api/strategy/status')
+        if (statusResp.ok) {
+          const statusData = await statusResp.json()
+          const status = statusData?.status || {}
+          if (!status.connected) {
+            const addr = status.http_addr || '--'
+            throw new Error(`策略服务未连接：${addr} ${status.last_error || ''}`.trim())
+          }
+        }
+      } catch (statusErr) {
+        if (statusErr instanceof Error) throw statusErr
+      }
+    }
+    return strategyDefinitions.value
+  } catch (err) {
+    if (strict) throw err
     // strategy subsystem may be disabled
   }
 }
 
 async function fetchStrategyRuntime() {
-  try {
-    const [statusResp, instancesResp, tracesResp, backtestsResp] = await Promise.all([
-      fetch('/api/strategy/status'),
-      fetch('/api/strategy/instances'),
-      fetch(`/api/strategy/traces?${new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()}`),
-      fetch('/api/strategy/backtests'),
-    ])
-    if (statusResp.ok) {
-      const data = await statusResp.json()
-      strategyStatus.value = data.status || {}
+  const traceQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()
+  const jobs = [
+    {
+      name: 'status',
+      url: '/api/strategy/status',
+      apply: (data) => { strategyStatus.value = data.status || {} },
+    },
+    {
+      name: 'instances',
+      url: '/api/strategy/instances',
+      apply: (data) => { strategyInstances.value = Array.isArray(data.items) ? data.items : [] },
+    },
+    {
+      name: 'traces',
+      url: `/api/strategy/traces?${traceQuery}`,
+      apply: (data) => { strategyTraces.value = Array.isArray(data.items) ? data.items : [] },
+    },
+    {
+      name: 'backtests',
+      url: '/api/strategy/backtests',
+      apply: (data) => { strategyBacktests.value = Array.isArray(data.items) ? data.items : [] },
+    },
+  ]
+  const results = await Promise.allSettled(jobs.map(async (job) => {
+    const data = await fetchJSONWithTimeout(job.url)
+    job.apply(data || {})
+  }))
+  results.forEach((result, idx) => {
+    if (result.status === 'rejected') {
+      // 运行态刷新只是 UI 同步，不能反过来卡住启动/停止按钮。
+      console.warn(`[strategy] runtime refresh ${jobs[idx].name} failed`, result.reason)
     }
-    if (instancesResp.ok) {
-      const data = await instancesResp.json()
-      strategyInstances.value = Array.isArray(data.items) ? data.items : []
-    }
-    if (tracesResp.ok) {
-      const data = await tracesResp.json()
-      strategyTraces.value = Array.isArray(data.items) ? data.items : []
-    }
-    if (backtestsResp.ok) {
-      const data = await backtestsResp.json()
-      strategyBacktests.value = Array.isArray(data.items) ? data.items : []
-    }
-  } catch {
-    // strategy subsystem may be disabled
-  }
+  })
   syncSelectedStrategyInstance()
 }
 
@@ -908,6 +954,7 @@ function closeStrategyContextMenu() {
   strategyContextMenu.anchor = null
   strategyContextMenu.loading = false
   strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.startingStrategyID = ''
   strategyContextMenu.paramsText = ''
   strategyContextMenu.error = ''
 }
@@ -933,12 +980,13 @@ async function onChartContextMenu(payload) {
   strategyContextMenu.open = true
   strategyContextMenu.loading = true
   strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.startingStrategyID = ''
   strategyContextMenu.paramsText = ''
   strategyContextMenu.error = ''
   try {
-    if (!strategyDefinitions.value.length) await fetchStrategyDefinitions()
-    const preferred = selectPreferredStrategyDefinition(strategyDefinitions.value)
-    if (preferred) selectStrategyDefinition(preferred)
+    await fetchStrategyDefinitions({ strict: true })
+  } catch (err) {
+    strategyContextMenu.error = err instanceof Error ? err.message : String(err)
   } finally {
     strategyContextMenu.loading = false
   }
@@ -965,6 +1013,17 @@ function selectStrategyDefinition(definition) {
   strategyContextMenu.selectedDefinition = definition || null
   strategyContextMenu.paramsText = strategyDefaultParamsText(definition)
   strategyContextMenu.error = ''
+}
+
+async function runStrategyDefinitionFromMenu(definition) {
+  if (strategyStarting.value) return
+  selectStrategyDefinition(definition)
+  strategyContextMenu.startingStrategyID = String(definition?.strategy_id || '')
+  try {
+    await startStrategyFromAnchor(strategyContextMenu.anchor, definition)
+  } finally {
+    strategyContextMenu.startingStrategyID = ''
+  }
 }
 
 function replayTaskTime(task, keys) {
@@ -1050,13 +1109,21 @@ async function startStrategyFromAnchor(anchor, definition) {
       klineReplayRunning: !!paneRef.value?.isKlineReplayRunning?.(),
     })
     await saveAndStartStrategyInstance(instance)
+    strategyStarting.value = false
+    selectedStrategyInstanceId.value = instanceID
     activeRightTab.value = 'strategy'
     layout.panes.right_watchlist_open = true
-    await fetchStrategyRuntime()
-    syncSelectedStrategyInstance(instanceID)
     closeStrategyContextMenu()
+    // StartInstance 已成功返回后，按钮和菜单应立即恢复；运行态刷新放后台做。
+    // 否则 instances/traces/backtests 任一接口慢或异常，都会把“启动中...”状态拖住。
+    void fetchStrategyRuntime()
+      .then(() => syncSelectedStrategyInstance(instanceID))
+      .catch((err) => console.warn('[strategy] refresh after start failed', err))
   } catch (err) {
     strategyContextMenu.error = err instanceof Error ? err.message : String(err)
+    strategyStarting.value = false
+    // 先让按钮状态复位，再弹同步 alert。否则 alert 阻塞事件循环时，用户看到的仍是“启动中...”。
+    await nextTick()
     showTradeError('图表启动策略', err)
   } finally {
     strategyStarting.value = false
@@ -1067,11 +1134,17 @@ async function stopStrategyInstance(instanceID) {
   const id = String(instanceID || '').trim()
   if (!id) return
   try {
-    const resp = await fetch(`/api/strategy/instances/${encodeURIComponent(id)}/stop`, {
+    const resp = await fetchWithTimeout(`/api/strategy/instances/${encodeURIComponent(id)}/stop`, {
       method: 'POST',
     })
     if (!resp.ok) throw new Error(await resp.text())
-    await fetchStrategyRuntime()
+    // 停止按钮是用户纠错路径，不能等全量运行态刷新完成后才反馈。
+    // 先本地改状态，再后台拉取权威状态，避免大实例列表或慢接口让用户误以为点击无效。
+    strategyInstances.value = strategyInstances.value.map((item) => (
+      String(item?.instance_id || '') === id ? { ...item, status: 'stopped', last_error: '' } : item
+    ))
+    syncSelectedStrategyInstance()
+    void fetchStrategyRuntime().catch((err) => console.warn('[strategy] refresh after stop failed', err))
   } catch (err) {
     showTradeError('停止策略', err)
   }
@@ -1769,6 +1842,9 @@ function connectChartWS() {
     }
     if (msg?.type === 'strategy_status_update' && msg.data) {
       strategyStatus.value = msg.data || {}
+      // 策略定义列表以 Python ListStrategies 为准；Go 先启动时页面最初可能拿不到列表。
+      // 一旦 HTTP 状态变为已连接，需要主动重新拉取定义，否则右键菜单会停留在“暂无可用策略”。
+      if (msg.data?.connected) void fetchStrategyDefinitions().catch(() => {})
       void fetchStrategyRuntime().catch(() => {})
       return
     }
@@ -2258,24 +2334,12 @@ onUnmounted(() => {
           class="tv-strategy-context-item"
           :class="{ active: strategyContextMenu.selectedDefinition?.strategy_id === def.strategy_id }"
           :disabled="strategyStarting"
-          @click="selectStrategyDefinition(def)"
+          @click="runStrategyDefinitionFromMenu(def)"
         >
           <span>{{ def.display_name || def.strategy_id }}</span>
-          <small>{{ def.strategy_id }}</small>
+          <small>{{ strategyContextMenu.startingStrategyID === def.strategy_id ? '启动中...' : def.strategy_id }}</small>
         </button>
-        <div v-if="strategyContextMenu.selectedDefinition" class="tv-strategy-param-editor">
-          <label>参数 JSON</label>
-          <textarea v-model="strategyContextMenu.paramsText" rows="8" spellcheck="false"></textarea>
-          <p v-if="strategyContextMenu.error" class="tv-strategy-context-error">{{ strategyContextMenu.error }}</p>
-          <button
-            type="button"
-            class="tv-strategy-context-start"
-            :disabled="strategyStarting"
-            @click="startStrategyFromAnchor(strategyContextMenu.anchor, strategyContextMenu.selectedDefinition)"
-          >
-            {{ strategyStarting ? '启动中...' : '启动策略' }}
-          </button>
-        </div>
+        <p v-if="strategyContextMenu.error" class="tv-strategy-context-error">{{ strategyContextMenu.error }}</p>
       </template>
       <div v-if="!strategyContextMenu.loading && !strategyDefinitions.length" class="tv-strategy-context-empty">暂无可用策略</div>
     </div>

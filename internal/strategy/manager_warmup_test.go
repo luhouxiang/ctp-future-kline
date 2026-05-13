@@ -6,7 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"ctp-future-kline/internal/config"
 	"ctp-future-kline/internal/klinequery"
+	"ctp-future-kline/internal/testmysql"
 )
 
 type fakeRuntimeStartPlanner struct {
@@ -23,6 +25,46 @@ func (f *fakeRuntimeStartPlanner) LoadStrategy(_ context.Context, req LoadStrate
 func (f *fakeRuntimeStartPlanner) GetStartRequirements(_ context.Context, req StartRequirementsRequest) (StartRequirementsResponse, error) {
 	f.requirementReq = req.Instance
 	return f.requirements, nil
+}
+
+type fakeRuntimeStartClient struct {
+	fakeRuntimeStartPlanner
+	started []StrategyInstance
+}
+
+func (f *fakeRuntimeStartClient) StartInstance(_ context.Context, req StartInstanceRequest) error {
+	f.started = append(f.started, req.Instance)
+	return nil
+}
+
+func TestRuntimeStartTimeoutUsesLongerDebugFloor(t *testing.T) {
+	m := &Manager{cfg: config.StrategyConfig{RequestTimeoutMS: 3000}}
+
+	if got := m.runtimeStartTimeout(); got != minRuntimeStartTimeout {
+		t.Fatalf("runtimeStartTimeout() = %v, want %v", got, minRuntimeStartTimeout)
+	}
+}
+
+func TestSanitizeStrategyInstanceForListOmitsWarmupBars(t *testing.T) {
+	inst := StrategyInstance{
+		InstanceID: "inst-1",
+		Params: map[string]any{
+			"warmup_bars":   []map[string]any{{"close": 1.0}},
+			"warmup_count":  1,
+			"warmup_target": 20,
+		},
+	}
+
+	out := sanitizeStrategyInstanceForList(inst)
+	if _, ok := out.Params["warmup_bars"]; ok {
+		t.Fatalf("sanitizeStrategyInstanceForList() kept warmup_bars: %+v", out.Params)
+	}
+	if out.Params["warmup_bars_omitted"] != true {
+		t.Fatalf("sanitizeStrategyInstanceForList() warmup_bars_omitted = %v, want true", out.Params["warmup_bars_omitted"])
+	}
+	if _, ok := inst.Params["warmup_bars"]; !ok {
+		t.Fatalf("sanitizeStrategyInstanceForList() mutated original params")
+	}
 }
 
 func TestParseInstanceAnchorTimeSupportsStartTime(t *testing.T) {
@@ -130,6 +172,79 @@ func TestBuildRuntimeStartPlanUsesPythonFactoryRequirements(t *testing.T) {
 	}
 	if got := plan.Instance.Params["warmup_count"]; got != 2 {
 		t.Fatalf("plan warmup_count = %v, want 2", got)
+	}
+}
+
+func TestListDefinitionsReturnsEmptyWhenPythonUnavailable(t *testing.T) {
+	m := &Manager{}
+	items, err := m.ListDefinitions()
+	if err != nil {
+		t.Fatalf("ListDefinitions() error = %v", err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("ListDefinitions() len = %d, want 0 when python ListStrategies is unavailable", len(items))
+	}
+}
+
+func TestRestoreRunningInstancesStartsPythonRuntimeAndWritesTrace(t *testing.T) {
+	dsn := testmysql.NewDatabase(t)
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	m := &Manager{
+		store:     store,
+		instances: make(map[string]StrategyInstance),
+	}
+	running := StrategyInstance{
+		InstanceID:  "inst-running",
+		StrategyID:  "sample.momentum",
+		DisplayName: "running sample",
+		Mode:        "paper",
+		Status:      InstanceStatusRunning,
+		AccountID:   "paper",
+		Symbols:     []string{"rb2601"},
+		Timeframe:   "1m",
+		Params:      map[string]any{},
+	}
+	stopped := running
+	stopped.InstanceID = "inst-stopped"
+	stopped.Status = InstanceStatusStopped
+	if err := store.SaveInstance(running); err != nil {
+		t.Fatalf("SaveInstance(running) error = %v", err)
+	}
+	if err := store.SaveInstance(stopped); err != nil {
+		t.Fatalf("SaveInstance(stopped) error = %v", err)
+	}
+
+	client := &fakeRuntimeStartClient{
+		fakeRuntimeStartPlanner: fakeRuntimeStartPlanner{
+			requirements: StartRequirementsResponse{},
+		},
+	}
+	if err := m.restoreRunningInstancesWithClient(context.Background(), client, "test reconnect"); err != nil {
+		t.Fatalf("restoreRunningInstancesWithClient() error = %v", err)
+	}
+	if len(client.started) != 1 {
+		t.Fatalf("started runtimes = %d, want 1", len(client.started))
+	}
+	if client.started[0].InstanceID != running.InstanceID {
+		t.Fatalf("started instance = %q, want %q", client.started[0].InstanceID, running.InstanceID)
+	}
+	if _, ok := m.instances[running.InstanceID]; !ok {
+		t.Fatalf("manager instances missing restored instance %q", running.InstanceID)
+	}
+	traces, err := store.ListTraces(running.InstanceID, "rb2601", 10)
+	if err != nil {
+		t.Fatalf("ListTraces() error = %v", err)
+	}
+	if len(traces) != 1 {
+		t.Fatalf("trace count = %d, want 1", len(traces))
+	}
+	if traces[0].StepKey != "WAIT_BREAK_BELOW_MA20" || !strings.Contains(traces[0].Reason, "restored") {
+		t.Fatalf("restore trace = %+v, want baseline start trace with restore reason", traces[0])
 	}
 }
 

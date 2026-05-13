@@ -2,7 +2,7 @@
 """示例动量策略。
 
 这个策略不是生产算法，它的价值在于保持一条最小可用的策略链路：
-- Go 侧可以用它验证 Python 服务启动、gRPC 调用、JSON 编解码和响应结构；
+- Go 侧可以用它验证 Python 服务启动、HTTP 调用、JSON 编解码和响应结构；
 - 前端可以用它验证 `target_position/confidence/reason/metrics` 的展示；
 - 新策略接入时可以对照它理解 Strategy 基类需要覆盖哪些方法。
 
@@ -13,9 +13,7 @@
 
 from __future__ import annotations
 
-import time
-
-from strategy_common import Strategy, _float, _instance_id
+from strategy_common import Strategy, _float, _instance_id, _rfc3339_utc_now
 from strategy_types import MetricsDict, RequestDict, ResponseDict, StrategyDefinition
 
 # 示例动量策略
@@ -44,7 +42,8 @@ class SampleMomentumStrategy(Strategy):
         "entry_script": "python/strategy_service.py",
         "version": "1.0.0",
         "default_params": {"threshold": 0.2},
-        "updated_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
+        # updated_at 会被 Go 解到 time.Time；必须带 Z/时区，否则 ListStrategies 会失败并导致页面没有策略列表。
+        "updated_at": _rfc3339_utc_now(),
     }
 
     def _decision(self, request: RequestDict) -> ResponseDict:

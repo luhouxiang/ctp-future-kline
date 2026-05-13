@@ -3,7 +3,7 @@
 
 本模块放所有策略都需要、但不属于某个具体交易算法的代码：
 - 日志配置：Python 服务既要被命令行直接运行，也会被 Go 进程拉起，所以需要可重复调用的日志初始化；
-- JSON 编解码：gRPC 层没有 protobuf 生成类，统一用 JSON bytes 和 dict 传输；
+- JSON 编解码：HTTP 传输层统一使用 JSON bytes 和 dict；
 - 请求字段读取与类型转换：外部 JSON 字段可能是数字、字符串或空值，策略入口统一兜底；
 - 响应/trace/check 构造：让所有策略返回同一种 no_signal、metrics、trace 结构；
 - Strategy 基类：给注册表提供统一接口，具体策略只覆盖自己关心的事件。
@@ -43,7 +43,7 @@ def _log_formatter() -> logging.Formatter:
     """统一日志格式。
 
     为什么带 filename 和 lineno：
-    策略模块拆分后，同一个请求可能经过 registry、grpc、具体策略多个文件。
+    策略模块拆分后，同一个请求可能经过 registry、runtime_service、具体策略多个文件。
     文件名和行号能直接定位是哪一层输出的日志，避免只看中文 reason 时难以追踪。
     """
     # 增加 datefmt 参数，格式：月-日 时:分:秒。
@@ -101,6 +101,16 @@ def _ensure_logging_configured(
     root.addHandler(handler)
 
 
+def _rfc3339_utc_now() -> str:
+    """返回 Go `time.Time` 能直接解析的 UTC RFC3339 时间。
+
+    为什么不再使用 `%Y-%m-%dT%H:%M:%S`：
+    Go 的策略定义结构里 `updated_at` 是 `time.Time`，JSON 解码必须看到 `Z` 或 `+08:00` 这类时区。
+    如果 Python 返回无时区字符串，Go 侧 `ListStrategies` 会解码失败，页面就会拿到空策略列表。
+    """
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+
 def _log_strategy_phase(request: RequestDict, response: ResponseDict | None) -> None:
     """为每次策略状态推进写一行紧凑日志。
 
@@ -132,17 +142,16 @@ def _log_strategy_phase(request: RequestDict, response: ResponseDict | None) -> 
 # JSON 编解码工具
 # -----------------------------------------------------------------------------
 def _loads(data: bytes | bytearray | memoryview | None) -> RequestDict:
-    """将 gRPC 收到的 bytes 请求体反序列化为 Python dict。
+    """将 JSON bytes 请求体反序列化为 Python dict。
 
     参数：
-        data: gRPC unary 请求传入的 bytes。上层约定其内容为 UTF-8 编码的 JSON。
+        data: 请求传入的 bytes。上层约定其内容为 UTF-8 编码的 JSON。
 
     返回：
         dict: 若 data 为空，返回空字典；否则返回 json.loads 后的对象。
 
     说明：
-        当前服务使用泛型 gRPC handler，没有使用 protobuf message 类型；
-        因此 request_deserializer 直接返回原始 bytes，再由这里统一转 dict。
+        传输层直接传递原始 JSON bytes，再由这里统一转 dict。
     """
     if not data:
         return {}
@@ -150,7 +159,7 @@ def _loads(data: bytes | bytearray | memoryview | None) -> RequestDict:
 
 
 def _dumps(value: Any) -> bytes:
-    """将 Python 对象序列化为 UTF-8 JSON bytes，作为 gRPC 响应体。
+    """将 Python 对象序列化为 UTF-8 JSON bytes，作为响应体。
 
     ensure_ascii=False：保留中文字符，便于调试时直接阅读。
     separators=(",", ":")：去掉多余空格，压缩响应体体积。
@@ -278,6 +287,7 @@ def _no_signal(
     reason: str,
     metrics: MetricsDict | None = None,
     trace: TraceDict | None = None,
+    isLog: bool = True,
 ) -> ResponseDict:
     """构造统一的“无交易信号”响应。
 
@@ -307,8 +317,9 @@ def _no_signal(
     # trace 是可选字段：只有在调用方传入时才添加，避免响应过于臃肿。
     if trace is not None:
         out["trace"] = trace
-    logger.info("no_signal_from_strategy: instance_id=%s,symbol=%s,event_time=%s,reason=%s",
-                out["instance_id"], out["symbol"], out["event_time"], reason)
+    if isLog:
+        logger.info("no_signal_from_strategy: instance_id=%s,symbol=%s,event_time=%s,reason=%s",
+                    out["instance_id"], out["symbol"], out["event_time"], reason)
     return out
 
 
@@ -456,7 +467,7 @@ def _require_fields(source: JSONObject, fields: tuple[str, ...]) -> None:
     """校验 source 中是否包含必填字段。
 
     若字段缺失、为 None 或空字符串，则抛出 ValueError。
-    上层 add_unary 会捕获该异常并转换为 gRPC INVALID_ARGUMENT。
+    上层 HTTP 入口会捕获该异常并转换为 4xx 错误。
     """
     missing = [name for name in fields if source.get(name) is None or source.get(name) == ""]
     if missing:

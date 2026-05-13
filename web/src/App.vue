@@ -132,7 +132,7 @@ const strategyStatus = reactive({
   enabled: false,
   process_running: false,
   connected: false,
-  grpc_addr: '',
+  http_addr: '',
   python_executable: '',
   python_conda_env_path: '',
   python_entry: '',
@@ -1993,8 +1993,8 @@ onUnmounted(() => {
       <div class="status-grid">
         <div class="status-item">启用: {{ strategyStatus.enabled ? '是' : '否' }}</div>
         <div class="status-item">Python 进程: {{ strategyStatus.process_running ? '运行中' : '未运行' }}</div>
-        <div class="status-item">gRPC 连接: {{ strategyStatus.connected ? '已连接' : '未连接' }}</div>
-        <div class="status-item">gRPC 地址: {{ strategyStatus.grpc_addr || '--' }}</div>
+        <div class="status-item">HTTP 连接: {{ strategyStatus.connected ? '已连接' : '未连接' }}</div>
+        <div class="status-item">HTTP 地址: {{ strategyStatus.http_addr || '--' }}</div>
         <div class="status-item">Python 解释器: {{ strategyStatus.python_executable || '--' }}</div>
         <div class="status-item">conda 环境: {{ strategyStatus.python_conda_env_path || '--' }}</div>
         <div class="status-item">Python 入口: {{ strategyStatus.python_entry || '--' }}</div>

@@ -15,6 +15,28 @@ function clonePlainObject(value) {
   }
 }
 
+const STRATEGY_START_TIMEOUT_MS = 45_000
+
+async function fetchWithTimeout(fetcher, url, options = {}, timeoutMS = 0) {
+  if (!timeoutMS || typeof AbortController === 'undefined') {
+    return fetcher(url, options)
+  }
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMS)
+  try {
+    return await fetcher(url, { ...options, signal: controller.signal })
+  } catch (err) {
+    // 浏览器 fetch 默认没有超时；如果后端、Python 调试器或 warmup 查询卡住，
+    // 不主动 abort 会让“启动策略”按钮一直停在启动中，用户也看不到失败原因。
+    if (err?.name === 'AbortError') {
+      throw new Error(`策略启动请求超过 ${Math.round(timeoutMS / 1000)} 秒未返回`)
+    }
+    throw err
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 export function formatStrategyAnchorTime(unixSeconds) {
   const n = Number(unixSeconds || 0)
   if (!Number.isFinite(n) || n <= 0) return '--'
@@ -109,11 +131,11 @@ export function buildChartStrategyInstance({
 }
 
 export async function saveStrategyInstance(instance, fetcher = fetch) {
-  const resp = await fetcher('/api/strategy/instances', {
+  const resp = await fetchWithTimeout(fetcher, '/api/strategy/instances', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(instance),
-  })
+  }, STRATEGY_START_TIMEOUT_MS)
   if (!resp.ok) throw new Error(await resp.text())
   return resp.json()
 }
@@ -121,9 +143,9 @@ export async function saveStrategyInstance(instance, fetcher = fetch) {
 export async function startStrategyInstance(instanceID, fetcher = fetch) {
   const id = cleanText(instanceID)
   if (!id) throw new Error('instance_id is required')
-  const resp = await fetcher(`/api/strategy/instances/${encodeURIComponent(id)}/start`, {
+  const resp = await fetchWithTimeout(fetcher, `/api/strategy/instances/${encodeURIComponent(id)}/start`, {
     method: 'POST',
-  })
+  }, STRATEGY_START_TIMEOUT_MS)
   if (!resp.ok) throw new Error(await resp.text())
   return resp.json()
 }
