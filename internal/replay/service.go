@@ -185,6 +185,8 @@ type Service struct {
 	kline KlineReplayHandler
 	// seenFirstDispatch 用于记录首条分发日志是否已打印。
 	seenFirstDispatch map[string]struct{}
+	// klineResumeSeq 用于在 kline 模式下标记“恢复后重置等待轮次”。
+	klineResumeSeq uint64
 }
 
 // NewService 初始化 replay service。
@@ -303,6 +305,9 @@ func (s *Service) StartWithPrepare(req StartRequest, prepares []StartPrepareFunc
 		CreatedAt:  time.Now(),
 		StartedAt:  time.Now(),
 	}
+	if mode == "kline" {
+		s.klineResumeSeq++
+	}
 	prepares = append([]StartPrepareFunc(nil), prepares...)
 	go s.run(ctx, taskID, req, mode, speed, prepares)
 	logger.Info("replay service task created", "task_id", taskID, "status", s.snapshot.Status, "elapsed_ms", time.Since(startedAt).Milliseconds())
@@ -395,6 +400,9 @@ func (s *Service) Resume() (TaskSnapshot, error) {
 		return s.snapshot, fmt.Errorf("replay task not paused")
 	}
 	s.snapshot.Status = StatusRunning
+	if s.snapshot.Mode == "kline" {
+		s.klineResumeSeq++
+	}
 	return s.snapshot, nil
 }
 
@@ -615,6 +623,19 @@ func (s *Service) currentSpeed(taskID string, fallback float64) float64 {
 		return fallback
 	}
 	return s.snapshot.Speed
+}
+
+func (s *Service) currentKlineWaitState(taskID string, fallback time.Duration, observedSeq uint64) (time.Duration, uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.snapshot.TaskID != taskID {
+		return fallback, observedSeq
+	}
+	interval := time.Duration(s.snapshot.Speed) * time.Millisecond
+	if interval <= 0 {
+		interval = fallback
+	}
+	return interval, s.klineResumeSeq
 }
 
 func (s *Service) waitRealtimeDelta(ctx context.Context, taskID string, delta time.Duration, fallbackSpeed float64) error {

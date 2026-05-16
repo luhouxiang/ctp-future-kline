@@ -535,7 +535,7 @@ func (m *Manager) connect() error {
 	_, err := client.Ping(ctx)
 	cancel()
 	if err != nil {
-		logger.Warn("strategy http ping failed", "http_addr", addr, "error", err)
+		// logger.Warn("strategy http ping failed", "http_addr", addr, "error", err)
 		return err
 	}
 	m.mu.Lock()

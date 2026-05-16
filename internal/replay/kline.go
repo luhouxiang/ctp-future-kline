@@ -158,15 +158,17 @@ func (s *Service) waitKlineInterval(ctx context.Context, taskID string, fallback
 	}
 	const maxSleepSlice = 100 * time.Millisecond
 	remaining := fallback
+	_, resumeSeq := s.currentKlineWaitState(taskID, fallback, 0)
 	for remaining > 0 {
 		if err := s.waitIfPaused(ctx, taskID); err != nil {
 			return err
 		}
-		interval := time.Duration(s.currentSpeed(taskID, float64(fallback/time.Millisecond))) * time.Millisecond
-		if interval <= 0 {
-			interval = fallback
-		}
-		if interval != fallback {
+		interval, nextResumeSeq := s.currentKlineWaitState(taskID, fallback, resumeSeq)
+		if nextResumeSeq != resumeSeq {
+			remaining = interval
+			fallback = interval
+			resumeSeq = nextResumeSeq
+		} else if interval != fallback {
 			remaining = interval
 			fallback = interval
 		}

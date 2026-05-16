@@ -314,10 +314,166 @@ func TestReplayServiceKlineModeLoadsChunksUntilExhausted(t *testing.T) {
 	}
 }
 
+func TestReplayServiceKlineResumeRestartsFullInterval(t *testing.T) {
+	t.Parallel()
+
+	svc := newReplayService(t)
+	handler := &klineReplayHandlerStub{}
+	base := time.Date(2026, 4, 27, 21, 0, 0, 0, time.Local)
+	for i := 0; i < 3; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		handler.bars = append(handler.bars, replay.KlineBar{
+			Symbol:       "ag2610",
+			Type:         "contract",
+			Variety:      "ag",
+			Timeframe:    "1m",
+			AdjustedTime: ts,
+			DataTime:     ts,
+			Open:         float64(i),
+			High:         float64(i) + 1,
+			Low:          float64(i) - 1,
+			Close:        float64(i),
+		})
+	}
+	consumedAt := make(chan time.Time, 4)
+	handler.onConsume = func(_ replay.KlineBar) {
+		consumedAt <- time.Now()
+	}
+	svc.RegisterKlineReplayHandler(handler)
+	task, err := svc.Start(replay.StartRequest{
+		Mode: "kline",
+		Kline: &replay.KlineStartRequest{
+			Symbol:             "ag2610",
+			Type:               "contract",
+			Variety:            "ag",
+			Timeframe:          "1m",
+			AnchorAdjustedTime: base,
+			ChunkSize:          10,
+			IntervalMS:         1000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("start kline replay failed: %v", err)
+	}
+
+	select {
+	case <-consumedAt:
+	case <-time.After(time.Second):
+		t.Fatal("first kline bar was not consumed")
+	}
+	time.Sleep(250 * time.Millisecond)
+	if _, err := svc.Pause(); err != nil {
+		t.Fatalf("pause failed: %v", err)
+	}
+	select {
+	case at := <-consumedAt:
+		t.Fatalf("received unexpected bar while paused at %v", at)
+	case <-time.After(1100 * time.Millisecond):
+	}
+	resumedAt := time.Now()
+	if _, err := svc.Resume(); err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	select {
+	case at := <-consumedAt:
+		elapsed := at.Sub(resumedAt)
+		if elapsed < 900*time.Millisecond {
+			t.Fatalf("second kline bar arrived too soon after resume: %s", elapsed)
+		}
+		if elapsed > 1600*time.Millisecond {
+			t.Fatalf("second kline bar arrived too late after resume: %s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("second kline bar was not consumed after resume")
+	}
+	if _, err := svc.Stop(); err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+	waitTaskFinished(t, svc, task.TaskID, 3*time.Second)
+}
+
+func TestReplayServiceKlineResumeUsesUpdatedSpeed(t *testing.T) {
+	t.Parallel()
+
+	svc := newReplayService(t)
+	handler := &klineReplayHandlerStub{}
+	base := time.Date(2026, 4, 27, 21, 0, 0, 0, time.Local)
+	for i := 0; i < 3; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute)
+		handler.bars = append(handler.bars, replay.KlineBar{
+			Symbol:       "ag2610",
+			Type:         "contract",
+			Variety:      "ag",
+			Timeframe:    "1m",
+			AdjustedTime: ts,
+			DataTime:     ts,
+			Open:         float64(i),
+			High:         float64(i) + 1,
+			Low:          float64(i) - 1,
+			Close:        float64(i),
+		})
+	}
+	consumedAt := make(chan time.Time, 4)
+	handler.onConsume = func(_ replay.KlineBar) {
+		consumedAt <- time.Now()
+	}
+	svc.RegisterKlineReplayHandler(handler)
+	task, err := svc.Start(replay.StartRequest{
+		Mode: "kline",
+		Kline: &replay.KlineStartRequest{
+			Symbol:             "ag2610",
+			Type:               "contract",
+			Variety:            "ag",
+			Timeframe:          "1m",
+			AnchorAdjustedTime: base,
+			ChunkSize:          10,
+			IntervalMS:         1000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("start kline replay failed: %v", err)
+	}
+
+	select {
+	case <-consumedAt:
+	case <-time.After(time.Second):
+		t.Fatal("first kline bar was not consumed")
+	}
+	time.Sleep(200 * time.Millisecond)
+	if _, err := svc.Pause(); err != nil {
+		t.Fatalf("pause failed: %v", err)
+	}
+	if _, err := svc.UpdateSpeed(250); err != nil {
+		t.Fatalf("update speed while paused failed: %v", err)
+	}
+	resumedAt := time.Now()
+	if _, err := svc.Resume(); err != nil {
+		t.Fatalf("resume failed: %v", err)
+	}
+	select {
+	case at := <-consumedAt:
+		elapsed := at.Sub(resumedAt)
+		if elapsed < 200*time.Millisecond {
+			t.Fatalf("second kline bar arrived too soon after speed update: %s", elapsed)
+		}
+		if elapsed > 700*time.Millisecond {
+			t.Fatalf("second kline bar ignored updated speed, elapsed=%s", elapsed)
+		}
+	case <-time.After(1500 * time.Millisecond):
+		t.Fatal("second kline bar was not consumed after speed update")
+	}
+	if _, err := svc.Stop(); err != nil {
+		t.Fatalf("stop failed: %v", err)
+	}
+	waitTaskFinished(t, svc, task.TaskID, 3*time.Second)
+}
+
 type klineReplayHandlerStub struct {
 	bars      []replay.KlineBar
+	mu        sync.Mutex
 	consumed  []replay.KlineBar
 	loadCalls int
+	onConsume func(replay.KlineBar)
 }
 
 func (h *klineReplayHandlerStub) LoadKlineChunk(_ context.Context, _ replay.KlineStartRequest, afterAdjusted time.Time, limit int) (replay.KlineChunk, error) {
@@ -336,7 +492,13 @@ func (h *klineReplayHandlerStub) LoadKlineChunk(_ context.Context, _ replay.Klin
 }
 
 func (h *klineReplayHandlerStub) ConsumeKlineBar(_ context.Context, _ string, _ replay.KlineStartRequest, bar replay.KlineBar) error {
+	h.mu.Lock()
 	h.consumed = append(h.consumed, bar)
+	onConsume := h.onConsume
+	h.mu.Unlock()
+	if onConsume != nil {
+		onConsume(bar)
+	}
 	return nil
 }
 

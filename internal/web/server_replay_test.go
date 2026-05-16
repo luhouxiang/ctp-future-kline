@@ -15,6 +15,7 @@ import (
 	"ctp-future-kline/internal/appmode"
 	"ctp-future-kline/internal/bus"
 	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/quotes"
 	"ctp-future-kline/internal/replay"
 	"ctp-future-kline/internal/strategy"
 	"ctp-future-kline/internal/testmysql"
@@ -194,6 +195,48 @@ func TestConsumeKlineBarPublishesReplayBarToStrategy(t *testing.T) {
 		t.Fatalf("unexpected replay bar identity: %+v", got)
 	}
 	if got.Open != 100 || got.High != 101 || got.Low != 99 || got.Close != 100.5 {
+		t.Fatalf("unexpected replay bar prices: %+v", got)
+	}
+}
+
+func TestConsumeKlineBarWithReplaySinkPublishesReplayBarToStrategyOnce(t *testing.T) {
+	sink := &captureStrategySink{}
+	strategy.SetDefaultSink(sink)
+	t.Cleanup(func() { strategy.SetDefaultSink(nil) })
+
+	srv := &Server{replaySink: &quotes.ReplaySink{}}
+	barTime := time.Date(2026, 4, 30, 9, 40, 0, 0, time.Local)
+	err := srv.ConsumeKlineBar(
+		httptest.NewRequest(http.MethodPost, "/", nil).Context(),
+		"task-2",
+		replay.KlineStartRequest{Symbol: "srl9", Type: "l9", Variety: "sr", Timeframe: "5m"},
+		replay.KlineBar{
+			Symbol:       "srl9",
+			Type:         "l9",
+			Variety:      "sr",
+			Exchange:     "CZCE",
+			Timeframe:    "5m",
+			AdjustedTime: barTime,
+			DataTime:     barTime,
+			Open:         101,
+			High:         102,
+			Low:          100,
+			Close:        101.5,
+			Volume:       15,
+			OpenInterest: 37,
+		},
+	)
+	if err != nil {
+		t.Fatalf("ConsumeKlineBar failed: %v", err)
+	}
+	if len(sink.replayBars) != 1 {
+		t.Fatalf("replay bars = %d, want 1", len(sink.replayBars))
+	}
+	got := sink.replayBars[0]
+	if got.InstrumentID != "srl9" || got.Variety != "sr" || got.Period != "5m" {
+		t.Fatalf("unexpected replay bar identity: %+v", got)
+	}
+	if got.Open != 101 || got.High != 102 || got.Low != 100 || got.Close != 101.5 {
 		t.Fatalf("unexpected replay bar prices: %+v", got)
 	}
 }
