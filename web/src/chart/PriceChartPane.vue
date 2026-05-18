@@ -2190,10 +2190,12 @@ function applyQuoteSynthesis(update, ticketPayload) {
   const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
   const localDataMode = String(props.dataMode || "realtime").trim().toLowerCase();
   if (subDataMode && subDataMode !== localDataMode) return;
+  const timeframe = String(sub.timeframe || props.scope?.timeframe || "1m").trim().toLowerCase();
+  if (timeframe !== "1m") return;
   if (
     String(sub.symbol || "").trim().toLowerCase() !== String(props.scope?.symbol || "").trim().toLowerCase() ||
     String(sub.type || "").trim().toLowerCase() !== String(props.scope?.type || "").trim().toLowerCase() ||
-    String(sub.timeframe || "").trim().toLowerCase() !== String(props.scope?.timeframe || "").trim().toLowerCase()
+    timeframe !== String(props.scope?.timeframe || "").trim().toLowerCase()
   ) {
     return;
   }
