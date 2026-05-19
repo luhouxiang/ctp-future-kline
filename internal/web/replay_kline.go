@@ -74,6 +74,7 @@ func (s *Server) ConsumeKlineBar(ctx context.Context, taskID string, req replay.
 	}
 	if s.replaySink != nil {
 		if err := s.replaySink.PublishKlineReplayBar(sub, quotes.ReplayKlineBar{
+			ReplayTaskID: taskID,
 			Symbol:       sub.Symbol,
 			Type:         sub.Type,
 			Variety:      sub.Variety,
@@ -92,6 +93,7 @@ func (s *Server) ConsumeKlineBar(ctx context.Context, taskID string, req replay.
 		}
 	} else {
 		strategy.PublishReplayBar(strategy.BarEvent{
+			ReplayTaskID: taskID,
 			Variety:      sub.Variety,
 			InstrumentID: sub.Symbol,
 			Exchange:     bar.Exchange,
@@ -123,4 +125,18 @@ func (s *Server) ConsumeKlineBar(ctx context.Context, taskID string, req replay.
 	}
 	// logger.Debug("kline replay bar consumed", "task_id", taskID, "symbol", sub.Symbol, "timeframe", sub.Timeframe, "adjusted_time", bar.AdjustedTime, "close", bar.Close)
 	return nil
+}
+
+func (s *Server) OnTaskFinished(_ context.Context, snap replay.TaskSnapshot) error {
+	if s == nil {
+		return nil
+	}
+	var firstErr error
+	if s.replaySink != nil {
+		firstErr = s.replaySink.OnTaskFinished(context.Background(), snap)
+	}
+	if s.strategy != nil {
+		s.strategy.FinalizeReplayReports(snap.TaskID, snap.Status)
+	}
+	return firstErr
 }

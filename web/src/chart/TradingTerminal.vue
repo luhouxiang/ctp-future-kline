@@ -53,6 +53,8 @@ const strategyInstances = ref([])
 const strategyStatus = ref({})
 const strategyTraces = ref([])
 const strategyBacktests = ref([])
+const selectedStrategyBacktestRunId = ref('')
+const strategyBacktestResult = ref(null)
 const selectedStrategyInstanceId = ref('')
 const strategyStarting = ref(false)
 const STRATEGY_RUNTIME_REFRESH_TIMEOUT_MS = 8_000
@@ -720,6 +722,34 @@ async function fetchStrategyRuntime() {
     }
   })
   syncSelectedStrategyInstance()
+  syncSelectedStrategyBacktest()
+}
+
+function syncSelectedStrategyBacktest() {
+  const rows = Array.isArray(strategyBacktests.value) ? strategyBacktests.value : []
+  if (selectedStrategyBacktestRunId.value && rows.some((row) => String(row?.run_id || '') === selectedStrategyBacktestRunId.value)) return
+  const preferred = rows.find((row) => String(row?.run_type || '') === 'replay_report') || rows[0] || null
+  selectedStrategyBacktestRunId.value = String(preferred?.run_id || '')
+  if (selectedStrategyBacktestRunId.value) void loadStrategyBacktestResult(selectedStrategyBacktestRunId.value).catch(() => {})
+  else strategyBacktestResult.value = null
+}
+
+async function loadStrategyBacktestResult(runID) {
+  const id = String(runID || '').trim()
+  if (!id) return
+  selectedStrategyBacktestRunId.value = id
+  strategyBacktestResult.value = null
+  const resp = await fetch(`/api/strategy/backtests/${encodeURIComponent(id)}/result`)
+  if (!resp.ok) throw new Error(await resp.text())
+  const data = await resp.json()
+  if (selectedStrategyBacktestRunId.value !== id) return
+  strategyBacktestResult.value = data?.result || null
+}
+
+function onStrategyBacktestSelect(runID) {
+  void loadStrategyBacktestResult(runID).catch((err) => {
+    console.warn('[strategy] load replay report failed', err)
+  })
 }
 
 function pushStrategyTrace(item) {
@@ -1854,6 +1884,10 @@ function connectChartWS() {
     }
     if (msg?.type === 'strategy_backtest_done' && msg.data) {
       strategyBacktests.value = [msg.data, ...strategyBacktests.value.filter((x) => String(x?.run_id || '') !== String(msg.data?.run_id || ''))].slice(0, 20)
+      syncSelectedStrategyBacktest()
+      if (String(msg.data?.run_id || '') === selectedStrategyBacktestRunId.value) {
+        void loadStrategyBacktestResult(selectedStrategyBacktestRunId.value).catch(() => {})
+      }
       return
     }
     if (
@@ -2221,7 +2255,6 @@ onUnmounted(() => {
           @chart-context-menu="onChartContextMenu"
           @kline-replay-date-change="onKlineReplayDateChange"
           @latest-bar-change="onLatestBarChange"
-          @kline-replay-finished="runMA20ReplayReport"
         />
       </div>
 
@@ -2246,7 +2279,9 @@ onUnmounted(() => {
             status: strategyStatus,
             instances: strategyInstances,
             traces: strategyTraces,
-            backtests: strategyBacktests
+            backtests: strategyBacktests,
+            selectedBacktestRunId: selectedStrategyBacktestRunId,
+            backtestResult: strategyBacktestResult
           }"
           :selected-strategy-instance-id="selectedStrategyInstanceId"
           :channels="channelState"
@@ -2270,6 +2305,7 @@ onUnmounted(() => {
           @strategy-instance-select="onStrategyInstanceSelect"
           @strategy-instance-stop="stopStrategyInstance"
           @strategy-run-click="openStrategyRunMenu"
+          @strategy-backtest-select="onStrategyBacktestSelect"
           @channel-action="onChannelAction"
           @channel-settings="onChannelSettings"
           @reversal-action="onReversalAction"

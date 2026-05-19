@@ -34,6 +34,7 @@ const emit = defineEmits([
   'strategy-instance-select',
   'strategy-instance-stop',
   'strategy-run-click',
+  'strategy-backtest-select',
   'channel-action',
   'channel-settings',
   'reversal-action',
@@ -381,9 +382,37 @@ const strategyStepRows = computed(() => {
 
 const strategyBacktestRows = computed(() => (
   (Array.isArray(props.strategy?.backtests) ? props.strategy.backtests : [])
-    .filter((row) => String(row?.strategy_id || '').startsWith('ma20.weak_pullback_short'))
+    .filter((row) => String(row?.run_type || '') === 'replay_report' || String(row?.strategy_id || '').startsWith('ma20.weak_pullback_short'))
     .slice(0, 6)
 ))
+const replayBacktestRows = computed(() => strategyBacktestRows.value.filter((row) => String(row?.run_type || '') === 'replay_report'))
+
+const selectedBacktestRunId = computed(() => String(props.strategy?.selectedBacktestRunId || strategyBacktestRows.value[0]?.run_id || ''))
+const selectedBacktestResult = computed(() => {
+  const result = props.strategy?.backtestResult
+  return result && typeof result === 'object' ? result : null
+})
+const replayReportSignals = computed(() => Array.isArray(selectedBacktestResult.value?.signal_table) ? selectedBacktestResult.value.signal_table.slice(0, 20) : [])
+const replayReportOrders = computed(() => Array.isArray(selectedBacktestResult.value?.order_table) ? selectedBacktestResult.value.order_table.slice(0, 20) : [])
+const replayReportAnalysis = computed(() => {
+  if (Array.isArray(selectedBacktestResult.value?.strategy_analysis_table)) return selectedBacktestResult.value.strategy_analysis_table
+  const row = replayBacktestRows.value[0]
+  const summary = row?.summary && typeof row.summary === 'object' ? row.summary : null
+  if (!summary) return []
+  return [{
+    instance_id: row.instance_id,
+    strategy_id: row.strategy_id,
+    signal_count: summary.signal_count || 0,
+    order_plan_count: summary.order_plan_count || 0,
+    simulated_count: summary.simulated_count || 0,
+    blocked_count: summary.blocked_count || 0,
+    net_target_position_change: summary.net_target_position_change || 0,
+    latest_order_status: summary.latest_order_status || '',
+    latest_risk_status: summary.latest_risk_status || '',
+    updated_at: row.finished_at || row.started_at || '',
+  }]
+})
+const hasReplayReportDetail = computed(() => replayReportSignals.value.length > 0 || replayReportOrders.value.length > 0 || replayReportAnalysis.value.length > 0)
 
 function formatTraceTime(value) {
   const ts = Date.parse(String(value || ''))
@@ -445,6 +474,14 @@ function stepStateLabel(value) {
 }
 
 function formatBacktestSummary(summary) {
+  if (summary && String(summary.kind || '') === 'replay_report') {
+    const signals = Number(summary.signal_count || 0)
+    const orders = Number(summary.order_plan_count || 0)
+    const blocked = Number(summary.blocked_count || 0)
+    const simulated = Number(summary.simulated_count || 0)
+    const latest = String(summary.latest_order_status || '--')
+    return `信号${signals} 计划${orders} 模拟${simulated} 阻断${blocked} 最新${latest}`
+  }
   const stats = summary && typeof summary === 'object' ? summary.stats || {} : {}
   const rows = Object.entries(stats)
   if (!rows.length) return '--'
@@ -457,6 +494,17 @@ function formatBacktestSummary(summary) {
     const formationText = Number.isFinite(formationRate) ? `${(formationRate * 100).toFixed(1)}%` : '--'
     return `${algo}: ${success}/${signals} 成功率${rateText} 成形${formationText}`
   }).join(' | ')
+}
+
+function formatNumber(value, digits = 2) {
+  const n = Number(value)
+  if (!Number.isFinite(n)) return '--'
+  return n.toFixed(digits).replace(/\.?0+$/, '')
+}
+
+function compactText(value, fallback = '--') {
+  const text = String(value ?? '').trim()
+  return text || fallback
 }
 </script>
 
@@ -600,6 +648,26 @@ function formatBacktestSummary(summary) {
         <div v-else class="tv-object-empty">暂无策略过程事件</div>
       </div>
 
+      <div class="tv-quote-card tv-replay-report-card">
+        <div class="tv-channel-settings-head">策略分析表</div>
+        <div v-if="replayReportAnalysis.length" class="tv-replay-report-detail always-open">
+          <div class="tv-report-section">
+            <table class="tv-report-table">
+              <tbody>
+                <tr v-for="row in replayReportAnalysis" :key="`top-visible-${row.instance_id}-${row.updated_at}`">
+                  <td>信号 {{ row.signal_count || 0 }}</td>
+                  <td>计划 {{ row.order_plan_count || 0 }}</td>
+                  <td>模拟 {{ row.simulated_count || 0 }}</td>
+                  <td>阻断 {{ row.blocked_count || 0 }}</td>
+                  <td>净变化 {{ formatNumber(row.net_target_position_change) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div v-else class="tv-object-empty">暂无回放报告</div>
+      </div>
+
       <div class="tv-quote-card">
         <div class="tv-channel-settings-head">策略步骤</div>
         <div class="tv-strategy-step-list">
@@ -646,13 +714,67 @@ function formatBacktestSummary(summary) {
 
       <div class="tv-quote-card">
         <div class="tv-channel-settings-head">回放报告</div>
-        <div class="tv-strategy-backtest-list">
-          <div v-for="item in strategyBacktestRows" :key="item.run_id" class="tv-strategy-backtest-row">
-            <strong>{{ item.symbol || 'all' }} · {{ item.timeframe || '--' }}</strong>
-            <small>{{ formatBacktestSummary(item.summary) }}</small>
+        <div v-if="replayReportAnalysis.length" class="tv-replay-report-detail always-open">
+          <div class="tv-report-section">
+            <div class="tv-report-title">策略分析表</div>
+            <table class="tv-report-table">
+              <tbody>
+                <tr v-for="row in replayReportAnalysis" :key="`top-${row.instance_id}-${row.updated_at}`">
+                  <td>信号 {{ row.signal_count || 0 }}</td>
+                  <td>计划 {{ row.order_plan_count || 0 }}</td>
+                  <td>模拟 {{ row.simulated_count || 0 }}</td>
+                  <td>阻断 {{ row.blocked_count || 0 }}</td>
+                  <td>净变化 {{ formatNumber(row.net_target_position_change) }}</td>
+                </tr>
+              </tbody>
+            </table>
           </div>
         </div>
+        <div class="tv-strategy-backtest-list">
+          <button
+            v-for="item in strategyBacktestRows"
+            :key="item.run_id"
+            type="button"
+            class="tv-strategy-backtest-row"
+            :class="{ active: String(item.run_id || '') === selectedBacktestRunId }"
+            @click="emit('strategy-backtest-select', item.run_id)"
+          >
+            <strong>{{ item.symbol || 'all' }} · {{ item.timeframe || '--' }}</strong>
+            <small>{{ formatBacktestSummary(item.summary) }}</small>
+          </button>
+        </div>
         <div v-if="!strategyBacktestRows.length" class="tv-object-empty">暂无回放报告</div>
+        <div v-if="hasReplayReportDetail" class="tv-replay-report-detail">
+          <div class="tv-report-section">
+            <div class="tv-report-title">信号表</div>
+            <table class="tv-report-table">
+              <tbody>
+                <tr v-for="row in replayReportSignals" :key="`sig-${row.id}`">
+                  <td>{{ formatTraceTime(row.event_time) }}</td>
+                  <td>{{ row.symbol || '--' }}</td>
+                  <td>目标 {{ formatNumber(row.target_position) }}</td>
+                  <td>{{ compactText(row.reason) }}</td>
+                </tr>
+                <tr v-if="!replayReportSignals.length"><td colspan="4">暂无信号</td></tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="tv-report-section">
+            <div class="tv-report-title">下单表</div>
+            <table class="tv-report-table">
+              <tbody>
+                <tr v-for="row in replayReportOrders" :key="`ord-${row.id}`">
+                  <td>{{ formatTraceTime(row.event_time) }}</td>
+                  <td>当前 {{ formatNumber(row.current_position) }}</td>
+                  <td>目标 {{ formatNumber(row.target_position) }}</td>
+                  <td>{{ compactText(row.order_status) }}</td>
+                  <td>{{ compactText(row.risk_reason, row.risk_status || '--') }}</td>
+                </tr>
+                <tr v-if="!replayReportOrders.length"><td colspan="5">暂无下单计划</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
 
       <div class="tv-quote-card">
@@ -1054,8 +1176,21 @@ function formatBacktestSummary(summary) {
   display: grid;
   gap: 3px;
   padding: 7px 4px;
+  width: 100%;
+  text-align: left;
+  background: transparent;
   border-bottom: 1px solid rgba(130, 156, 188, 0.14);
+  border-left: 0;
+  border-right: 0;
+  border-top: 0;
   font-size: 12px;
+  color: inherit;
+  cursor: pointer;
+}
+
+.tv-strategy-backtest-row.active,
+.tv-strategy-backtest-row:hover {
+  background: rgba(78, 161, 255, 0.12);
 }
 
 .tv-strategy-backtest-row strong,
@@ -1067,6 +1202,43 @@ function formatBacktestSummary(summary) {
 .tv-strategy-backtest-row small {
   color: rgba(210, 223, 238, 0.62);
   line-height: 1.35;
+}
+
+.tv-replay-report-detail {
+  display: grid;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.tv-replay-report-detail.always-open {
+  margin-top: 0;
+  margin-bottom: 8px;
+}
+
+.tv-report-section {
+  display: grid;
+  gap: 4px;
+}
+
+.tv-report-title {
+  font-size: 12px;
+  color: rgba(210, 223, 238, 0.72);
+}
+
+.tv-report-table {
+  width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 11px;
+  color: rgba(210, 223, 238, 0.72);
+}
+
+.tv-report-table td {
+  padding: 4px 3px;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.12);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .tv-strategy-instance-main {

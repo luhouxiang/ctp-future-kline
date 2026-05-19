@@ -178,7 +178,6 @@ func NewServer(cfg config.AppConfig) *Server {
 				} else {
 					s.replaySink = replaySink
 					s.replay.RegisterConsumer("quotes.replay_sink", replaySink.ConsumeBusEvent)
-					s.replay.RegisterTaskLifecycle("quotes.replay_sink", replaySink)
 				}
 			}
 		}
@@ -234,6 +233,9 @@ func NewServer(cfg config.AppConfig) *Server {
 			manager.SetMarketDataDSNs(realtimeDSN, replayDSN, sharedDSN)
 			s.strategy = manager
 		}
+	}
+	if s.replay != nil && (s.replaySink != nil || s.strategy != nil) {
+		s.replay.RegisterTaskLifecycle("web.replay_lifecycle", s)
 	}
 	if svc, err := trade.NewPaperServiceWithMeta(cfg.Trade, cfg.CTP, "paper_live", tradePaperLiveDSN, status.QueueRegistry()); err != nil {
 		logger.Error("init paper live trade service failed", "error", err)

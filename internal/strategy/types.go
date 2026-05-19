@@ -12,9 +12,10 @@ const (
 	InstanceStatusRunning = "running"
 	InstanceStatusError   = "error"
 
-	RunTypeRealtime = "realtime"
-	RunTypeReplay   = "replay"
-	RunTypeBacktest = "backtest"
+	RunTypeRealtime     = "realtime"
+	RunTypeReplay       = "replay"
+	RunTypeBacktest     = "backtest"
+	RunTypeReplayReport = "replay_report"
 
 	OrderStatusSimulated = "simulated_submitted"
 	OrderStatusBlocked   = "blocked"
@@ -241,6 +242,8 @@ type OrdersStatus struct {
 }
 
 type TickEvent struct {
+	// ReplayTaskID 是复盘训练/回放任务 ID，仅 replay 模式下有值。
+	ReplayTaskID string `json:"replay_task_id,omitempty"`
 	// InstrumentID 是合约代码。
 	InstrumentID string `json:"instrument_id"`
 	// ExchangeID 是交易所代码。
@@ -270,6 +273,8 @@ type TickEvent struct {
 }
 
 type BarEvent struct {
+	// ReplayTaskID 是复盘训练/回放任务 ID，仅 replay 模式下有值。
+	ReplayTaskID string `json:"replay_task_id,omitempty"`
 	// Variety 是品种代码。
 	Variety string `json:"variety"`
 	// InstrumentID 是合约代码。

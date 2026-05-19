@@ -194,6 +194,9 @@ func TestConsumeKlineBarPublishesReplayBarToStrategy(t *testing.T) {
 	if got.InstrumentID != "srl9" || got.Variety != "sr" || got.Period != "5m" {
 		t.Fatalf("unexpected replay bar identity: %+v", got)
 	}
+	if got.ReplayTaskID != "task-1" {
+		t.Fatalf("replay task id = %q, want task-1", got.ReplayTaskID)
+	}
 	if got.Open != 100 || got.High != 101 || got.Low != 99 || got.Close != 100.5 {
 		t.Fatalf("unexpected replay bar prices: %+v", got)
 	}
@@ -235,6 +238,9 @@ func TestConsumeKlineBarWithReplaySinkPublishesReplayBarToStrategyOnce(t *testin
 	got := sink.replayBars[0]
 	if got.InstrumentID != "srl9" || got.Variety != "sr" || got.Period != "5m" {
 		t.Fatalf("unexpected replay bar identity: %+v", got)
+	}
+	if got.ReplayTaskID != "task-2" {
+		t.Fatalf("replay task id = %q, want task-2", got.ReplayTaskID)
 	}
 	if got.Open != 101 || got.High != 102 || got.Low != 100 || got.Close != 101.5 {
 		t.Fatalf("unexpected replay bar prices: %+v", got)

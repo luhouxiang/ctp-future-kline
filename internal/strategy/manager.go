@@ -50,6 +50,8 @@ type Manager struct {
 	queueHandle *queuewatch.QueueHandle
 	queueCap    int
 	lastRestart time.Time
+	reportMu    sync.Mutex
+	reports     map[string]*ReplayReport
 
 	backtestMarketDSN string
 	marketRealtimeDSN string
@@ -72,6 +74,7 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 		exec:      NewExecutionEngine(),
 		events:    make(map[chan EventEnvelope]struct{}),
 		instances: make(map[string]StrategyInstance),
+		reports:   make(map[string]*ReplayReport),
 		queueCap:  queueCfg.StrategyEventCapacity,
 	}
 	if registry != nil {
@@ -832,6 +835,9 @@ func (m *Manager) StopInstance(instanceID string) error {
 	m.mu.Lock()
 	m.instances[inst.InstanceID] = inst
 	m.mu.Unlock()
+	if strings.ToLower(strings.TrimSpace(inst.Mode)) == RunTypeReplay {
+		m.FinalizeReplayReportsForInstance(inst.InstanceID, InstanceStatusStopped)
+	}
 	m.broadcast("strategy_status_update", m.Status())
 	return nil
 }
@@ -1299,7 +1305,7 @@ func (m *Manager) HandleReplayBar(ev BarEvent)     { m.handleBar(ev, RunTypeRepl
 
 func (m *Manager) handleTick(ev TickEvent, mode string) {
 	m.forEachMatchingInstance(ev.InstrumentID, "", mode, func(inst StrategyInstance) {
-		m.callDecision(inst, ev.InstrumentID, mode, ev.ReceivedAt, &ev, nil)
+		m.callDecision(inst, ev.InstrumentID, mode, ev.ReplayTaskID, ev.ReceivedAt, &ev, nil)
 	})
 }
 
@@ -1311,7 +1317,7 @@ func (m *Manager) handleBar(ev BarEvent, mode string) {
 	// 	"event_time", strategyBarEventTime(ev),
 	// )
 	m.forEachMatchingInstance(ev.InstrumentID, ev.Period, mode, func(inst StrategyInstance) {
-		m.callDecision(inst, ev.InstrumentID, mode, strategyBarEventTime(ev), nil, &ev)
+		m.callDecision(inst, ev.InstrumentID, mode, ev.ReplayTaskID, strategyBarEventTime(ev), nil, &ev)
 	})
 }
 
@@ -1339,7 +1345,8 @@ func (m *Manager) forEachMatchingInstance(symbol string, timeframe string, mode 
 	}
 }
 
-func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string, eventTime time.Time, tick *TickEvent, bar *BarEvent) {
+func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string, replayTaskID string, eventTime time.Time, tick *TickEvent, bar *BarEvent) {
+	m.touchReplayReport(replayTaskID, inst)
 	m.mu.RLock()
 	client := m.client
 	m.mu.RUnlock()
@@ -1395,7 +1402,7 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 	if decision.NoSignal {
 		return
 	}
-	m.persistDecision(inst, symbol, mode, eventTime, decision)
+	m.persistDecision(inst, symbol, mode, replayTaskID, eventTime, decision)
 }
 
 func (m *Manager) persistTrace(inst StrategyInstance, symbol string, mode string, eventTime time.Time, trace StrategyTraceRecord) {
@@ -1431,7 +1438,7 @@ func (m *Manager) persistTrace(inst StrategyInstance, symbol string, mode string
 	m.broadcast("strategy_trace_update", trace)
 }
 
-func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode string, eventTime time.Time, decision SignalDecision) {
+func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode string, replayTaskID string, eventTime time.Time, decision SignalDecision) {
 	sig := SignalRecord{
 		InstanceID:     inst.InstanceID,
 		StrategyID:     inst.StrategyID,
@@ -1512,7 +1519,8 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		},
 		CreatedAt: time.Now(),
 	}
-	_, _ = m.store.AppendOrderAudit(audit)
+	auditID, _ := m.store.AppendOrderAudit(audit)
+	audit.ID = auditID
 	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
 		EventType: "order_result",
 		StepKey:   "order_result",
@@ -1536,10 +1544,14 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 	inst.LastError = ""
 	_ = m.store.SaveInstance(inst)
 	m.mu.Lock()
+	if m.instances == nil {
+		m.instances = make(map[string]StrategyInstance)
+	}
 	m.instances[inst.InstanceID] = inst
 	m.mu.Unlock()
 	m.broadcast("strategy_signal", sig)
 	m.broadcast("order_audit_update", audit)
+	m.appendReplayReport(replayTaskID, inst, sig, audit)
 }
 
 func firstNonEmpty(values ...string) string {

@@ -26,14 +26,17 @@ import (
 // ReplaySink 的职责就是把 bus.BusEvent 还原成 tickEvent，再交给 mdSpi 复用实时链路逻辑。
 type ReplaySink struct {
 	mu               sync.Mutex
+	taskMu           sync.RWMutex
 	store            *klineStore
 	metaDB           *sql.DB
 	spi              *mdSpi
 	seenFirstConsume map[string]struct{}
 	clearedKlines    map[string]struct{}
+	currentTaskID    string
 }
 
 type ReplayKlineBar struct {
+	ReplayTaskID string
 	Symbol       string
 	Type         string
 	Variety      string
@@ -69,6 +72,12 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 	if cfg.IsL9AsyncEnabled() && generation.AnyEnabled("l9") {
 		l9Calc = newL9AsyncCalculator(store, metaDB, status, true, 1, nil)
 	}
+	sink := &ReplaySink{
+		store:            store,
+		metaDB:           metaDB,
+		seenFirstConsume: make(map[string]struct{}),
+		clearedKlines:    make(map[string]struct{}),
+	}
 	spi := newMdSpiWithStatusAndOptions(store, metaDB, l9Calc, status, mdSpiOptions{
 		tickDedupWindow:   time.Duration(cfg.TickDedupWindowSeconds) * time.Second,
 		driftThreshold:    time.Duration(cfg.DriftThresholdSeconds) * time.Second,
@@ -79,6 +88,7 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		onTick: func(t tickEvent) {
 			PublishReplayChartTick(t)
 			strategy.PublishReplayTick(strategy.TickEvent{
+				ReplayTaskID:    sink.currentReplayTaskID(),
 				InstrumentID:    t.InstrumentID,
 				ExchangeID:      t.ExchangeID,
 				ActionDay:       t.ActionDay,
@@ -96,6 +106,7 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 		},
 		onBar: func(bar minuteBar) {
 			strategy.PublishReplayBar(strategy.BarEvent{
+				ReplayTaskID:    sink.currentReplayTaskID(),
 				Variety:         bar.Variety,
 				InstrumentID:    bar.InstrumentID,
 				Exchange:        bar.Exchange,
@@ -118,13 +129,8 @@ func NewReplaySink(cfg config.CTPConfig, status *RuntimeStatusCenter) (*ReplaySi
 			PublishChartFinalBar(task.Bar, task.Replay)
 		},
 	})
-	return &ReplaySink{
-		store:            store,
-		metaDB:           metaDB,
-		spi:              spi,
-		seenFirstConsume: make(map[string]struct{}),
-		clearedKlines:    make(map[string]struct{}),
-	}, nil
+	sink.spi = spi
+	return sink, nil
 }
 
 func (s *ReplaySink) PrepareReplayWindow(req replay.StartRequest) error {
@@ -170,6 +176,7 @@ func (s *ReplaySink) PublishKlineReplayBar(sub ChartSubscription, item ReplayKli
 	}
 	PublishChartFinalBar(bar, false)
 	strategy.PublishReplayBar(strategy.BarEvent{
+		ReplayTaskID: item.ReplayTaskID,
 		Variety:      bar.Variety,
 		InstrumentID: bar.InstrumentID,
 		Exchange:     bar.Exchange,
@@ -220,6 +227,7 @@ func (s *ReplaySink) ConsumeBusEvent(_ context.Context, ev bus.BusEvent) error {
 	// 	"volume", tick.Volume,
 	// )
 	s.logFirstConsume(ev.ReplayTaskID, tick)
+	s.setCurrentReplayTaskID(ev.ReplayTaskID)
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if err := s.prepareInstrumentKlinesLocked(ev.ReplayTaskID, tick); err != nil {
@@ -253,11 +261,31 @@ func (s *ReplaySink) OnTaskFinished(_ context.Context, snap replay.TaskSnapshot)
 		s.resetReplayStageLogState()
 		return nil
 	}
+	s.setCurrentReplayTaskID(snap.TaskID)
 	s.mu.Lock()
 	err := s.spi.Flush()
 	s.mu.Unlock()
+	s.setCurrentReplayTaskID("")
 	s.resetReplayStageLogState()
 	return err
+}
+
+func (s *ReplaySink) currentReplayTaskID() string {
+	if s == nil {
+		return ""
+	}
+	s.taskMu.RLock()
+	defer s.taskMu.RUnlock()
+	return s.currentTaskID
+}
+
+func (s *ReplaySink) setCurrentReplayTaskID(taskID string) {
+	if s == nil {
+		return
+	}
+	s.taskMu.Lock()
+	s.currentTaskID = taskID
+	s.taskMu.Unlock()
 }
 
 // Close 关闭回放模式专用的底层 store。
