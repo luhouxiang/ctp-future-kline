@@ -761,6 +761,11 @@ func (m *Manager) StartInstance(instanceID string) error {
 	if err != nil {
 		return err
 	}
+	if strings.EqualFold(strings.TrimSpace(inst.Mode), RunTypeReplay) {
+		if _, err := m.clearReplaySignalsForInstanceStart(inst); err != nil {
+			return err
+		}
+	}
 	if err := m.callStartInstance(inst); err != nil {
 		inst.Status = InstanceStatusError
 		inst.LastError = err.Error()
@@ -842,8 +847,27 @@ func (m *Manager) StopInstance(instanceID string) error {
 	return nil
 }
 
-func (m *Manager) ListSignals(limit int) ([]SignalRecord, error) {
-	return m.store.ListSignals(limit)
+func (m *Manager) ListSignals(instanceID string, symbol string, limit int) ([]SignalRecord, error) {
+	return m.store.ListSignals(strings.TrimSpace(instanceID), strings.TrimSpace(symbol), limit)
+}
+
+func (m *Manager) DeleteSignals(instanceID string) (int64, error) {
+	return m.store.DeleteSignals(strings.TrimSpace(instanceID))
+}
+
+func (m *Manager) clearReplaySignalsForInstanceStart(inst StrategyInstance) (int64, error) {
+	deleted, err := m.store.DeleteSignals(inst.InstanceID)
+	if err != nil {
+		return deleted, err
+	}
+	for _, symbol := range inst.Symbols {
+		n, err := m.store.DeleteReplaySignalsForScope(inst.StrategyID, symbol, inst.Timeframe)
+		deleted += n
+		if err != nil {
+			return deleted, err
+		}
+	}
+	return deleted, nil
 }
 
 func (m *Manager) ListRuns(limit int) ([]StrategyRun, error) {

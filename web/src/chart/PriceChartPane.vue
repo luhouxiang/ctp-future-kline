@@ -57,6 +57,8 @@ const props = defineProps({
     default: () => ({ settings: {}, decisions: [], selected_id: "" }),
   },
   strategyTraces: { type: Array, default: () => [] },
+  strategySignals: { type: Array, default: () => [] },
+  activeStrategyInstanceId: { type: String, default: "" },
   reversalState: {
     type: Object,
     default: () => ({ settings: {}, results: { lines: [], events: [] }, persistVersion: 0 }),
@@ -3114,10 +3116,57 @@ const strategyOverlayData = computed(() => {
   void viewVersion.value;
   if (!seriesRefs.candle) return [];
   const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  const traces = Array.isArray(props.strategyTraces) ? props.strategyTraces : [];
+  if (props.replayKlineMode) {
+    const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
+    if (!activeInstanceID) return [];
+    const signals = Array.isArray(props.strategySignals) ? props.strategySignals : [];
+    const seen = new Set();
+    return signals
+      .filter((row) => {
+        if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+        const symbol = String(row?.symbol || "").trim().toLowerCase();
+        if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+        const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+        const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
+        if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+        return strategySignalTarget(row) !== 0;
+      })
+      .slice()
+      .sort((a, b) => {
+        const ta = strategyTraceTime(a);
+        const tb = strategyTraceTime(b);
+        if (ta !== tb) return ta - tb;
+        return String(a?.trace_id || "").localeCompare(String(b?.trace_id || ""));
+      })
+      .map((row, idx) => {
+        const time = strategySignalTime(row);
+        if (!Number.isFinite(time) || time <= 0) return null;
+        const dedupeKey = `${String(row?.instance_id || "")}-${time}`;
+        if (seen.has(dedupeKey)) return null;
+        seen.add(dedupeKey);
+        const x = mapTimeToXWithFallback(time);
+        if (x === null) return null;
+        const bar = findNearestBarByDisplayTime(time);
+        const price = Number(bar?.high || row?.metrics?.entry_price || row?.metrics?.trigger_price || bar?.close || 0);
+        const highY = Number(seriesRefs.candle.priceToCoordinate(price));
+        if (!Number.isFinite(highY)) return null;
+        const y = Math.max(8, highY - 18);
+        return {
+          id: String(row?.id || `${row?.instance_id || ""}-${row?.event_time || ""}-${idx}`),
+          x,
+          y,
+          kind: strategySignalTarget(row) > 0 ? "long" : "short",
+          shape: "entry-arrow",
+          label: "",
+          status: String(row?.status || ""),
+        };
+      })
+      .filter((x) => !!x);
+  }
   const latestBar = Array.isArray(state.bars) && state.bars.length ? state.bars[state.bars.length - 1] : null;
   const latestBarTime = Number(latestBar ? getDisplayTime(latestBar) : 0);
   if (!Number.isFinite(latestBarTime) || latestBarTime <= 0) return [];
-  const traces = Array.isArray(props.strategyTraces) ? props.strategyTraces : [];
   const candidates = traces
     .filter((row) => {
       const symbol = String(row?.symbol || "").trim().toLowerCase();
@@ -3162,6 +3211,43 @@ const strategyOverlayData = computed(() => {
     })
     .filter((x) => !!x);
 });
+
+function isStrategyEntrySignalTrace(row) {
+  const eventType = String(row?.event_type || "").trim();
+  const stepKey = String(row?.step_key || "").trim();
+  const status = String(row?.status || "").trim();
+  if (eventType !== "signal" && stepKey !== "signal" && stepKey !== "SHORT_SIGNAL") return false;
+  if (status && status !== "passed") return false;
+  const target = strategyTraceSignalTarget(row);
+  return target !== 0;
+}
+
+function strategySignalTime(row) {
+  const raw = String(row?.event_time || "");
+  const parsed = Date.parse(raw);
+  if (Number.isFinite(parsed)) return Math.floor(parsed / 1000);
+  return Number(row?.metrics?.adjusted_time || 0);
+}
+
+function strategySignalTarget(row) {
+  const v = Number(row?.target_position);
+  return Number.isFinite(v) ? v : 0;
+}
+
+function strategyTraceSignalTarget(row) {
+  const preview = row?.signal_preview && typeof row.signal_preview === "object" ? row.signal_preview : {};
+  const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  for (const source of [preview, metrics]) {
+    const v = Number(source.target_position ?? source.position ?? source.target);
+    if (Number.isFinite(v) && v !== 0) return v;
+  }
+  if (String(row?.step_key || "") === "SHORT_SIGNAL") return -1;
+  return 0;
+}
+
+function strategySignalDirection(row) {
+  return strategyTraceSignalTarget(row) > 0 ? "long" : "short";
+}
 
 function strategyTraceTime(row) {
   const raw = String(row?.event_time || "");
@@ -4296,8 +4382,13 @@ onUnmounted(() => {
         <div class="strategy-overlay-layer">
           <svg :width="overlaySize.width" :height="overlaySize.height">
             <template v-for="item in strategyOverlayData" :key="item.id">
-              <circle :class="['strategy-marker-dot', item.kind]" :cx="item.x" :cy="item.y" r="4.5" />
-              <text :class="['strategy-marker-label', item.kind]" :x="item.x + 6" :y="item.y - 6">{{ item.label }}</text>
+              <g v-if="item.shape === 'entry-arrow'" class="strategy-entry-arrow">
+                <path :d="`M ${item.x} ${item.y + 16} L ${item.x - 6} ${item.y + 6} L ${item.x - 2.5} ${item.y + 6} L ${item.x - 2.5} ${item.y} L ${item.x + 2.5} ${item.y} L ${item.x + 2.5} ${item.y + 6} L ${item.x + 6} ${item.y + 6} Z`" />
+              </g>
+              <template v-else>
+                <circle :class="['strategy-marker-dot', item.kind]" :cx="item.x" :cy="item.y" r="4.5" />
+                <text :class="['strategy-marker-label', item.kind]" :x="item.x + 6" :y="item.y - 6">{{ item.label }}</text>
+              </template>
             </template>
           </svg>
         </div>
@@ -4756,6 +4847,13 @@ onUnmounted(() => {
 
 .strategy-marker-dot.blocked {
   fill: #f97316;
+}
+
+.strategy-entry-arrow path {
+  fill: #2563eb;
+  stroke: #0b1320;
+  stroke-width: 1.2;
+  paint-order: stroke;
 }
 
 .strategy-marker-label {

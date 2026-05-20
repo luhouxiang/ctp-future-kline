@@ -2285,7 +2285,7 @@ func (s *Server) handleStrategyInstanceAction(w http.ResponseWriter, r *http.Req
 }
 
 func (s *Server) handleStrategySignals(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
+	if r.Method != http.MethodGet && r.Method != http.MethodDelete {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
@@ -2293,7 +2293,17 @@ func (s *Server) handleStrategySignals(w http.ResponseWriter, r *http.Request) {
 	if manager == nil {
 		return
 	}
-	items, err := manager.ListSignals(parseLimitArg(r.URL.Query().Get("limit"), 100, 200))
+	q := r.URL.Query()
+	if r.Method == http.MethodDelete {
+		deleted, err := manager.DeleteSignals(q.Get("instance_id"))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+		return
+	}
+	items, err := manager.ListSignals(q.Get("instance_id"), q.Get("symbol"), parseLimitArg(q.Get("limit"), 100, 2000))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

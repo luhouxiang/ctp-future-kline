@@ -249,8 +249,30 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?)
 	return res.LastInsertId()
 }
 
-func (s *Store) ListSignals(limit int) ([]SignalRecord, error) {
-	rows, err := s.db.Query(`SELECT id,instance_id,strategy_id,symbol,timeframe,mode,event_time,target_position,confidence,reason,metrics_json,created_at FROM strategy_signals ORDER BY event_time DESC LIMIT ?`, limit)
+func (s *Store) ListSignals(instanceID string, symbol string, limit int) ([]SignalRecord, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 2000 {
+		limit = 2000
+	}
+	where := []string{"1=1"}
+	args := make([]any, 0, 3)
+	if instanceID != "" {
+		where = append(where, "instance_id=?")
+		args = append(args, instanceID)
+	}
+	if symbol != "" {
+		where = append(where, "symbol=?")
+		args = append(args, symbol)
+	}
+	args = append(args, limit)
+	rows, err := s.db.Query(`
+SELECT id,instance_id,strategy_id,symbol,timeframe,mode,event_time,target_position,confidence,reason,metrics_json,created_at
+FROM strategy_signals
+WHERE `+strings.Join(where, " AND ")+`
+ORDER BY event_time DESC, id DESC
+LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -266,6 +288,32 @@ func (s *Store) ListSignals(limit int) ([]SignalRecord, error) {
 		out = append(out, sig)
 	}
 	return out, rows.Err()
+}
+
+func (s *Store) DeleteSignals(instanceID string) (int64, error) {
+	instanceID = strings.TrimSpace(instanceID)
+	if instanceID == "" {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`DELETE FROM strategy_signals WHERE instance_id=?`, instanceID)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
+}
+
+func (s *Store) DeleteReplaySignalsForScope(strategyID string, symbol string, timeframe string) (int64, error) {
+	strategyID = strings.TrimSpace(strategyID)
+	symbol = strings.TrimSpace(symbol)
+	timeframe = strings.TrimSpace(timeframe)
+	if strategyID == "" || symbol == "" || timeframe == "" {
+		return 0, nil
+	}
+	res, err := s.db.Exec(`DELETE FROM strategy_signals WHERE mode=? AND strategy_id=? AND symbol=? AND timeframe=?`, RunTypeReplay, strategyID, symbol, timeframe)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func (s *Store) AppendTrace(rec StrategyTraceRecord) (int64, error) {

@@ -52,6 +52,7 @@ const strategyDefinitions = ref([])
 const strategyInstances = ref([])
 const strategyStatus = ref({})
 const strategyTraces = ref([])
+const strategySignals = ref([])
 const strategyBacktests = ref([])
 const selectedStrategyBacktestRunId = ref('')
 const strategyBacktestResult = ref(null)
@@ -689,6 +690,7 @@ async function fetchStrategyDefinitions(options = {}) {
 
 async function fetchStrategyRuntime() {
   const traceQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()
+  const signalQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '1000' }).toString()
   const jobs = [
     {
       name: 'status',
@@ -704,6 +706,11 @@ async function fetchStrategyRuntime() {
       name: 'traces',
       url: `/api/strategy/traces?${traceQuery}`,
       apply: (data) => { strategyTraces.value = Array.isArray(data.items) ? data.items : [] },
+    },
+    {
+      name: 'signals',
+      url: `/api/strategy/signals?${signalQuery}`,
+      apply: (data) => { strategySignals.value = Array.isArray(data.items) ? data.items : [] },
     },
     {
       name: 'backtests',
@@ -763,6 +770,18 @@ function pushStrategyTrace(item) {
   const next = [item, ...strategyTraces.value.filter((x) => String(x.trace_id || `${x.instance_id}-${x.event_time}-${x.event_type}`) !== id)]
   strategyTraces.value = next.slice(0, 100)
   syncSelectedStrategyInstance()
+}
+
+function pushStrategySignal(item) {
+  if (!item || typeof item !== 'object') return
+  const symbol = String(item.symbol || '').trim().toLowerCase()
+  if (currentTradeSymbol() && symbol && symbol !== currentTradeSymbol().toLowerCase()) return
+  const timeframe = String(item.timeframe || '').trim().toLowerCase()
+  const currentTimeframe = String(scope.timeframe || '').trim().toLowerCase()
+  if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return
+  const id = String(item.id || `${item.instance_id}-${item.event_time}-${item.target_position}`)
+  const next = [item, ...strategySignals.value.filter((x) => String(x.id || `${x.instance_id}-${x.event_time}-${x.target_position}`) !== id)]
+  strategySignals.value = next.slice(0, 1000)
 }
 
 function normalizeStrategySymbolList(item) {
@@ -1138,9 +1157,10 @@ async function startStrategyFromAnchor(anchor, definition) {
       dataMode: dataMode.value,
       klineReplayRunning: !!paneRef.value?.isKlineReplayRunning?.(),
     })
+    selectedStrategyInstanceId.value = instanceID
+    strategySignals.value = strategySignals.value.filter((item) => String(item?.instance_id || '') !== instanceID)
     await saveAndStartStrategyInstance(instance)
     strategyStarting.value = false
-    selectedStrategyInstanceId.value = instanceID
     activeRightTab.value = 'strategy'
     layout.panes.right_watchlist_open = true
     closeStrategyContextMenu()
@@ -1879,6 +1899,7 @@ function connectChartWS() {
       return
     }
     if (msg?.type === 'strategy_signal' && msg.data) {
+      pushStrategySignal(msg.data)
       void fetchStrategyRuntime().catch(() => {})
       return
     }
@@ -2248,6 +2269,8 @@ onUnmounted(() => {
           :channel-state="channelState"
           :reversal-state="reversalState"
           :strategy-traces="strategyTraces"
+          :strategy-signals="strategySignals"
+          :active-strategy-instance-id="selectedStrategyInstanceId"
           @set-drawings="onSetDrawings"
           @select-drawing="onSelectDrawing"
           @channel-view-change="onChannelViewChange"
