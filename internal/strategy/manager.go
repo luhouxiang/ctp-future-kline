@@ -1424,6 +1424,9 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		m.persistTrace(inst, symbol, mode, eventTime, *decision.Trace)
 	}
 	if decision.NoSignal {
+		if decision.Trace != nil {
+			m.persistSignalResultPoint(inst, symbol, mode, eventTime, *decision.Trace)
+		}
 		return
 	}
 	m.persistDecision(inst, symbol, mode, replayTaskID, eventTime, decision)
@@ -1460,6 +1463,75 @@ func (m *Manager) persistTrace(inst StrategyInstance, symbol string, mode string
 	}
 	trace.TraceID = id
 	m.broadcast("strategy_trace_update", trace)
+}
+
+func (m *Manager) persistSignalResultPoint(inst StrategyInstance, symbol string, mode string, eventTime time.Time, trace StrategyTraceRecord) {
+	if m == nil || m.store == nil {
+		return
+	}
+	if strings.TrimSpace(trace.StepKey) != "SIGNAL_RESULT" {
+		return
+	}
+	result := signalResultKind(trace)
+	if result == "" {
+		return
+	}
+	metrics := map[string]any{}
+	for k, v := range trace.Metrics {
+		metrics[k] = v
+	}
+	metrics["signal_point_type"] = "exit"
+	metrics["signal_result"] = result
+	if trace.TraceID > 0 {
+		metrics["source_trace_id"] = trace.TraceID
+	}
+	sig := SignalRecord{
+		InstanceID:     inst.InstanceID,
+		StrategyID:     inst.StrategyID,
+		Symbol:         symbol,
+		Timeframe:      inst.Timeframe,
+		Mode:           mode,
+		EventTime:      firstTime(trace.EventTime, eventTime),
+		TargetPosition: 0,
+		Confidence:     1,
+		Reason:         firstNonEmpty(trace.Reason, trace.StepLabel, result),
+		Metrics:        metrics,
+		CreatedAt:      time.Now(),
+	}
+	id, err := m.store.AppendSignal(sig)
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	sig.ID = id
+	m.broadcast("strategy_signal", sig)
+}
+
+func signalResultKind(trace StrategyTraceRecord) string {
+	if trace.Metrics != nil {
+		if raw := strings.ToLower(strings.TrimSpace(fmt.Sprint(trace.Metrics["signal_result"]))); raw == "success" || raw == "failure" || raw == "unresolved" {
+			return raw
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(trace.Status)) {
+	case "passed":
+		return "success"
+	case "failed":
+		return "failure"
+	case "done":
+		return "unresolved"
+	default:
+		return ""
+	}
+}
+
+func firstTime(values ...time.Time) time.Time {
+	for _, value := range values {
+		if !value.IsZero() {
+			return value
+		}
+	}
+	return time.Now()
 }
 
 func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode string, replayTaskID string, eventTime time.Time, decision SignalDecision) {

@@ -2,6 +2,7 @@
   "gopls": {
     "ui.diagnostic.staticcheck": true
   },
+  "go.lintOnSave": "off",
   "editor.formatOnSave": true,
   "[go]": {
     "editor.defaultFormatter": "golang.go",

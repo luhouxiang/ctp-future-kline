@@ -3121,8 +3121,9 @@ const strategyOverlayData = computed(() => {
     const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
     if (!activeInstanceID) return [];
     const signals = Array.isArray(props.strategySignals) ? props.strategySignals : [];
+    const trades = buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, currentSymbol);
     const seen = new Set();
-    return signals
+    const entries = signals
       .filter((row) => {
         if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
         const symbol = String(row?.symbol || "").trim().toLowerCase();
@@ -3130,6 +3131,7 @@ const strategyOverlayData = computed(() => {
         const timeframe = String(row?.timeframe || "").trim().toLowerCase();
         const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
         if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+        if (isStrategyExitSignal(row)) return false;
         return strategySignalTarget(row) !== 0;
       })
       .slice()
@@ -3163,6 +3165,7 @@ const strategyOverlayData = computed(() => {
         };
       })
       .filter((x) => !!x);
+    return [...trades, ...entries];
   }
   const latestBar = Array.isArray(state.bars) && state.bars.length ? state.bars[state.bars.length - 1] : null;
   const latestBarTime = Number(latestBar ? getDisplayTime(latestBar) : 0);
@@ -3211,6 +3214,189 @@ const strategyOverlayData = computed(() => {
     })
     .filter((x) => !!x);
 });
+
+function buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, currentSymbol) {
+  const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
+  const signalRows = Array.isArray(signals) ? signals : [];
+  const entries = signalRows
+    .filter((row) => {
+      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+      if (isStrategyExitSignal(row)) return false;
+      return strategySignalTarget(row) !== 0;
+    })
+    .map((row, idx) => {
+      const time = strategySignalTime(row);
+      const bar = findNearestBarByDisplayTime(time);
+      const close = Number(bar?.close);
+      if (!Number.isFinite(time) || time <= 0 || !bar || !Number.isFinite(close)) return null;
+      return {
+        row,
+        idx,
+        time,
+        bar,
+        close,
+        target: strategySignalTarget(row),
+      };
+    })
+    .filter((x) => !!x)
+    .sort((a, b) => a.time - b.time || a.idx - b.idx);
+  const signalExits = signalRows
+    .filter((row) => {
+      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+      return isStrategyExitSignal(row);
+    })
+    .map((row, idx) => {
+      const time = strategySignalTime(row);
+      const bar = findNearestBarByDisplayTime(time);
+      const close = Number(bar?.close);
+      if (!Number.isFinite(time) || time <= 0 || !bar || !Number.isFinite(close)) return null;
+      return {
+        row,
+        idx,
+        source: "signal",
+        time,
+        bar,
+        close,
+        result: strategySignalResultKind(row),
+      };
+    })
+    .filter((x) => !!x);
+  const traceExits = (Array.isArray(traces) ? traces : [])
+    .filter((row) => {
+      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+      return isStrategyResultTrace(row);
+    })
+    .map((row, idx) => {
+      const time = strategyTraceTime(row);
+      const bar = findNearestBarByDisplayTime(time);
+      const close = Number(bar?.close);
+      if (!Number.isFinite(time) || time <= 0 || !bar || !Number.isFinite(close)) return null;
+      return {
+        row,
+        idx,
+        source: "trace",
+        time,
+        bar,
+        close,
+        result: strategyResultKind(row),
+      };
+    })
+    .filter((x) => !!x);
+  const exits = dedupeReplayExits([...signalExits, ...traceExits])
+    .sort((a, b) => a.time - b.time || a.idx - b.idx);
+  if (!entries.length || !exits.length) return [];
+
+  const out = [];
+  const points = [
+    ...entries.map((item) => ({ type: "entry", item })),
+    ...exits.map((item) => ({ type: "exit", item })),
+  ].sort((a, b) => {
+    if (a.item.time !== b.item.time) return a.item.time - b.item.time;
+    if (a.type !== b.type) return a.type === "exit" ? 1 : -1;
+    return a.item.idx - b.item.idx;
+  });
+  let open = null;
+  for (const point of points) {
+    if (point.type === "entry") {
+      if (!open) open = point.item;
+      continue;
+    }
+    if (!open) continue;
+    const entry = open;
+    const exit = point.item;
+    open = null;
+    const entryX = mapTimeToXWithFallback(entry.time);
+    const exitX = mapTimeToXWithFallback(exit.time);
+    const entryY = Number(seriesRefs.candle.priceToCoordinate(entry.close));
+    const exitY = Number(seriesRefs.candle.priceToCoordinate(exit.close));
+    if (entryX === null || exitX === null || !Number.isFinite(entryY) || !Number.isFinite(exitY)) continue;
+    const highPrice = Number(exit.bar?.high || exit.close);
+    const highY = Number(seriesRefs.candle.priceToCoordinate(highPrice));
+    const pnl = entry.target < 0 ? entry.close - exit.close : exit.close - entry.close;
+    const profitable = Number.isFinite(pnl) && pnl > 0;
+    const minX = Math.min(entryX, exitX);
+    const maxX = Math.max(entryX, exitX);
+    const topY = Math.min(entryY, exitY);
+    const bottomY = Math.max(entryY, exitY);
+    out.push({
+      id: `strategy-trade-shade-${String(entry.row?.id || entry.idx)}-${String(exit.row?.trace_id || exit.idx)}`,
+      shape: "trade-shade",
+      x: minX,
+      y: topY,
+      width: Math.max(2, maxX - minX),
+      height: Math.max(2, bottomY - topY),
+      profitable,
+      pnl,
+    });
+    if (exit.result === "success" || exit.result === "failure") {
+      out.push({
+        id: `strategy-exit-dot-${String(exit.row?.trace_id || exit.idx)}`,
+        shape: "exit-circle",
+        x: exitX,
+        y: Math.max(7, Number.isFinite(highY) ? highY - 18 : exitY - 18),
+        result: exit.result,
+        pnl,
+      });
+    }
+  }
+  return out;
+}
+
+function dedupeReplayExits(exits) {
+  const seen = new Set();
+  const out = [];
+  for (const exit of exits) {
+    const rawTraceID = Number(exit?.row?.metrics?.source_trace_id || exit?.row?.trace_id || 0);
+    const sourceTraceID = Number.isFinite(rawTraceID) && rawTraceID > 0 ? String(rawTraceID) : "";
+    const key = sourceTraceID ? `trace-${sourceTraceID}` : `${exit.time}-${exit.result}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(exit);
+  }
+  return out;
+}
+
+function isStrategyExitSignal(row) {
+  const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  if (String(metrics.signal_point_type || "").trim().toLowerCase() === "exit") return true;
+  return strategySignalResultKind(row) !== "";
+}
+
+function strategySignalResultKind(row) {
+  const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  const raw = String(metrics.signal_result || "").trim().toLowerCase();
+  return raw === "success" || raw === "failure" || raw === "unresolved" ? raw : "";
+}
+
+function isStrategyResultTrace(row) {
+  const key = String(row?.step_key || "").trim();
+  if (key !== "SIGNAL_RESULT") return false;
+  const result = strategyResultKind(row);
+  return result === "success" || result === "failure" || result === "unresolved";
+}
+
+function strategyResultKind(row) {
+  const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+  const raw = String(metrics.signal_result || "").trim().toLowerCase();
+  if (raw) return raw;
+  const status = String(row?.status || "").trim().toLowerCase();
+  if (status === "passed") return "success";
+  if (status === "failed") return "failure";
+  if (status === "done") return "unresolved";
+  return "";
+}
 
 function isStrategyEntrySignalTrace(row) {
   const eventType = String(row?.event_type || "").trim();
@@ -4382,7 +4568,22 @@ onUnmounted(() => {
         <div class="strategy-overlay-layer">
           <svg :width="overlaySize.width" :height="overlaySize.height">
             <template v-for="item in strategyOverlayData" :key="item.id">
-              <g v-if="item.shape === 'entry-arrow'" class="strategy-entry-arrow">
+              <rect
+                v-if="item.shape === 'trade-shade'"
+                :class="['strategy-trade-shade', item.profitable ? 'profit' : 'loss']"
+                :x="item.x"
+                :y="item.y"
+                :width="item.width"
+                :height="item.height"
+              />
+              <circle
+                v-else-if="item.shape === 'exit-circle'"
+                class="strategy-exit-circle"
+                :cx="item.x"
+                :cy="item.y"
+                r="5"
+              />
+              <g v-else-if="item.shape === 'entry-arrow'" class="strategy-entry-arrow">
                 <path :d="`M ${item.x} ${item.y + 16} L ${item.x - 6} ${item.y + 6} L ${item.x - 2.5} ${item.y + 6} L ${item.x - 2.5} ${item.y} L ${item.x + 2.5} ${item.y} L ${item.x + 2.5} ${item.y + 6} L ${item.x + 6} ${item.y + 6} Z`" />
               </g>
               <template v-else>
@@ -4847,6 +5048,26 @@ onUnmounted(() => {
 
 .strategy-marker-dot.blocked {
   fill: #f97316;
+}
+
+.strategy-trade-shade {
+  stroke: rgba(148, 163, 184, 0.78);
+  stroke-width: 1.2;
+  pointer-events: none;
+}
+
+.strategy-trade-shade.profit {
+  fill: rgba(248, 113, 113, 0.32);
+}
+
+.strategy-trade-shade.loss {
+  fill: rgba(96, 165, 250, 0.32);
+}
+
+.strategy-exit-circle {
+  fill: #22d3ee;
+  stroke: #0b1320;
+  stroke-width: 1.4;
 }
 
 .strategy-entry-arrow path {
