@@ -59,6 +59,7 @@ const strategyBacktestResult = ref(null)
 const selectedStrategyInstanceId = ref('')
 const strategyStarting = ref(false)
 const STRATEGY_RUNTIME_REFRESH_TIMEOUT_MS = 8_000
+const REPLAY_RUNTIME_ROW_LIMIT = 500
 const ma20ReplayReportRunning = ref(false)
 const ma20ReplayReportTaskID = ref("")
 const strategyContextMenu = reactive({
@@ -105,6 +106,8 @@ let chartWS = null
 let chartWSReconnectTimer = null
 let chartWSReconnectAttempt = 0
 let chartScopeSyncSeq = 0
+let strategyRuntimeRefreshTimer = null
+let strategyRuntimeRefreshPromise = null
 const realtimeStatus = ref('connecting')
 const activeChartSubscriptionKey = ref('')
 const dataMode = ref('realtime')
@@ -689,8 +692,10 @@ async function fetchStrategyDefinitions(options = {}) {
 }
 
 async function fetchStrategyRuntime() {
-  const traceQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()
-  const signalQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '1000' }).toString()
+  const traceLimit = replayKlineMode.value ? String(REPLAY_RUNTIME_ROW_LIMIT) : '100'
+  const signalLimit = replayKlineMode.value ? String(REPLAY_RUNTIME_ROW_LIMIT) : '1000'
+  const traceQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: traceLimit }).toString()
+  const signalQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: signalLimit }).toString()
   const jobs = [
     {
       name: 'status',
@@ -732,6 +737,22 @@ async function fetchStrategyRuntime() {
   syncSelectedStrategyBacktest()
 }
 
+function scheduleStrategyRuntimeRefresh(delayMS = 750) {
+  if (strategyRuntimeRefreshTimer) return
+  strategyRuntimeRefreshTimer = setTimeout(() => {
+    strategyRuntimeRefreshTimer = null
+    if (strategyRuntimeRefreshPromise) {
+      scheduleStrategyRuntimeRefresh(delayMS)
+      return
+    }
+    strategyRuntimeRefreshPromise = fetchStrategyRuntime()
+      .catch((err) => console.warn('[strategy] scheduled runtime refresh failed', err))
+      .finally(() => {
+        strategyRuntimeRefreshPromise = null
+      })
+  }, Math.max(0, Number(delayMS) || 0))
+}
+
 function syncSelectedStrategyBacktest() {
   const rows = Array.isArray(strategyBacktests.value) ? strategyBacktests.value : []
   if (selectedStrategyBacktestRunId.value && rows.some((row) => String(row?.run_id || '') === selectedStrategyBacktestRunId.value)) return
@@ -768,7 +789,7 @@ function pushStrategyTrace(item) {
   if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return
   const id = String(item.trace_id || `${item.instance_id}-${item.event_time}-${item.event_type}`)
   const next = [item, ...strategyTraces.value.filter((x) => String(x.trace_id || `${x.instance_id}-${x.event_time}-${x.event_type}`) !== id)]
-  strategyTraces.value = next.slice(0, 100)
+  strategyTraces.value = next.slice(0, replayKlineMode.value ? REPLAY_RUNTIME_ROW_LIMIT : 100)
   syncSelectedStrategyInstance()
 }
 
@@ -781,7 +802,7 @@ function pushStrategySignal(item) {
   if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return
   const id = String(item.id || `${item.instance_id}-${item.event_time}-${item.target_position}`)
   const next = [item, ...strategySignals.value.filter((x) => String(x.id || `${x.instance_id}-${x.event_time}-${x.target_position}`) !== id)]
-  strategySignals.value = next.slice(0, 1000)
+  strategySignals.value = next.slice(0, replayKlineMode.value ? REPLAY_RUNTIME_ROW_LIMIT : 1000)
 }
 
 function normalizeStrategySymbolList(item) {
@@ -1895,12 +1916,12 @@ function connectChartWS() {
       // 策略定义列表以 Python ListStrategies 为准；Go 先启动时页面最初可能拿不到列表。
       // 一旦 HTTP 状态变为已连接，需要主动重新拉取定义，否则右键菜单会停留在“暂无可用策略”。
       if (msg.data?.connected) void fetchStrategyDefinitions().catch(() => {})
-      void fetchStrategyRuntime().catch(() => {})
+      scheduleStrategyRuntimeRefresh(replayKlineMode.value ? 1500 : 750)
       return
     }
     if (msg?.type === 'strategy_signal' && msg.data) {
       pushStrategySignal(msg.data)
-      void fetchStrategyRuntime().catch(() => {})
+      scheduleStrategyRuntimeRefresh(replayKlineMode.value ? 1500 : 750)
       return
     }
     if (msg?.type === 'strategy_backtest_done' && msg.data) {
@@ -2213,6 +2234,7 @@ onUnmounted(() => {
   closeChartWS()
   stopTradeWindowDrag()
   if (spriteQueryTimer) clearTimeout(spriteQueryTimer)
+  if (strategyRuntimeRefreshTimer) clearTimeout(strategyRuntimeRefreshTimer)
   if (spriteKeyHandler) window.removeEventListener('keydown', spriteKeyHandler)
   if (globalClickHandler) window.removeEventListener('click', globalClickHandler)
   if (globalKeyHandler) window.removeEventListener('keydown', globalKeyHandler)

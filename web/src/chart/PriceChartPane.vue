@@ -21,11 +21,12 @@ import {
   normalizeReversalSettings,
 } from "./analysis/reversalDetector";
 import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
-import { mergeRealtimeBarUpdate } from "./realtimeBars";
+import { mergeRealtimeBarUpdate, normalizeRealtimeBar } from "./realtimeBars";
 import { getComposedBar, initKlineComposer, pushComposeTick } from "./klineComposeBridge";
 import { KLINE_REPLAY_PANEL_PREF_KEY } from "./chartPrefs";
 
 const CHUNK_SIZE = 2000;
+const REPLAY_VISIBLE_BAR_LIMIT = 500;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
 const RESIZER_H = 5;
 const MIN_CANDLE_H = 140;
@@ -973,7 +974,13 @@ function scheduleDerivedSeriesRender() {
   realtimeIndicatorTimer = setTimeout(() => {
     realtimeIndicatorTimer = null;
     renderDerivedSeries(undefined, { preserveViewport: true });
-  }, 120);
+  }, props.replayKlineMode ? 250 : 120);
+}
+
+function trimReplayBars(bars) {
+  const normalized = normalizeBarsAscendingUnique(bars, "replay_trim");
+  if (!props.replayKlineMode || normalized.length <= REPLAY_VISIBLE_BAR_LIMIT) return normalized;
+  return normalized.slice(normalized.length - REPLAY_VISIBLE_BAR_LIMIT);
 }
 
 function resetViewportToLoadedBars() {
@@ -1592,7 +1599,7 @@ async function loadChunkWindow(endParam) {
   try {
     const chunk = await fetchChunk(endParam);
     if (reqSeq !== loadRequestSeq) return;
-    state.bars = normalizeBarsAscendingUnique(chunk.bars, "initial_chunk");
+    state.bars = trimReplayBars(chunk.bars);
     state.hasMore = chunk.bars.length >= CHUNK_SIZE;
     const metaSymbol = String(chunk.meta?.symbol || "")
       .trim()
@@ -1648,7 +1655,7 @@ async function loadOlderChunk() {
       state.hasMore = false;
       return;
     }
-    state.bars = normalizeBarsAscendingUnique([...toPrepend, ...state.bars], "merge_older");
+    state.bars = trimReplayBars([...toPrepend, ...state.bars]);
     state.hasMore = olderBars.length >= CHUNK_SIZE;
     renderSeries();
     if (previousRange && toPrepend.length > 0) {
@@ -2138,9 +2145,33 @@ async function reloadRecentWindow() {
   }
 }
 
+function mergeReplayBarUpdate(rawBars, update) {
+  const bars = Array.isArray(rawBars) ? rawBars.slice() : [];
+  const bar = normalizeRealtimeBar(update?.bar || {});
+  if (!Number.isFinite(bar.adjusted_time) || bar.adjusted_time <= 0) return bars;
+  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
+  const nextBar = { ...bar, __source: "server", __phase: phase };
+  const lastIdx = bars.length - 1;
+  const lastTime = Number(bars[lastIdx]?.adjusted_time || 0);
+  if (lastIdx >= 0 && lastTime === bar.adjusted_time) {
+    bars[lastIdx] = { ...bars[lastIdx], ...nextBar };
+  } else if (lastIdx < 0 || bar.adjusted_time > lastTime) {
+    bars.push(nextBar);
+  } else {
+    const idx = bars.findIndex((x) => Number(x?.adjusted_time || 0) === bar.adjusted_time);
+    if (idx >= 0) bars[idx] = { ...bars[idx], ...nextBar };
+    else bars.push(nextBar);
+    bars.sort((a, b) => Number(a.adjusted_time || 0) - Number(b.adjusted_time || 0));
+  }
+  if (bars.length > REPLAY_VISIBLE_BAR_LIMIT) {
+    return bars.slice(bars.length - REPLAY_VISIBLE_BAR_LIMIT);
+  }
+  return bars;
+}
+
 function applyRealtimeBarUpdate(update) {
   realtimeApplyCount += 1;
-  const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+  const previousBars = Array.isArray(state.bars) ? state.bars : [];
   const previousRange = currentVisibleLogicalRangeRaw();
   const sub = update?.subscription || {};
   const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
@@ -2155,16 +2186,20 @@ function applyRealtimeBarUpdate(update) {
   ) {
     return;
   }
-  const merged = mergeRealtimeBarUpdate(state.bars, update);
-  const barTs = Number(update?.bar?.adjusted_time || 0);
-  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
-  if (Number.isFinite(barTs) && barTs > 0) {
-    const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
-    if (idx >= 0) {
-      merged[idx] = { ...merged[idx], __source: "server", __phase: phase };
+  if (props.replayKlineMode) {
+    state.bars = mergeReplayBarUpdate(state.bars, update);
+  } else {
+    const merged = mergeRealtimeBarUpdate(state.bars, update);
+    const barTs = Number(update?.bar?.adjusted_time || 0);
+    const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
+    if (Number.isFinite(barTs) && barTs > 0) {
+      const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
+      if (idx >= 0) {
+        merged[idx] = { ...merged[idx], __source: "server", __phase: phase };
+      }
     }
+    state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   }
-  state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   updatePrimarySeriesForRealtime();
   restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
   scheduleDerivedSeriesRender();
@@ -3445,17 +3480,24 @@ function strategyTraceTime(row) {
 function findNearestBarByDisplayTime(time) {
   const ts = Number(time || 0);
   if (!Number.isFinite(ts) || ts <= 0) return null;
-  let best = null;
-  let bestDelta = Number.POSITIVE_INFINITY;
-  for (const bar of state.bars || []) {
-    const t = Number(getDisplayTime(bar) || 0);
-    const delta = Math.abs(t - ts);
-    if (delta < bestDelta) {
-      best = bar;
-      bestDelta = delta;
-    }
+  const bars = Array.isArray(state.bars) ? state.bars : [];
+  if (!bars.length) return null;
+  let lo = 0;
+  let hi = bars.length - 1;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    const mt = Number(getDisplayTime(bars[mid]) || 0);
+    if (mt === ts) return bars[mid];
+    if (mt < ts) lo = mid + 1;
+    else hi = mid - 1;
   }
-  return best;
+  const left = hi >= 0 ? bars[hi] : null;
+  const right = lo < bars.length ? bars[lo] : null;
+  if (!left) return right;
+  if (!right) return left;
+  const dl = Math.abs(Number(getDisplayTime(left) || 0) - ts);
+  const dr = Math.abs(Number(getDisplayTime(right) || 0) - ts);
+  return dl <= dr ? left : right;
 }
 
 function strategyTraceMetric(row, names) {
