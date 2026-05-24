@@ -205,7 +205,15 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(self.state().state, "DONE")
         self.assertEqual(self.state().signal_entry, 99.3)
 
-        result = self.strategy.on_bar(bar_req(open_=99.2, high=99.25, low=99.0, close=99.05, idx=25))
+        hold = self.strategy.on_bar(bar_req(open_=99.2, high=99.25, low=99.0, close=99.05, idx=25))
+        self.assertTrue(hold["no_signal"])
+        self.assertEqual(hold["trace"]["step_key"], "DONE")
+        self.assertEqual(self.state().state, "DONE")
+
+        self.strategy.on_bar(bar_req(open_=99.0, high=99.1, low=97.0, close=97.4, idx=26))
+        self.strategy.on_bar(bar_req(open_=97.4, high=97.6, low=96.2, close=96.5, idx=27))
+        self.strategy.on_bar(bar_req(open_=96.6, high=100.4, low=96.8, close=98.4, idx=28))
+        result = self.strategy.on_bar(bar_req(open_=98.4, high=100.5, low=97.0, close=98.6, idx=29))
         self.assertTrue(result["no_signal"])
         self.assertEqual(result["trace"]["step_key"], "SIGNAL_RESULT")
         self.assertEqual(result["metrics"]["signal_result"], "success")
@@ -218,7 +226,7 @@ class MA20PullbackShortStrategyTest(unittest.TestCase):
         self.strategy.on_bar(bar_req(open_=99.4, high=99.6, low=99.4, close=99.45, idx=23))
         self.strategy.on_bar(bar_req(open_=99.3, high=99.35, low=99.1, close=99.2, idx=24))
 
-        result = self.strategy.on_bar(bar_req(open_=99.2, high=99.5, low=99.1, close=99.45, idx=25))
+        result = self.strategy.on_bar(bar_req(open_=99.2, high=100.0, low=99.1, close=99.9, idx=25))
 
         self.assertTrue(result["no_signal"])
         self.assertEqual(result["trace"]["step_key"], "SIGNAL_RESULT")
@@ -390,14 +398,42 @@ class MA20WeakPullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(signal["metrics"]["signal"], "SHORT")
         self.assertEqual(self.state().state, SIGNAL_ACTIVE)
 
-        result = self.strategy.on_bar(weak_bar_req(idx=124, open_=98.8, high=99.0, low=97.0, close=98.0))
+        hold = self.strategy.on_bar(weak_bar_req(idx=124, open_=98.8, high=99.0, low=97.0, close=98.0))
+        self.assertTrue(hold["no_signal"])
+        self.assertEqual(hold["trace"]["step_key"], SIGNAL_ACTIVE)
+        self.assertEqual(self.state().state, SIGNAL_ACTIVE)
+
+        self.strategy.on_bar(weak_bar_req(idx=125, open_=97.9, high=98.1, low=96.5, close=96.8))
+        self.strategy.on_bar(weak_bar_req(idx=126, open_=96.8, high=97.0, low=96.2, close=96.5))
+        self.strategy.on_bar(weak_bar_req(idx=127, open_=96.6, high=100.2, low=96.4, close=98.0))
+        result = self.strategy.on_bar(weak_bar_req(idx=128, open_=98.1, high=100.4, low=96.8, close=98.4))
+        self.assertTrue(result["no_signal"])
+        self.assertEqual(result["trace"]["step_key"], SIGNAL_ACTIVE)
+        self.assertEqual(self.state().state, SIGNAL_ACTIVE)
+
+        for idx, values in enumerate([
+            (97.8, 98.0, 96.9, 97.5),
+            (97.0, 97.2, 96.1, 96.6),
+            (96.1, 96.4, 95.4, 95.8),
+            (95.7, 96.0, 95.0, 95.3),
+            (95.4, 96.2, 95.2, 95.9),
+            (95.9, 96.8, 95.5, 96.4),
+            (96.5, 97.4, 96.0, 97.1),
+            (97.1, 98.0, 96.7, 97.7),
+            (97.7, 98.6, 97.3, 98.3),
+            (98.2, 98.8, 97.8, 98.6),
+            (98.4, 98.8, 97.9, 98.6),
+            (98.4, 98.8, 98.0, 98.6),
+        ], start=129):
+            self.strategy.on_bar(weak_bar_req(idx=idx, open_=values[0], high=values[1], low=values[2], close=values[3]))
+        result = self.strategy.on_bar(weak_bar_req(idx=141, open_=98.4, high=98.8, low=98.1, close=98.6))
         self.assertTrue(result["no_signal"])
         self.assertEqual(result["trace"]["step_key"], "SIGNAL_RESULT")
         self.assertEqual(result["trace"]["status"], "passed")
         self.assertEqual(result["metrics"]["signal_result"], "success")
         self.assertEqual(self.state().state, WAIT_BREAK_BELOW_MA20)
 
-        next_wait = self.strategy.on_bar(weak_bar_req(idx=125, open_=98.0, high=98.2, low=97.5, close=97.8))
+        next_wait = self.strategy.on_bar(weak_bar_req(idx=142, open_=98.0, high=98.2, low=97.5, close=97.8))
         self.assertTrue(next_wait["no_signal"])
         self.assertEqual(next_wait["trace"]["step_key"], WAIT_BREAK_BELOW_MA20)
         self.assertEqual(self.state().state, WAIT_BREAK_BELOW_MA20)

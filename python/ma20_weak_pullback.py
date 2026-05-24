@@ -115,6 +115,12 @@ class WeakPullbackShortState:
     signal_adverse_target: float | None = None
     signal_bars: int = 0
     signal_time: str = ""
+    signal_lowest_low: float | None = None
+    signal_prev_low: float | None = None
+    signal_no_new_low_bars: int = 0
+    signal_rising_low_bars: int = 0
+    signal_ma20_touched: bool = False
+    signal_ma20_touch_low: float | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -141,9 +147,14 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "ma60_period": 60,
             "ma120_period": 120,
             "atr_period": 14,
-            "observation_bars": 24,
+            "observation_bars": 240,
             "profit_atr_multiple": 1.0,
-            "adverse_atr_multiple": 0.8,
+            "adverse_atr_multiple": 1.2,
+            "strength_exit_bars": 3,
+            "profit_rebound_atr_multiple": 1.0,
+            "profit_rising_low_bars": 2,
+            "strong_bull_atr_multiple": 1.5,
+            "exit_ma20_distance_atr_multiple": 0.8,
             "swing_lookback_bars": 20,
             "slope_lookback_bars": 5,
             "structure_wait_bars": 3,
@@ -404,6 +415,11 @@ class MA20WeakPullbackShortStrategy(Strategy):
             "adverse_target": state.signal_adverse_target,
             "signal_bars": state.signal_bars,
             "signal_time": state.signal_time,
+            "signal_lowest_low": state.signal_lowest_low,
+            "signal_no_new_low_bars": state.signal_no_new_low_bars,
+            "signal_rising_low_bars": state.signal_rising_low_bars,
+            "signal_ma20_touched": state.signal_ma20_touched,
+            "signal_ma20_touch_low": state.signal_ma20_touch_low,
             "step_total": 6,
         }
 
@@ -451,6 +467,12 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.signal_adverse_target = None
         state.signal_bars = 0
         state.signal_time = ""
+        state.signal_lowest_low = None
+        state.signal_prev_low = None
+        state.signal_no_new_low_bars = 0
+        state.signal_rising_low_bars = 0
+        state.signal_ma20_touched = False
+        state.signal_ma20_touch_low = None
 
     def _signal_settings(self, request: RequestDict) -> StrategySettings:
         """读取信号结果观察参数。
@@ -460,10 +482,28 @@ class MA20WeakPullbackShortStrategy(Strategy):
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return {
-            "observation_bars": max(1, _int(params.get("observation_bars"), 24)),
+            "observation_bars": max(1, _int(params.get("observation_bars"), 240)),
             "profit_atr_multiple": max(0.0001, _float(params.get("profit_atr_multiple"), 1.0)),
-            "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
+            "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 1.2)),
+            "strength_exit_bars": max(1, _int(params.get("strength_exit_bars"), 3)),
+            "profit_rebound_atr_multiple": max(0.0001, _float(params.get("profit_rebound_atr_multiple"), _float(params.get("profit_atr_multiple"), 1.0))),
+            "profit_rising_low_bars": max(1, _int(params.get("profit_rising_low_bars"), 2)),
+            "strong_bull_atr_multiple": max(0.0001, _float(params.get("strong_bull_atr_multiple"), 1.5)),
+            "exit_ma20_distance_atr_multiple": max(0.0001, _float(params.get("exit_ma20_distance_atr_multiple"), 0.8)),
         }
+
+    def _short_trend_intact(self, close: float, ind: MetricsDict, settings: StrategySettings) -> bool:
+        """空头均线结构未被破坏时继续持有，避免 MA20 附近的小反弹过早平仓。"""
+        ma20, ma60 = ind.get("ma20"), ind.get("ma60")
+        atr = max(0.0001, _float(ind.get("atr14"), 0.0))
+        return bool(
+            ma20 is not None
+            and ma60 is not None
+            and ma20 <= ma60
+            and close <= ma60
+            and close <= ma20 + settings["exit_ma20_distance_atr_multiple"] * atr
+            and ind.get("ma20_slope", 0) <= 0
+        )
 
     def _start_short_signal(
         self,
@@ -486,28 +526,88 @@ class MA20WeakPullbackShortStrategy(Strategy):
         state.signal_adverse_target = entry_price + settings["adverse_atr_multiple"] * atr
         state.signal_bars = 0
         state.signal_time = event_time
+        state.signal_lowest_low = entry_price
+        state.signal_prev_low = None
+        state.signal_no_new_low_bars = 0
+        state.signal_rising_low_bars = 0
+        state.signal_ma20_touched = False
+        state.signal_ma20_touch_low = None
         return atr
 
     def _evaluate_active_signal(
         self,
         request: RequestDict,
         state: WeakPullbackShortState,
+        open_price: float,
         high: float,
         low: float,
+        close: float,
         ind: MetricsDict,
     ) -> ResponseDict:
-        """SIGNAL_ACTIVE 内观察止盈、止损或窗口结束。
+        """SIGNAL_ACTIVE 内观察结构性止盈、止损或窗口结束。
 
-        做空信号如果先触及 adverse_target，说明反抽失败判断被市场否定；先触及 profit_target 则记为成功。
-        未在窗口内触发任何目标时输出 unresolved，避免无期限占用状态机。
+        做空盈利后不再用固定 ATR 止盈。只要价格没有反弹触碰 MA20，就继续持有；
+        触碰 MA20 后再用反弹幅度、低点上移或强阳站稳 MA20 确认止盈。
         """
         settings = self._signal_settings(request)
         state.signal_bars += 1
-        hit_adverse = state.signal_adverse_target is not None and high >= state.signal_adverse_target
-        hit_profit = state.signal_profit_target is not None and low <= state.signal_profit_target
+        atr = max(0.0001, _float(ind.get("atr14"), 0.0))
+        ma20 = ind.get("ma20")
+        entry = state.signal_entry
+        if state.signal_lowest_low is None or low < state.signal_lowest_low:
+            state.signal_lowest_low = low
+            state.signal_no_new_low_bars = 0
+        else:
+            state.signal_no_new_low_bars += 1
+        if state.signal_prev_low is not None and low > state.signal_prev_low:
+            state.signal_rising_low_bars += 1
+        else:
+            state.signal_rising_low_bars = 0
+        state.signal_prev_low = low
+        if ma20 is not None and high >= ma20:
+            state.signal_ma20_touched = True
+            if state.signal_ma20_touch_low is None:
+                state.signal_ma20_touch_low = state.signal_lowest_low
+
+        profitable = entry is not None and close < entry
+        short_trend_intact = self._short_trend_intact(close, ind, settings)
+        trend_invalidated = not short_trend_intact
+        hit_adverse = state.signal_adverse_target is not None and close >= state.signal_adverse_target and trend_invalidated
+        no_new_low_stop = (
+            entry is not None
+            and close >= entry
+            and trend_invalidated
+            and state.signal_no_new_low_bars >= settings["strength_exit_bars"]
+        )
+        stood_above_ma20_stop = (
+            entry is not None
+            and not profitable
+            and trend_invalidated
+            and ma20 is not None
+            and open_price > ma20
+            and close > ma20
+        )
+        rebound = close - (state.signal_lowest_low if state.signal_lowest_low is not None else close)
+        rebound_ok = state.signal_ma20_touched and rebound >= settings["profit_rebound_atr_multiple"] * atr
+        rising_low_take = profitable and trend_invalidated and rebound_ok and state.signal_rising_low_bars >= settings["profit_rising_low_bars"]
+        strong_bull_take = (
+            profitable
+            and trend_invalidated
+            and ma20 is not None
+            and low > ma20
+            and close > open_price
+            and (close - open_price) >= settings["strong_bull_atr_multiple"] * atr
+        )
         checks = [
-            _check("触及止损价", hit_adverse, high, state.signal_adverse_target),
-            _check("触及止盈价", hit_profit, low, state.signal_profit_target),
+            _check("收盘触及止损价", hit_adverse, close, state.signal_adverse_target),
+            _check("亏损后连续未创新低", no_new_low_stop, state.signal_no_new_low_bars, settings["strength_exit_bars"]),
+            _check("亏损后重新站上MA20", stood_above_ma20_stop, close, ma20),
+            _check("空头均线趋势未失效", short_trend_intact, close, ind.get("ma60")),
+            _check("未明显远离MA20", ma20 is not None and close <= ma20 + settings["exit_ma20_distance_atr_multiple"] * atr, close, ma20),
+            _check("盈利后触碰MA20", state.signal_ma20_touched, high, ma20),
+            _check("触碰MA20后反弹幅度达标", rebound_ok, rebound, settings["profit_rebound_atr_multiple"] * atr),
+            _check("触碰MA20后低点上移", rising_low_take, state.signal_rising_low_bars, settings["profit_rising_low_bars"]),
+            _check("强阳站稳MA20", strong_bull_take, close - open_price, settings["strong_bull_atr_multiple"] * atr),
             _check("观察窗口未结束", state.signal_bars < settings["observation_bars"], state.signal_bars, settings["observation_bars"]),
         ]
         if hit_adverse:
@@ -516,20 +616,28 @@ class MA20WeakPullbackShortStrategy(Strategy):
             trace = self._bar_trace(request, state, "SIGNAL_RESULT", "信号失败", 6, "failed", "adverse target hit before profit target", checks, ind)
             self._reset(state)
             return _no_signal(request, "adverse target hit before profit target", metrics, trace)
-        if hit_profit:
+        if no_new_low_stop or stood_above_ma20_stop:
+            reason = "market strengthened before short worked"
+            metrics = self._base_metrics(state, ind)
+            metrics["signal_result"] = "failure"
+            trace = self._bar_trace(request, state, "SIGNAL_RESULT", "盘面转强止损", 6, "failed", reason, checks, ind)
+            self._reset(state)
+            return _no_signal(request, reason, metrics, trace)
+        if rising_low_take or strong_bull_take:
+            reason = "trend-following profit exit after MA20 reclaim"
             metrics = self._base_metrics(state, ind)
             metrics["signal_result"] = "success"
-            trace = self._bar_trace(request, state, "SIGNAL_RESULT", "信号成功", 6, "passed", "profit target hit before adverse target", checks, ind)
+            trace = self._bar_trace(request, state, "SIGNAL_RESULT", "结构止盈", 6, "passed", reason, checks, ind)
             self._reset(state)
-            return _no_signal(request, "profit target hit before adverse target", metrics, trace)
-        if state.signal_bars >= settings["observation_bars"]:
+            return _no_signal(request, reason, metrics, trace)
+        if state.signal_bars >= settings["observation_bars"] and not profitable:
             metrics = self._base_metrics(state, ind)
             metrics["signal_result"] = "unresolved"
             trace = self._bar_trace(request, state, "SIGNAL_RESULT", "信号观察结束", 6, "done", "observation window ended without profit/adverse target", checks, ind)
             self._reset(state)
             return _no_signal(request, "observation window ended without profit/adverse target", metrics, trace)
-        trace = self._bar_trace(request, state, SIGNAL_ACTIVE, "信号观察中", 6, "waiting", "waiting for signal result", checks, ind)
-        return _no_signal(request, "waiting for signal result", self._base_metrics(state, ind), trace)
+        trace = self._bar_trace(request, state, SIGNAL_ACTIVE, "持仓跟踪中", 6, "waiting", "holding short until structural exit", checks, ind)
+        return _no_signal(request, "holding short until structural exit", self._base_metrics(state, ind), trace)
 
     def _strong_uptrend(self, close: float, ind: MetricsDict) -> bool:
         """判断是否仍是强上涨回撤。
@@ -725,7 +833,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
             return out
 
         if state.state == SIGNAL_ACTIVE:
-            return finish(self._evaluate_active_signal(request, state, high, low, ind))
+            return finish(self._evaluate_active_signal(request, state, open_price, high, low, close, ind))
 
         if state.state == DONE:
             self._reset(state)

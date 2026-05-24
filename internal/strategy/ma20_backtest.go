@@ -11,10 +11,10 @@ import (
 )
 
 const (
-	MA20WeakStrategyID             = "ma20.weak_pullback_short"
-	MA20WeakBaselineStrategyID     = "ma20.weak_pullback_short.baseline"
-	MA20WeakHardFilterStrategyID   = "ma20.weak_pullback_short.hard_filter"
-	MA20WeakScoreFilterStrategyID  = "ma20.weak_pullback_short.score_filter"
+	MA20WeakStrategyID            = "ma20.weak_pullback_short"
+	MA20WeakBaselineStrategyID    = "ma20.weak_pullback_short.baseline"
+	MA20WeakHardFilterStrategyID  = "ma20.weak_pullback_short.hard_filter"
+	MA20WeakScoreFilterStrategyID = "ma20.weak_pullback_short.score_filter"
 
 	MA20AlgoBaseline    = "baseline"
 	MA20AlgoHardFilter  = "hard_filter"
@@ -72,6 +72,11 @@ type MA20BacktestConfig struct {
 	ObservationBars      int
 	ProfitATRMultiple    float64
 	AdverseATRMultiple   float64
+	StrengthExitBars     int
+	ProfitReboundATR     float64
+	ProfitRisingLowBars  int
+	StrongBullATR        float64
+	ExitMA20DistanceATR  float64
 	StructureWaitBars    int
 	TouchWaitBars        int
 	TriggerWaitBars      int
@@ -117,6 +122,7 @@ type MA20AttemptRecord struct {
 	ATR               float64            `json:"atr,omitempty"`
 	ProfitTarget      float64            `json:"profit_target,omitempty"`
 	AdverseTarget     float64            `json:"adverse_target,omitempty"`
+	LowestLow         float64            `json:"lowest_low,omitempty"`
 	LastSwingLow      float64            `json:"last_swing_low,omitempty"`
 	BullishPauseScore float64            `json:"bullish_pause_score,omitempty"`
 	BearishScore      float64            `json:"bearish_failure_score,omitempty"`
@@ -171,9 +177,14 @@ func DefaultMA20BacktestConfig() MA20BacktestConfig {
 		Tables:               append([]string(nil), DefaultMA20BacktestTables...),
 		Algorithms:           append([]string(nil), DefaultMA20BacktestAlgorithms...),
 		Period:               "5m",
-		ObservationBars:      24,
+		ObservationBars:      240,
 		ProfitATRMultiple:    1.0,
-		AdverseATRMultiple:   0.8,
+		AdverseATRMultiple:   1.2,
+		StrengthExitBars:     3,
+		ProfitReboundATR:     1.0,
+		ProfitRisingLowBars:  2,
+		StrongBullATR:        1.5,
+		ExitMA20DistanceATR:  0.8,
 		StructureWaitBars:    3,
 		TouchWaitBars:        12,
 		TriggerWaitBars:      6,
@@ -204,6 +215,21 @@ func NormalizeMA20BacktestConfig(cfg MA20BacktestConfig) MA20BacktestConfig {
 	if cfg.AdverseATRMultiple <= 0 {
 		cfg.AdverseATRMultiple = def.AdverseATRMultiple
 	}
+	if cfg.StrengthExitBars <= 0 {
+		cfg.StrengthExitBars = def.StrengthExitBars
+	}
+	if cfg.ProfitReboundATR <= 0 {
+		cfg.ProfitReboundATR = def.ProfitReboundATR
+	}
+	if cfg.ProfitRisingLowBars <= 0 {
+		cfg.ProfitRisingLowBars = def.ProfitRisingLowBars
+	}
+	if cfg.StrongBullATR <= 0 {
+		cfg.StrongBullATR = def.StrongBullATR
+	}
+	if cfg.ExitMA20DistanceATR <= 0 {
+		cfg.ExitMA20DistanceATR = def.ExitMA20DistanceATR
+	}
 	if cfg.StructureWaitBars <= 0 {
 		cfg.StructureWaitBars = def.StructureWaitBars
 	}
@@ -233,18 +259,23 @@ func RunMA20Backtest(ctx context.Context, db *sql.DB, cfg MA20BacktestConfig) (B
 	started := time.Now()
 	result := MA20BacktestResult{
 		Config: map[string]any{
-			"period":                 cfg.Period,
-			"tables":                 cfg.Tables,
-			"algorithms":             cfg.Algorithms,
-			"observation_bars":       cfg.ObservationBars,
-			"profit_atr_multiple":    cfg.ProfitATRMultiple,
-			"adverse_atr_multiple":   cfg.AdverseATRMultiple,
-			"structure_wait_bars":    cfg.StructureWaitBars,
-			"touch_wait_bars":        cfg.TouchWaitBars,
-			"trigger_wait_bars":      cfg.TriggerWaitBars,
-			"swing_lookback_bars":    cfg.SwingLookbackBars,
-			"slope_lookback_bars":    cfg.SlopeLookbackBars,
-			"include_attempt_detail": cfg.IncludeAttemptDetail,
+			"period":                          cfg.Period,
+			"tables":                          cfg.Tables,
+			"algorithms":                      cfg.Algorithms,
+			"observation_bars":                cfg.ObservationBars,
+			"profit_atr_multiple":             cfg.ProfitATRMultiple,
+			"adverse_atr_multiple":            cfg.AdverseATRMultiple,
+			"strength_exit_bars":              cfg.StrengthExitBars,
+			"profit_rebound_atr_multiple":     cfg.ProfitReboundATR,
+			"profit_rising_low_bars":          cfg.ProfitRisingLowBars,
+			"strong_bull_atr_multiple":        cfg.StrongBullATR,
+			"exit_ma20_distance_atr_multiple": cfg.ExitMA20DistanceATR,
+			"structure_wait_bars":             cfg.StructureWaitBars,
+			"touch_wait_bars":                 cfg.TouchWaitBars,
+			"trigger_wait_bars":               cfg.TriggerWaitBars,
+			"swing_lookback_bars":             cfg.SwingLookbackBars,
+			"slope_lookback_bars":             cfg.SlopeLookbackBars,
+			"include_attempt_detail":          cfg.IncludeAttemptDetail,
 		},
 		Stats:      map[string]MA20BacktestStats{},
 		TableStats: map[string]map[string]MA20BacktestStats{},
@@ -581,6 +612,7 @@ func addSignal(attempt *MA20AttemptRecord, bars []MA20BacktestBar, ind ma20Indic
 	}
 	attempt.ProfitTarget = entry - cfg.ProfitATRMultiple*attempt.ATR
 	attempt.AdverseTarget = entry + cfg.AdverseATRMultiple*attempt.ATR
+	attempt.LowestLow = entry
 	attempt.Reason = reason
 	addAttemptStep(attempt, bars[signalIndex], signalIndex, "SHORT_SIGNAL", "做空信号", "passed", reason, entry, map[string]float64{
 		"entry_price":    entry,
@@ -592,31 +624,87 @@ func addSignal(attempt *MA20AttemptRecord, bars []MA20BacktestBar, ind ma20Indic
 
 func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, signalIndex int, cfg MA20BacktestConfig) int {
 	last := minInt(len(bars)-1, signalIndex+cfg.ObservationBars)
+	ind := calcMA20Indicators(bars, cfg)
+	lowestLow := attempt.EntryPrice
+	prevLow := 0.0
+	noNewLowBars := 0
+	risingLowBars := 0
+	maTouched := false
 	for j := signalIndex + 1; j <= last; j++ {
-		hitAdverse := bars[j].High >= attempt.AdverseTarget
-		hitProfit := bars[j].Low <= attempt.ProfitTarget
+		trendStillBearish := shortTrendIntact(bars, ind, j, cfg)
+		trendInvalidated := !trendStillBearish
+		hitAdverse := bars[j].Close >= attempt.AdverseTarget && trendInvalidated
 		if hitAdverse {
 			ts := bars[j].AdjustedTime
 			attempt.Outcome = MA20OutcomeFailure
 			attempt.OutcomeIndex = j
 			attempt.OutcomeTime = &ts
 			attempt.Reason = "adverse target hit before profit target"
-			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "信号失败", "failed", attempt.Reason, attempt.AdverseTarget, nil)
+			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "信号失败", "failed", attempt.Reason, attempt.AdverseTarget, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
 			return j
 		}
-		if hitProfit {
+		if lowestLow <= 0 || bars[j].Low < lowestLow {
+			lowestLow = bars[j].Low
+			noNewLowBars = 0
+		} else {
+			noNewLowBars++
+		}
+		if prevLow > 0 && bars[j].Low > prevLow {
+			risingLowBars++
+		} else {
+			risingLowBars = 0
+		}
+		prevLow = bars[j].Low
+		if ind.MA20[j] > 0 && bars[j].High >= ind.MA20[j] {
+			maTouched = true
+		}
+		attempt.LowestLow = lowestLow
+		profitable := bars[j].Close < attempt.EntryPrice
+		noNewLowStop := bars[j].Close >= attempt.EntryPrice && trendInvalidated && noNewLowBars >= cfg.StrengthExitBars
+		stoodAboveStop := !profitable && trendInvalidated && ind.MA20[j] > 0 && bars[j].Open > ind.MA20[j] && bars[j].Close > ind.MA20[j]
+		if noNewLowStop || stoodAboveStop {
+			ts := bars[j].AdjustedTime
+			attempt.Outcome = MA20OutcomeFailure
+			attempt.OutcomeIndex = j
+			attempt.OutcomeTime = &ts
+			attempt.Reason = "market strengthened before short worked"
+			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "盘面转强止损", "failed", attempt.Reason, bars[j].Close, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
+			return j
+		}
+		rebound := bars[j].Close - lowestLow
+		reboundOK := maTouched && rebound >= cfg.ProfitReboundATR*attempt.ATR
+		risingLowTake := profitable && trendInvalidated && reboundOK && risingLowBars >= cfg.ProfitRisingLowBars
+		strongBullTake := profitable && trendInvalidated && ind.MA20[j] > 0 && bars[j].Low > ind.MA20[j] && bars[j].Close > bars[j].Open && bars[j].Close-bars[j].Open >= cfg.StrongBullATR*attempt.ATR
+		if risingLowTake || strongBullTake {
 			ts := bars[j].AdjustedTime
 			attempt.Outcome = MA20OutcomeSuccess
 			attempt.OutcomeIndex = j
 			attempt.OutcomeTime = &ts
-			attempt.Reason = "profit target hit before adverse target"
-			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "信号成功", "passed", attempt.Reason, attempt.ProfitTarget, nil)
+			attempt.Reason = "trend-following profit exit after MA20 reclaim"
+			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "结构止盈", "passed", attempt.Reason, bars[j].Close, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
 			return j
+		}
+		if j == last && !profitable {
+			break
 		}
 	}
 	attempt.Outcome = MA20OutcomeUnresolved
-	attempt.Reason = "observation window ended without profit/adverse target"
+	attempt.Reason = "observation window ended without structural exit"
 	return last
+}
+
+func exitMetrics(ind ma20Indicators, i int, lowestLow float64, noNewLowBars int, risingLowBars int, maTouched bool, shortTrendIntact bool) map[string]float64 {
+	m := indicatorMetrics(ind, i)
+	m["lowest_low"] = lowestLow
+	m["no_new_low_bars"] = float64(noNewLowBars)
+	m["rising_low_bars"] = float64(risingLowBars)
+	if maTouched {
+		m["ma20_touched"] = 1
+	}
+	if shortTrendIntact {
+		m["short_trend_intact"] = 1
+	}
+	return m
 }
 
 func newMA20Attempt(table string, instrument string, algo string, seq int, index int, bar MA20BacktestBar, ind ma20Indicators) MA20AttemptRecord {
@@ -681,6 +769,15 @@ func classifyBearishRegime(bars []MA20BacktestBar, ind ma20Indicators, i int) st
 		return "WEAK_BEARISH_CANDIDATE"
 	}
 	return "UNCLEAR"
+}
+
+func shortTrendIntact(bars []MA20BacktestBar, ind ma20Indicators, i int, cfg MA20BacktestConfig) bool {
+	return ind.MA20[i] > 0 &&
+		ind.MA60[i] > 0 &&
+		ind.MA20[i] <= ind.MA60[i] &&
+		bars[i].Close <= ind.MA60[i] &&
+		bars[i].Close <= ind.MA20[i]+cfg.ExitMA20DistanceATR*ind.ATR14[i] &&
+		ind.MA20Slope[i] <= 0
 }
 
 func scoreMA20Setup(bars []MA20BacktestBar, ind ma20Indicators, start int, current int, touchIndex int, reactionLow float64) (float64, float64) {

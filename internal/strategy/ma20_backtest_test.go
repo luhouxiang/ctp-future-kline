@@ -54,6 +54,24 @@ func TestMA20WeakPullbackProducesSuccessfulSignal(t *testing.T) {
 		barWithOHLC(121, 99.2, 100.1, 98.8, 99.0),
 		barWithOHLC(122, 99.0, 99.2, 98.7, 98.9),
 		barWithOHLC(123, 98.7, 99.1, 97.4, 97.8),
+		barWithOHLC(124, 97.9, 98.1, 96.5, 96.8),
+		barWithOHLC(125, 96.8, 97.0, 96.2, 96.5),
+		barWithOHLC(126, 96.6, 100.2, 96.4, 98.0),
+		barWithOHLC(127, 98.1, 100.4, 96.8, 98.4),
+		barWithOHLC(128, 97.8, 98.0, 96.9, 97.5),
+		barWithOHLC(129, 97.0, 97.2, 96.1, 96.6),
+		barWithOHLC(130, 96.1, 96.4, 95.4, 95.8),
+		barWithOHLC(131, 95.7, 96.0, 95.0, 95.3),
+		barWithOHLC(132, 95.4, 96.2, 95.2, 95.9),
+		barWithOHLC(133, 95.9, 96.8, 95.5, 96.4),
+		barWithOHLC(134, 96.5, 97.4, 96.0, 97.1),
+		barWithOHLC(135, 97.1, 98.0, 96.7, 97.7),
+		barWithOHLC(136, 97.7, 98.6, 97.3, 98.3),
+		barWithOHLC(137, 98.2, 98.8, 97.8, 98.6),
+		barWithOHLC(138, 98.4, 98.8, 97.9, 98.6),
+		barWithOHLC(139, 98.4, 98.8, 98.0, 98.6),
+		barWithOHLC(140, 98.4, 98.8, 98.1, 98.6),
+		barWithOHLC(141, 98.4, 98.8, 98.2, 98.6),
 	)
 	cfg := DefaultMA20BacktestConfig()
 	out := RunMA20BacktestOnBars("future_kline_l9_mm_y", "yl9", bars, cfg, []string{MA20AlgoHardFilter, MA20AlgoScoreFilter})
@@ -74,7 +92,7 @@ func TestMA20WeakPullbackProducesSuccessfulSignal(t *testing.T) {
 func TestMA20OutcomeSameBarProfitAndAdverseCountsFailure(t *testing.T) {
 	bars := []MA20BacktestBar{
 		barWithOHLC(0, 100, 100, 100, 100),
-		barWithOHLC(1, 100, 101, 97, 99),
+		barWithOHLC(1, 100, 101, 97, 100.5),
 	}
 	attempt := MA20AttemptRecord{
 		EntryPrice:    99,

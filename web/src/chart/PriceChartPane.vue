@@ -21,12 +21,11 @@ import {
   normalizeReversalSettings,
 } from "./analysis/reversalDetector";
 import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
-import { mergeRealtimeBarUpdate, normalizeRealtimeBar } from "./realtimeBars";
+import { mergeRealtimeBarUpdate } from "./realtimeBars";
 import { getComposedBar, initKlineComposer, pushComposeTick } from "./klineComposeBridge";
 import { KLINE_REPLAY_PANEL_PREF_KEY } from "./chartPrefs";
 
 const CHUNK_SIZE = 2000;
-const REPLAY_VISIBLE_BAR_LIMIT = 500;
 const DISPLAY_TZ_OFFSET_SECONDS = 8 * 60 * 60;
 const RESIZER_H = 5;
 const MIN_CANDLE_H = 140;
@@ -974,13 +973,7 @@ function scheduleDerivedSeriesRender() {
   realtimeIndicatorTimer = setTimeout(() => {
     realtimeIndicatorTimer = null;
     renderDerivedSeries(undefined, { preserveViewport: true });
-  }, props.replayKlineMode ? 250 : 120);
-}
-
-function trimReplayBars(bars) {
-  const normalized = normalizeBarsAscendingUnique(bars, "replay_trim");
-  if (!props.replayKlineMode || normalized.length <= REPLAY_VISIBLE_BAR_LIMIT) return normalized;
-  return normalized.slice(normalized.length - REPLAY_VISIBLE_BAR_LIMIT);
+  }, 120);
 }
 
 function resetViewportToLoadedBars() {
@@ -1005,6 +998,72 @@ function applyVisibleLogicalRange(range, options = {}) {
         klineReplayViewportApplying = false;
       });
     }
+  }
+}
+
+function shouldIgnoreChartKeyboard(evt) {
+  const el = evt?.target;
+  if (!el) return false;
+  const tag = String(el.tagName || "").toLowerCase();
+  if (tag === "input" || tag === "textarea" || tag === "select" || tag === "button") return true;
+  return !!el.isContentEditable;
+}
+
+function applyKeyboardChartRange(range) {
+  applyVisibleLogicalRange(range);
+  if (isKlineReplayActiveStatus()) refreshKlineReplayViewportLockFromRange(range);
+  if (Number(range?.from) < 30) void loadOlderChunk();
+  viewVersion.value += 1;
+}
+
+function panChartByBars(deltaBars) {
+  const range = currentVisibleLogicalRangeRaw();
+  if (!range) return false;
+  const delta = Number(deltaBars || 0);
+  if (!Number.isFinite(delta) || delta === 0) return false;
+  applyKeyboardChartRange({
+    from: Number(range.from) + delta,
+    to: Number(range.to) + delta,
+  });
+  return true;
+}
+
+function zoomChartByFactor(factor) {
+  const range = currentVisibleLogicalRangeRaw();
+  if (!range) return false;
+  const rawFactor = Number(factor || 0);
+  if (!Number.isFinite(rawFactor) || rawFactor <= 0) return false;
+  const from = Number(range.from);
+  const to = Number(range.to);
+  const span = to - from;
+  if (!Number.isFinite(span) || span <= 1) return false;
+  const center = (from + to) / 2;
+  const total = Math.max(1, Array.isArray(state.bars) ? state.bars.length : 0);
+  const nextSpan = Math.max(20, Math.min(total + 200, span * rawFactor));
+  applyKeyboardChartRange({
+    from: center - nextSpan / 2,
+    to: center + nextSpan / 2,
+  });
+  return true;
+}
+
+function handleChartArrowKey(evt) {
+  if (shouldIgnoreChartKeyboard(evt) || evt?.altKey || evt?.ctrlKey || evt?.metaKey) return false;
+  switch (evt?.key) {
+    case "ArrowLeft":
+      evt.preventDefault();
+      return panChartByBars(-1);
+    case "ArrowRight":
+      evt.preventDefault();
+      return panChartByBars(1);
+    case "ArrowUp":
+      evt.preventDefault();
+      return zoomChartByFactor(0.88);
+    case "ArrowDown":
+      evt.preventDefault();
+      return zoomChartByFactor(1.14);
+    default:
+      return false;
   }
 }
 
@@ -1599,7 +1658,7 @@ async function loadChunkWindow(endParam) {
   try {
     const chunk = await fetchChunk(endParam);
     if (reqSeq !== loadRequestSeq) return;
-    state.bars = trimReplayBars(chunk.bars);
+    state.bars = normalizeBarsAscendingUnique(chunk.bars, "initial_chunk");
     state.hasMore = chunk.bars.length >= CHUNK_SIZE;
     const metaSymbol = String(chunk.meta?.symbol || "")
       .trim()
@@ -1655,7 +1714,7 @@ async function loadOlderChunk() {
       state.hasMore = false;
       return;
     }
-    state.bars = trimReplayBars([...toPrepend, ...state.bars]);
+    state.bars = normalizeBarsAscendingUnique([...toPrepend, ...state.bars], "merge_older");
     state.hasMore = olderBars.length >= CHUNK_SIZE;
     renderSeries();
     if (previousRange && toPrepend.length > 0) {
@@ -2145,33 +2204,9 @@ async function reloadRecentWindow() {
   }
 }
 
-function mergeReplayBarUpdate(rawBars, update) {
-  const bars = Array.isArray(rawBars) ? rawBars.slice() : [];
-  const bar = normalizeRealtimeBar(update?.bar || {});
-  if (!Number.isFinite(bar.adjusted_time) || bar.adjusted_time <= 0) return bars;
-  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
-  const nextBar = { ...bar, __source: "server", __phase: phase };
-  const lastIdx = bars.length - 1;
-  const lastTime = Number(bars[lastIdx]?.adjusted_time || 0);
-  if (lastIdx >= 0 && lastTime === bar.adjusted_time) {
-    bars[lastIdx] = { ...bars[lastIdx], ...nextBar };
-  } else if (lastIdx < 0 || bar.adjusted_time > lastTime) {
-    bars.push(nextBar);
-  } else {
-    const idx = bars.findIndex((x) => Number(x?.adjusted_time || 0) === bar.adjusted_time);
-    if (idx >= 0) bars[idx] = { ...bars[idx], ...nextBar };
-    else bars.push(nextBar);
-    bars.sort((a, b) => Number(a.adjusted_time || 0) - Number(b.adjusted_time || 0));
-  }
-  if (bars.length > REPLAY_VISIBLE_BAR_LIMIT) {
-    return bars.slice(bars.length - REPLAY_VISIBLE_BAR_LIMIT);
-  }
-  return bars;
-}
-
 function applyRealtimeBarUpdate(update) {
   realtimeApplyCount += 1;
-  const previousBars = Array.isArray(state.bars) ? state.bars : [];
+  const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
   const previousRange = currentVisibleLogicalRangeRaw();
   const sub = update?.subscription || {};
   const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
@@ -2186,20 +2221,16 @@ function applyRealtimeBarUpdate(update) {
   ) {
     return;
   }
-  if (props.replayKlineMode) {
-    state.bars = mergeReplayBarUpdate(state.bars, update);
-  } else {
-    const merged = mergeRealtimeBarUpdate(state.bars, update);
-    const barTs = Number(update?.bar?.adjusted_time || 0);
-    const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
-    if (Number.isFinite(barTs) && barTs > 0) {
-      const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
-      if (idx >= 0) {
-        merged[idx] = { ...merged[idx], __source: "server", __phase: phase };
-      }
+  const merged = mergeRealtimeBarUpdate(state.bars, update);
+  const barTs = Number(update?.bar?.adjusted_time || 0);
+  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
+  if (Number.isFinite(barTs) && barTs > 0) {
+    const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
+    if (idx >= 0) {
+      merged[idx] = { ...merged[idx], __source: "server", __phase: phase };
     }
-    state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   }
+  state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
   updatePrimarySeriesForRealtime();
   restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
   scheduleDerivedSeriesRender();
@@ -2668,6 +2699,13 @@ const replaySpeedLabel = computed(() => {
     return `每${Number.isInteger(seconds) ? seconds : seconds.toFixed(1)}秒1根`;
   }
   return `每秒${Math.round(1000 / ms)}根`;
+});
+
+const klineReplayLatestAdjustedTimeLabel = computed(() => {
+  const bars = Array.isArray(state.bars) ? state.bars : [];
+  const latest = bars.length ? bars[bars.length - 1] : null;
+  const ts = latest ? getAdjustedTime(latest) : 0;
+  return Number.isFinite(ts) && ts > 0 ? fmtTime(ts) : "--";
 });
 
 const klineReplayPrimaryButtonTitle = computed(() => {
@@ -3480,24 +3518,17 @@ function strategyTraceTime(row) {
 function findNearestBarByDisplayTime(time) {
   const ts = Number(time || 0);
   if (!Number.isFinite(ts) || ts <= 0) return null;
-  const bars = Array.isArray(state.bars) ? state.bars : [];
-  if (!bars.length) return null;
-  let lo = 0;
-  let hi = bars.length - 1;
-  while (lo <= hi) {
-    const mid = Math.floor((lo + hi) / 2);
-    const mt = Number(getDisplayTime(bars[mid]) || 0);
-    if (mt === ts) return bars[mid];
-    if (mt < ts) lo = mid + 1;
-    else hi = mid - 1;
+  let best = null;
+  let bestDelta = Number.POSITIVE_INFINITY;
+  for (const bar of state.bars || []) {
+    const t = Number(getDisplayTime(bar) || 0);
+    const delta = Math.abs(t - ts);
+    if (delta < bestDelta) {
+      best = bar;
+      bestDelta = delta;
+    }
   }
-  const left = hi >= 0 ? bars[hi] : null;
-  const right = lo < bars.length ? bars[lo] : null;
-  if (!left) return right;
-  if (!right) return left;
-  const dl = Math.abs(Number(getDisplayTime(left) || 0) - ts);
-  const dr = Math.abs(Number(getDisplayTime(right) || 0) - ts);
-  return dl <= dr ? left : right;
+  return best;
 }
 
 function strategyTraceMetric(row, names) {
@@ -4327,6 +4358,7 @@ onMounted(async () => {
   globalPointerMoveHandler = (evt) => onGlobalPointerMove(evt);
   window.addEventListener("pointermove", globalPointerMoveHandler);
   keydownHandler = (e) => {
+    if (handleChartArrowKey(e)) return;
     if (state.selectedChannelId) {
       const k = String(e.key || "").toLowerCase();
       if (k === "a") {
@@ -4854,6 +4886,7 @@ onUnmounted(() => {
       </div>
       <div class="kline-replay-footer">
         <span>{{ replaySpeedLabel }}</span>
+        <span class="kline-replay-latest-time">当前K线：{{ klineReplayLatestAdjustedTimeLabel }}</span>
       </div>
       <div class="kline-replay-progress"><span></span></div>
       <div v-if="klineReplayPanel.error" class="kline-replay-error">{{ klineReplayPanel.error }}</div>
@@ -5032,8 +5065,13 @@ onUnmounted(() => {
 .kline-replay-footer {
   display: flex;
   align-items: center;
+  gap: 16px;
   margin-top: 8px;
   font-size: 12px;
+}
+
+.kline-replay-latest-time {
+  color: #ef4444;
 }
 
 .kline-replay-progress {

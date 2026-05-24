@@ -109,6 +109,12 @@ class PullbackShortState:
     signal_bars: int = 0
     # 信号触发时间，用于日志、trace 和回测展示。
     signal_time: str = ""
+    signal_lowest_low: float | None = None
+    signal_prev_low: float | None = None
+    signal_no_new_low_bars: int = 0
+    signal_rising_low_bars: int = 0
+    signal_ma20_touched: bool = False
+    signal_ma20_touch_low: float | None = None
 
 
 @dataclass
@@ -178,9 +184,13 @@ class MA20PullbackShortStrategy(Strategy):
         "default_params": {
             "ma_period": 20,
             "max_wait_bars": 6,
-            "observation_bars": 24,
+            "observation_bars": 240,
             "profit_atr_multiple": 1.0,
             "adverse_atr_multiple": 0.8,
+            "strength_exit_bars": 3,
+            "profit_rebound_atr_multiple": 1.0,
+            "profit_rising_low_bars": 2,
+            "strong_bull_atr_multiple": 1.5,
         },
         # Go 侧 StrategyDefinition.updated_at 是 time.Time；带 Z 的 RFC3339 能避免 JSON 解码失败。
         "updated_at": _rfc3339_utc_now(),
@@ -336,9 +346,13 @@ class MA20PullbackShortStrategy(Strategy):
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return {
-            "observation_bars": max(1, _int(params.get("observation_bars"), 24)),
+            "observation_bars": max(1, _int(params.get("observation_bars"), 240)),
             "profit_atr_multiple": max(0.0001, _float(params.get("profit_atr_multiple"), 1.0)),
             "adverse_atr_multiple": max(0.0001, _float(params.get("adverse_atr_multiple"), 0.8)),
+            "strength_exit_bars": max(1, _int(params.get("strength_exit_bars"), 3)),
+            "profit_rebound_atr_multiple": max(0.0001, _float(params.get("profit_rebound_atr_multiple"), _float(params.get("profit_atr_multiple"), 1.0))),
+            "profit_rising_low_bars": max(1, _int(params.get("profit_rising_low_bars"), 2)),
+            "strong_bull_atr_multiple": max(0.0001, _float(params.get("strong_bull_atr_multiple"), 1.5)),
         }
 
     def _ma(self, closes: list[float], period: int) -> float | None:
@@ -386,6 +400,12 @@ class MA20PullbackShortStrategy(Strategy):
         state.signal_adverse_target = None
         state.signal_bars = 0
         state.signal_time = ""
+        state.signal_lowest_low = None
+        state.signal_prev_low = None
+        state.signal_no_new_low_bars = 0
+        state.signal_rising_low_bars = 0
+        state.signal_ma20_touched = False
+        state.signal_ma20_touch_low = None
 
     def _start_short_signal(
         self,
@@ -423,6 +443,11 @@ class MA20PullbackShortStrategy(Strategy):
             "adverse_target": state.signal_adverse_target,
             "signal_bars": state.signal_bars,
             "signal_time": state.signal_time,
+            "signal_lowest_low": state.signal_lowest_low,
+            "signal_no_new_low_bars": state.signal_no_new_low_bars,
+            "signal_rising_low_bars": state.signal_rising_low_bars,
+            "signal_ma20_touched": state.signal_ma20_touched,
+            "signal_ma20_touch_low": state.signal_ma20_touch_low,
         })
         return metrics
 
@@ -430,24 +455,58 @@ class MA20PullbackShortStrategy(Strategy):
         self,
         request: RequestDict,
         state: PullbackShortState,
+        open_price: float,
         high: float,
         low: float,
+        close: float,
         ma20: float,
         ma_period: int,
     ) -> ResponseDict:
-        """在 DONE 状态下观察止盈/止损/未决结果。
-
-        DONE 不是“算法停止”，而是“已持仓并等待结果”。
-        做空信号先触及 adverse_target 记为 failure，先触及 profit_target 记为 success；
-        若 observation_bars 内都没触及，输出 unresolved 并重置到下一轮等待。
-        """
+        """在 DONE 状态下观察结构性止盈、止损/未决结果。"""
         settings = self._signal_settings(request)
         state.signal_bars += 1
-        hit_adverse = state.signal_adverse_target is not None and high >= state.signal_adverse_target
-        hit_profit = state.signal_profit_target is not None and low <= state.signal_profit_target
+        atr = max(0.0001, state.signal_atr or 0.0)
+        entry = state.signal_entry
+        if state.signal_lowest_low is None or low < state.signal_lowest_low:
+            state.signal_lowest_low = low
+            state.signal_no_new_low_bars = 0
+        else:
+            state.signal_no_new_low_bars += 1
+        if state.signal_prev_low is not None and low > state.signal_prev_low:
+            state.signal_rising_low_bars += 1
+        else:
+            state.signal_rising_low_bars = 0
+        state.signal_prev_low = low
+        if high >= ma20:
+            state.signal_ma20_touched = True
+            if state.signal_ma20_touch_low is None:
+                state.signal_ma20_touch_low = state.signal_lowest_low
+
+        profitable = entry is not None and close < entry
+        hit_adverse = state.signal_adverse_target is not None and close >= state.signal_adverse_target
+        no_new_low_stop = (
+            entry is not None
+            and close >= entry
+            and state.signal_no_new_low_bars >= settings["strength_exit_bars"]
+        )
+        stood_above_ma20_stop = entry is not None and not profitable and open_price > ma20 and close > ma20
+        rebound = close - (state.signal_lowest_low if state.signal_lowest_low is not None else close)
+        rebound_ok = state.signal_ma20_touched and rebound >= settings["profit_rebound_atr_multiple"] * atr
+        rising_low_take = profitable and rebound_ok and state.signal_rising_low_bars >= settings["profit_rising_low_bars"]
+        strong_bull_take = (
+            profitable
+            and low > ma20
+            and close > open_price
+            and (close - open_price) >= settings["strong_bull_atr_multiple"] * atr
+        )
         checks = [
-            _check("触及止损价", hit_adverse, high, state.signal_adverse_target),
-            _check("触及止盈价", hit_profit, low, state.signal_profit_target),
+            _check("收盘触及止损价", hit_adverse, close, state.signal_adverse_target),
+            _check("亏损后连续未创新低", no_new_low_stop, state.signal_no_new_low_bars, settings["strength_exit_bars"]),
+            _check("亏损后重新站上MA", stood_above_ma20_stop, close, ma20),
+            _check("盈利后触碰MA", state.signal_ma20_touched, high, ma20),
+            _check("触碰MA后反弹幅度达标", rebound_ok, rebound, settings["profit_rebound_atr_multiple"] * atr),
+            _check("触碰MA后低点上移", rising_low_take, state.signal_rising_low_bars, settings["profit_rising_low_bars"]),
+            _check("强阳站稳MA", strong_bull_take, close - open_price, settings["strong_bull_atr_multiple"] * atr),
             _check("观察窗口未结束", state.signal_bars < settings["observation_bars"], state.signal_bars, settings["observation_bars"]),
         ]
         if hit_adverse:
@@ -456,21 +515,29 @@ class MA20PullbackShortStrategy(Strategy):
             trace = _trace(request, "bar", "SIGNAL_RESULT", "信号失败", 5, "failed", "adverse target hit before profit target", checks, metrics)
             self._reset_after_signal_result(state)
             return _no_signal(request, "adverse target hit before profit target", metrics, trace)
-        if hit_profit:
+        if no_new_low_stop or stood_above_ma20_stop:
+            reason = "market strengthened before short worked"
+            metrics = self._signal_metrics(state, ma20, ma_period)
+            metrics["signal_result"] = "failure"
+            trace = _trace(request, "bar", "SIGNAL_RESULT", "盘面转强止损", 5, "failed", reason, checks, metrics)
+            self._reset_after_signal_result(state)
+            return _no_signal(request, reason, metrics, trace)
+        if rising_low_take or strong_bull_take:
+            reason = "trend-following profit exit after MA reclaim"
             metrics = self._signal_metrics(state, ma20, ma_period)
             metrics["signal_result"] = "success"
-            trace = _trace(request, "bar", "SIGNAL_RESULT", "信号成功", 5, "passed", "profit target hit before adverse target", checks, metrics)
+            trace = _trace(request, "bar", "SIGNAL_RESULT", "结构止盈", 5, "passed", reason, checks, metrics)
             self._reset_after_signal_result(state)
-            return _no_signal(request, "profit target hit before adverse target", metrics, trace)
-        if state.signal_bars >= settings["observation_bars"]:
+            return _no_signal(request, reason, metrics, trace)
+        if state.signal_bars >= settings["observation_bars"] and not profitable:
             metrics = self._signal_metrics(state, ma20, ma_period)
             metrics["signal_result"] = "unresolved"
             trace = _trace(request, "bar", "SIGNAL_RESULT", "信号观察结束", 5, "done", "observation window ended without profit/adverse target", checks, metrics)
             self._reset_after_signal_result(state)
             return _no_signal(request, "observation window ended without profit/adverse target", metrics, trace)
         metrics = self._signal_metrics(state, ma20, ma_period)
-        trace = _trace(request, "bar", DONE, "持仓观察中", 5, "waiting", "waiting for signal result", checks, metrics)
-        return _no_signal(request, "waiting for signal result", metrics, trace)
+        trace = _trace(request, "bar", DONE, "持仓跟踪中", 5, "waiting", "holding short until structural exit", checks, metrics)
+        return _no_signal(request, "holding short until structural exit", metrics, trace)
 
     def _ma_label(self, period: int) -> str:
         """根据均线周期生成展示标签，例如 period=20 时为 MA20。"""
@@ -592,7 +659,7 @@ class MA20PullbackShortStrategy(Strategy):
                 _check("MA样本数量", len(state.closes) >= ma_period, len(state.closes), ma_period, len(state.closes) - ma_period, "等待收集足够K线计算均线")
             ]
             trace = self._bar_trace(request, state, "WAIT_MA_READY", f"等待 {ma_label} 数据足够", 1, "waiting", "waiting for enough bars", checks, ma20, ma_period)
-            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace, None, False)
+            return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace, False)
 
         ctx = PullbackBarContext(
             request=request,
@@ -747,6 +814,12 @@ class MA20PullbackShortStrategy(Strategy):
         atr = max(0.0001, state.signal_atr or 0.0)
         state.signal_profit_target = ctx.open_price - settings["profit_atr_multiple"] * atr
         state.signal_adverse_target = ctx.open_price + settings["adverse_atr_multiple"] * atr
+        state.signal_lowest_low = ctx.open_price
+        state.signal_prev_low = None
+        state.signal_no_new_low_bars = 0
+        state.signal_rising_low_bars = 0
+        state.signal_ma20_touched = False
+        state.signal_ma20_touch_low = None
         metrics = self._signal_metrics(state, ctx.ma20, ctx.ma_period)
         metrics["signal"] = "SHORT"
         checks = [_check("下一根K线开盘确认持仓", True, ctx.open_price, "entry open")]
@@ -755,7 +828,7 @@ class MA20PullbackShortStrategy(Strategy):
 
     def _handle_done(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 5：持仓观察，继续判断止盈/止损/未决。"""
-        return self._evaluate_done_signal(ctx.request, ctx.state, ctx.high, ctx.low, ctx.ma20, ctx.ma_period)
+        return self._evaluate_done_signal(ctx.request, ctx.state, ctx.open_price, ctx.high, ctx.low, ctx.close, ctx.ma20, ctx.ma_period)
 
     def on_tick(self, request: RequestDict) -> ResponseDict:
         """baseline 策略只由 bar 驱动，tick 不参与入场。"""
@@ -790,9 +863,13 @@ class MA20WeakPullbackBaselineStrategy(MA20PullbackShortStrategy):
                 "default_params": {
                     "ma_period": 20,
                     "max_wait_bars": 6,
-                    "observation_bars": 24,
+                    "observation_bars": 240,
                     "profit_atr_multiple": 1.0,
                     "adverse_atr_multiple": 0.8,
+                    "strength_exit_bars": 3,
+                    "profit_rebound_atr_multiple": 1.0,
+                    "profit_rising_low_bars": 2,
+                    "strong_bull_atr_multiple": 1.5,
                     "algorithm": "baseline",
                 },
                 "updated_at": _rfc3339_utc_now(),
