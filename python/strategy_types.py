@@ -43,11 +43,11 @@ RuntimeKey: TypeAlias = tuple[ModeKey, str]
 
 # MA20 baseline / pullback-short state constants.
 # 这 5 个状态是 baseline 的公开状态机枚举；metrics.state 和 trace.step_key 都应使用这些值。
-WAIT_BREAK_BELOW_MA20: str = "WAIT_BREAK_BELOW_MA20"
-BROKEN_BELOW_MA20: str = "BROKEN_BELOW_MA20"
-WAIT_BREAK_TOUCH_OPEN: str = "WAIT_BREAK_TOUCH_OPEN"
-SIGNAL_ACTIVE: str = "SIGNAL_ACTIVE"
-DONE: str = "DONE"
+WAIT_BREAK_BELOW_MA20: str = "WAIT_BREAK_BELOW_MA20"    # 等待价格跌破 MA20 形成突破信号
+BROKEN_BELOW_MA20: str = "BROKEN_BELOW_MA20"            # 已经确认价格跌破 MA20，等待回抽确认
+WAIT_BREAK_TOUCH_OPEN: str = "WAIT_BREAK_TOUCH_OPEN"    # 等待价格跌破触碰 K 开盘价
+SIGNAL_ACTIVE: str = "SIGNAL_ACTIVE"                    # 信号已触发，等待确认入场
+DONE: str = "DONE"                                      # 交易已完成
 
 # MA20 weak-pullback state and variant constants.
 # 弱反弹策略比 baseline 多了趋势/结构过滤和 reaction_low 确认，因此单独保留这些步骤名。

@@ -1,11 +1,25 @@
 # -*- coding: utf-8 -*-
-"""MA20 baseline / pullback-short 状态机。
+"""MA20 baseline / pullback-short 策略适配层。
 
-本模块实现两类策略：
+目的：
+- 保留对策略运行框架的兼容接口：start/stop/on_bar/on_tick/on_replay_bar；
+- 负责请求解析、warmup、实例状态字典、响应组装、metrics 和 trace 展示；
+- 将真正的开仓/平仓算法委托给 `ma20_pullback_core.py`，避免算法逻辑与 UI 展示逻辑混在一起。
+
+功能：
+- 实现两类策略：
 - `MA20PullbackShortStrategy`：原始 MA20 跌破-反抽-再跌破做空算法；
 - `MA20WeakPullbackBaselineStrategy`：弱反弹策略族里的 baseline 变体，复用同一套父类状态机。
+- 将外部 bar 请求转换为 core 使用的 `PullbackKLine`；
+- 将 core 返回的 `PullbackDecision` 转换成前端需要的 no_signal/signal 响应和 trace；
+- 管理 warmup K 线，只预热指标输入，不让历史 K 线提前推进交易状态。
 
-核心设计原因：
+职责边界：
+- 本文件可以定义展示字段、trace 步骤、中文提示和运行框架适配；
+- 本文件不应新增交易规则。新增开仓/平仓规则应优先放入 `ma20_pullback_core.py`；
+- 标准指标计算应放入 `strategy_indicators.py`，本文件只调用。
+
+核心设计原则：
 - 只使用 bar 驱动：回放和实盘能走同一条逻辑，不再依赖 tick 采样时机；
 - warmup 只计算 MA 输入：历史 K 线是为了让第一根正式行情能计算 MA，不应该提前触发交易状态；
 - 状态拆成 handler：每个状态只处理自己的转换条件，避免一个大函数里混合“等待跌破/等待触碰/等待入场/观察止盈止损”；
@@ -16,10 +30,22 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
+from ma20_pullback_core import (
+    PullbackDecision,
+    PullbackEntrySettings,
+    PullbackExitSettings,
+    PullbackKLine,
+    PullbackShortState,
+    clear_signal,
+    evaluate_exit,
+    evaluate_setup,
+    reset_after_failure,
+    reset_after_signal_result,
+)
 from strategy_common import (
     Strategy,
     _bar_event_time,
@@ -39,6 +65,7 @@ from strategy_common import (
     _strategy_params_for_instance,
     _trace,
 )
+from strategy_indicators import moving_average_slope, simple_moving_average, trim_tail, trimmed_top_average, true_range
 from strategy_types import (
     BROKEN_BELOW_MA20,
     DONE,
@@ -51,7 +78,6 @@ from strategy_types import (
     JSONObject,
     MetricsDict,
     ModeKey,
-    PullbackStateName,
     RequestDict,
     ResponseDict,
     StateKey,
@@ -61,65 +87,13 @@ from strategy_types import (
 
 logger = logging.getLogger(__name__)
 
-# MA20 反抽做空策略状态对象
-# -----------------------------------------------------------------------------
-@dataclass
-class PullbackShortState:
-    """保存 MA20 反抽做空策略在单个实例+品种+模式下的状态。
-
-    状态维度由 (mode, instance_id, symbol) 唯一定位。
-    这样可以让同一策略同时服务多个策略实例、多个交易品种、live/replay 两种模式。
-    """
-
-    # 当前状态机状态，默认等待第一次跌破 MA。
-    state: PullbackStateName = WAIT_BREAK_BELOW_MA20
-    # 最近收盘价序列，用来计算移动平均线。会被裁剪，避免无限增长。
-    closes: list[float] = field(default_factory=list)
-    # 已处理的最后一根 K 线时间戳，用于过滤重复或乱序 K 线。
-    last_bar_ts: float | None = None
-    # 上一根 K 线的收盘价，用于判断“从上向下跌破”。
-    prev_close: float | None = None
-    # 上一根 K 线对应的均线值，用于判断“从上向下跌破”。
-    prev_ma: float | None = None
-    # 反抽触碰 MA 的那根 K 线的开盘价；后续 bar 跌破该价时触发做空。
-    touch_open: float | None = None
-    # 反抽触碰 MA 的那根 K 线的最高价，用于记录形态信息。
-    touch_high: float | None = None
-    # 触碰发生时的 MA 值，用于后续 metrics/trace 展示。
-    touch_ma20: float | None = None
-    # 触碰 K 的时间，便于前端或日志定位触发形态。
-    touch_time: str = ""
-    # 从找到触碰 K 之后已经等待了多少根 bar，用于超时重置。
-    wait_bars: int = 0
-    # 形态失败后是否要求下一次必须“整根 K 线都在 MA 下方”才重新确认跌破。
-    reset_requires_full_break: bool = False
-    # 是否已经看到至少一根 OHLC 全部在 MA 上方的 K 线；只有 armed 后才允许等待“跌破 MA”。
-    break_below_armed: bool = False
-    # 信号入场价；进入 SIGNAL_ACTIVE 后才有值。
-    signal_entry: float | None = None
-    # 触发做空的价格，先记录触碰K开盘价；下一根bar开盘后再确认 signal_entry。
-    signal_trigger_price: float | None = None
-    # 触发K线的波动尺度，下一根bar确认入场后用于重新计算止盈/止损。
-    signal_atr: float | None = None
-    # 信号观察窗口内的目标止盈价，用来判断这个形态是否先兑现。
-    signal_profit_target: float | None = None
-    # 信号观察窗口内的反向失败价，用来标记信号是否先被破坏。
-    signal_adverse_target: float | None = None
-    # 信号触发后已经观察了多少根 bar。
-    signal_bars: int = 0
-    # 信号触发时间，用于日志、trace 和回测展示。
-    signal_time: str = ""
-    signal_lowest_low: float | None = None
-    signal_prev_low: float | None = None
-    signal_no_new_low_bars: int = 0
-    signal_rising_low_bars: int = 0
-    signal_ma20_touched: bool = False
-    signal_ma20_touch_low: float | None = None
-
-
 @dataclass
 class PullbackBarContext:
     """MA20 baseline 单根 bar 的解析结果。
+
+    功能：
+    - 保存外层已经完成解析的请求、OHLC、MA、上一根 MA/close 等上下文；
+    - 避免 handler 直接读取原始 dict，降低字段缺失和类型转换散落各处的风险。
 
     为什么要引入 context 对象：
     `_on_bar_locked` 负责解析和计算 MA，状态 handler 只关心已经标准化的字段。
@@ -151,13 +125,23 @@ class PullbackBarContext:
     previous_close: float | None
     # 追加当前 close 后得到的当前 MA。
     ma20: float
+    # 持仓动态止损使用的 MA60、MA20/MA60 斜率和 TR 阈值。
+    ma60: float | None = None
+    ma20_slope: float | None = None
+    ma60_slope: float | None = None
+    stop_tr_avg: float | None = None
 
 # MA20 反抽做空策略
 # -----------------------------------------------------------------------------
 class MA20PullbackShortStrategy(Strategy):
     """MA20 反抽做空策略。
 
-    该策略使用状态机识别一个偏空形态：
+    目的：
+    - 作为策略框架可调用的运行时类；
+    - 维护每个实例/品种/mode 的 `PullbackShortState`；
+    - 通过 core 算法判断是否开仓、是否平仓，再把结果包装成现有前端和 Go 侧可识别的响应。
+
+    算法形态：
 
     第 1 阶段：等待 MA 数据足够。
     第 2 阶段：等待价格从上向下跌破 MA。
@@ -176,20 +160,42 @@ class MA20PullbackShortStrategy(Strategy):
     - max_wait_bars：触碰 K 出现后最多等待多少根 bar，默认 6，最小 1。
     """
 
+    # 策略定义：提供给 Go 侧和前端注册表读取的策略元数据。
     definition: StrategyDefinition = {
+        # 策略唯一 ID：启动、回放、信号记录都通过它定位策略。
         "strategy_id": "ma20.pullback_short",
+        # 前端展示名称：策略列表中显示给用户看的名称。
         "display_name": "MA20 Pullback Short",
+        # Python 运行入口：Go 侧拉起策略服务时使用。
         "entry_script": "python/strategy_service.py",
+        # 策略版本号：用于识别策略定义变更。
         "version": "1.0.0",
+        # 默认参数：实例未显式覆盖时使用。
         "default_params": {
+            # 均线周期：默认使用 MA20，也可配置成其它周期。
             "ma_period": 20,
+            # 动态止损使用的长均线和斜率回看。
+            "ma60_period": 60,
+            "slope_lookback_bars": 5,
+            # 动态止损 TR 口径：最近60个TR中取最大10个，去掉最大2个后8个求平均。
+            "stop_tr_lookback": 60,
+            "stop_tr_top_n": 10,
+            "stop_tr_drop_n": 2,
+            # 反抽触碰均线后最多等待多少根 K 线跌破触碰 K 开盘价。
             "max_wait_bars": 6,
+            # 平仓观察窗口：亏损且超过窗口仍未触发条件时结束观察。
             "observation_bars": 240,
+            # 兼容旧参数：固定 ATR 止盈倍数，目前只用于诊断字段。
             "profit_atr_multiple": 1.0,
+            # 固定止损 ATR 倍数：做空后收盘达到止损价则退出。
             "adverse_atr_multiple": 0.8,
+            # 亏损后连续未创新低的根数阈值，用于盘面转强止损。
             "strength_exit_bars": 3,
+            # 盈利后触碰均线，从最低点反弹多少 ATR 才允许止盈。
             "profit_rebound_atr_multiple": 1.0,
+            # 触碰均线后连续低点上移多少根，确认结构止盈。
             "profit_rising_low_bars": 2,
+            # 强阳完全站稳均线的实体 ATR 阈值，用于强阳止盈。
             "strong_bull_atr_multiple": 1.5,
         },
         # Go 侧 StrategyDefinition.updated_at 是 time.Time；带 Z 的 RFC3339 能避免 JSON 解码失败。
@@ -201,8 +207,9 @@ class MA20PullbackShortStrategy(Strategy):
         if definition is not None:
             self.definition = definition
         # states 保存当前运行实例内每个 (mode, instance_id, symbol) 对应的 PullbackShortState。
+        # 运行状态表：key=(mode, instance_id, symbol)，value=该维度下的算法状态。
         self.states: dict[StateKey, PullbackShortState] = {}
-        # HTTP 服务会并发处理请求，因此运行状态读写需要加锁。
+        # 状态锁：HTTP 服务会并发处理请求，因此运行状态读写需要加锁。
         self._lock: RLock = RLock()
 
     def required_warmup_bars(self, instance: JSONObject) -> int:
@@ -292,8 +299,12 @@ class MA20PullbackShortStrategy(Strategy):
             if event_ts is not None and state.last_bar_ts is not None and event_ts <= state.last_bar_ts:
                 continue
             previous_ma = self._ma(state.closes, ma_period)
+            high = _float(bar.get("high", close), close)
+            low = _float(bar.get("low", close), close)
+            previous_close = state.prev_close
             state.closes.append(close)
-            self._trim_closes(state, ma_period)
+            state.trs.append(true_range(high, low, previous_close))
+            self._trim_closes(state, ma_period, params)
             # prev_close/prev_ma 只作为正式第一根 bar 的“上一根上下文”，不代表 warmup 已进入交易状态。
             state.prev_close = close
             state.prev_ma = previous_ma
@@ -353,13 +364,34 @@ class MA20PullbackShortStrategy(Strategy):
             "profit_rebound_atr_multiple": max(0.0001, _float(params.get("profit_rebound_atr_multiple"), _float(params.get("profit_atr_multiple"), 1.0))),
             "profit_rising_low_bars": max(1, _int(params.get("profit_rising_low_bars"), 2)),
             "strong_bull_atr_multiple": max(0.0001, _float(params.get("strong_bull_atr_multiple"), 1.5)),
+            "ma60_period": max(3, _int(params.get("ma60_period"), 60)),
+            "slope_lookback_bars": max(1, _int(params.get("slope_lookback_bars"), 5)),
+            "stop_tr_lookback": max(1, _int(params.get("stop_tr_lookback"), 60)),
+            "stop_tr_top_n": max(1, _int(params.get("stop_tr_top_n"), 10)),
+            "stop_tr_drop_n": max(0, _int(params.get("stop_tr_drop_n"), 2)),
         }
+
+    def _entry_settings(self, request: RequestDict) -> PullbackEntrySettings:
+        """读取开仓阶段参数，并转换成 core 使用的配置对象。"""
+        _, max_wait_bars = self._settings(request)
+        return PullbackEntrySettings(max_wait_bars=max_wait_bars)
+
+    def _exit_settings(self, request: RequestDict) -> PullbackExitSettings:
+        """读取平仓阶段参数，并转换成 core 使用的配置对象。"""
+        settings = self._signal_settings(request)
+        return PullbackExitSettings(
+            observation_bars=settings["observation_bars"],
+            profit_atr_multiple=settings["profit_atr_multiple"],
+            adverse_atr_multiple=settings["adverse_atr_multiple"],
+            strength_exit_bars=settings["strength_exit_bars"],
+            profit_rebound_atr_multiple=settings["profit_rebound_atr_multiple"],
+            profit_rising_low_bars=settings["profit_rising_low_bars"],
+            strong_bull_atr_multiple=settings["strong_bull_atr_multiple"],
+        )
 
     def _ma(self, closes: list[float], period: int) -> float | None:
         """计算最近 period 个收盘价的简单移动平均线 SMA。"""
-        if len(closes) < period:
-            return None
-        return sum(closes[-period:]) / period
+        return simple_moving_average(closes, period)
 
     def _reset_after_failure(self, state: PullbackShortState) -> None:
         """形态失败后的状态重置。
@@ -370,68 +402,14 @@ class MA20PullbackShortStrategy(Strategy):
         - wait_bars 清零；
         - 要求下一次必须 full_break 才能重新确认跌破。
         """
-        state.state = WAIT_BREAK_BELOW_MA20
-        state.touch_open = None
-        state.touch_high = None
-        state.touch_ma20 = None
-        state.touch_time = ""
-        state.wait_bars = 0
-        state.reset_requires_full_break = True
-        state.break_below_armed = False
-        self._clear_signal(state)
+        reset_after_failure(state)
 
     def _reset_after_signal_result(self, state: PullbackShortState) -> None:
         """信号成功/失败/超时结束后，回到等待下一次 MA 跌破。"""
-        state.state = WAIT_BREAK_BELOW_MA20
-        state.touch_open = None
-        state.touch_high = None
-        state.touch_ma20 = None
-        state.touch_time = ""
-        state.wait_bars = 0
-        state.reset_requires_full_break = False
-        state.break_below_armed = False
-        self._clear_signal(state)
+        reset_after_signal_result(state)
 
     def _clear_signal(self, state: PullbackShortState) -> None:
-        state.signal_entry = None
-        state.signal_trigger_price = None
-        state.signal_atr = None
-        state.signal_profit_target = None
-        state.signal_adverse_target = None
-        state.signal_bars = 0
-        state.signal_time = ""
-        state.signal_lowest_low = None
-        state.signal_prev_low = None
-        state.signal_no_new_low_bars = 0
-        state.signal_rising_low_bars = 0
-        state.signal_ma20_touched = False
-        state.signal_ma20_touch_low = None
-
-    def _start_short_signal(
-        self,
-        state: PullbackShortState,
-        trigger_price: float,
-        high: float,
-        low: float,
-        event_time: str,
-        request: RequestDict,
-    ) -> float:
-        """记录做空信号触发上下文。
-
-        baseline 在触碰 K 开盘价被跌破时先触发目标仓位，但真实持仓入场价要等下一根 bar 开盘确认。
-        因此这里记录 signal_trigger_price 和信号 bar 的 ATR，`_handle_signal_active` 再用下一根开盘价重算目标。
-        """
-        settings = self._signal_settings(request)
-        atr = max(0.0001, high - low)
-        state.state = SIGNAL_ACTIVE
-        state.signal_entry = None
-        state.signal_trigger_price = trigger_price
-        state.signal_atr = atr
-        state.signal_profit_target = trigger_price - settings["profit_atr_multiple"] * atr
-        state.signal_adverse_target = trigger_price + settings["adverse_atr_multiple"] * atr
-        state.signal_bars = 0
-        state.signal_time = event_time
-        return atr
+        clear_signal(state)
 
     def _signal_metrics(self, state: PullbackShortState, ma20: float | None, ma_period: int) -> MetricsDict:
         metrics = self._base_metrics(state, ma20, ma_period)
@@ -448,6 +426,9 @@ class MA20PullbackShortStrategy(Strategy):
             "signal_rising_low_bars": state.signal_rising_low_bars,
             "signal_ma20_touched": state.signal_ma20_touched,
             "signal_ma20_touch_low": state.signal_ma20_touch_low,
+            "signal_entry_ma20_slope": state.signal_entry_ma20_slope,
+            "signal_entry_ma60_slope": state.signal_entry_ma60_slope,
+            "dynamic_stop_tr_avg": state.signal_stop_tr_avg,
         })
         return metrics
 
@@ -461,75 +442,51 @@ class MA20PullbackShortStrategy(Strategy):
         close: float,
         ma20: float,
         ma_period: int,
+        ma20_slope: float | None = None,
+        ma60_slope: float | None = None,
+        stop_tr_avg: float | None = None,
     ) -> ResponseDict:
         """在 DONE 状态下观察结构性止盈、止损/未决结果。"""
-        settings = self._signal_settings(request)
-        state.signal_bars += 1
-        atr = max(0.0001, state.signal_atr or 0.0)
-        entry = state.signal_entry
-        if state.signal_lowest_low is None or low < state.signal_lowest_low:
-            state.signal_lowest_low = low
-            state.signal_no_new_low_bars = 0
-        else:
-            state.signal_no_new_low_bars += 1
-        if state.signal_prev_low is not None and low > state.signal_prev_low:
-            state.signal_rising_low_bars += 1
-        else:
-            state.signal_rising_low_bars = 0
-        state.signal_prev_low = low
-        if high >= ma20:
-            state.signal_ma20_touched = True
-            if state.signal_ma20_touch_low is None:
-                state.signal_ma20_touch_low = state.signal_lowest_low
-
-        profitable = entry is not None and close < entry
-        hit_adverse = state.signal_adverse_target is not None and close >= state.signal_adverse_target
-        no_new_low_stop = (
-            entry is not None
-            and close >= entry
-            and state.signal_no_new_low_bars >= settings["strength_exit_bars"]
+        bar = request.get("bar") or {}
+        decision = evaluate_exit(
+            state,
+            PullbackKLine(
+                open=open_price,
+                high=high,
+                low=low,
+                close=close,
+                volume=self._bar_volume(bar),
+                open_interest=self._bar_open_interest(bar),
+                event_time=_bar_event_time(bar, request.get("event_time", "")),
+            ),
+            ma20,
+            self._exit_settings(request),
+            current_ma20_slope=ma20_slope,
+            current_ma60_slope=ma60_slope,
+            stop_tr_avg=stop_tr_avg,
         )
-        stood_above_ma20_stop = entry is not None and not profitable and open_price > ma20 and close > ma20
-        rebound = close - (state.signal_lowest_low if state.signal_lowest_low is not None else close)
-        rebound_ok = state.signal_ma20_touched and rebound >= settings["profit_rebound_atr_multiple"] * atr
-        rising_low_take = profitable and rebound_ok and state.signal_rising_low_bars >= settings["profit_rising_low_bars"]
-        strong_bull_take = (
-            profitable
-            and low > ma20
-            and close > open_price
-            and (close - open_price) >= settings["strong_bull_atr_multiple"] * atr
-        )
-        checks = [
-            _check("收盘触及止损价", hit_adverse, close, state.signal_adverse_target),
-            _check("亏损后连续未创新低", no_new_low_stop, state.signal_no_new_low_bars, settings["strength_exit_bars"]),
-            _check("亏损后重新站上MA", stood_above_ma20_stop, close, ma20),
-            _check("盈利后触碰MA", state.signal_ma20_touched, high, ma20),
-            _check("触碰MA后反弹幅度达标", rebound_ok, rebound, settings["profit_rebound_atr_multiple"] * atr),
-            _check("触碰MA后低点上移", rising_low_take, state.signal_rising_low_bars, settings["profit_rising_low_bars"]),
-            _check("强阳站稳MA", strong_bull_take, close - open_price, settings["strong_bull_atr_multiple"] * atr),
-            _check("观察窗口未结束", state.signal_bars < settings["observation_bars"], state.signal_bars, settings["observation_bars"]),
-        ]
-        if hit_adverse:
+        checks = self._exit_checks(request, state, decision, open_price, high, close, ma20)
+        if decision.action == "exit_failure" and decision.reason == "dynamic stop zone hit":
             metrics = self._signal_metrics(state, ma20, ma_period)
             metrics["signal_result"] = "failure"
-            trace = _trace(request, "bar", "SIGNAL_RESULT", "信号失败", 5, "failed", "adverse target hit before profit target", checks, metrics)
+            trace = _trace(request, "bar", "SIGNAL_RESULT", "动态TR止损", 5, "failed", "dynamic stop zone hit", checks, metrics)
             self._reset_after_signal_result(state)
-            return _no_signal(request, "adverse target hit before profit target", metrics, trace)
-        if no_new_low_stop or stood_above_ma20_stop:
+            return _no_signal(request, "dynamic stop zone hit", metrics, trace)
+        if decision.action == "exit_failure":
             reason = "market strengthened before short worked"
             metrics = self._signal_metrics(state, ma20, ma_period)
             metrics["signal_result"] = "failure"
             trace = _trace(request, "bar", "SIGNAL_RESULT", "盘面转强止损", 5, "failed", reason, checks, metrics)
             self._reset_after_signal_result(state)
             return _no_signal(request, reason, metrics, trace)
-        if rising_low_take or strong_bull_take:
+        if decision.action == "exit_success":
             reason = "trend-following profit exit after MA reclaim"
             metrics = self._signal_metrics(state, ma20, ma_period)
             metrics["signal_result"] = "success"
             trace = _trace(request, "bar", "SIGNAL_RESULT", "结构止盈", 5, "passed", reason, checks, metrics)
             self._reset_after_signal_result(state)
             return _no_signal(request, reason, metrics, trace)
-        if state.signal_bars >= settings["observation_bars"] and not profitable:
+        if decision.action == "exit_unresolved":
             metrics = self._signal_metrics(state, ma20, ma_period)
             metrics["signal_result"] = "unresolved"
             trace = _trace(request, "bar", "SIGNAL_RESULT", "信号观察结束", 5, "done", "observation window ended without profit/adverse target", checks, metrics)
@@ -543,16 +500,21 @@ class MA20PullbackShortStrategy(Strategy):
         """根据均线周期生成展示标签，例如 period=20 时为 MA20。"""
         return f"MA{period}"
 
-    def _trim_closes(self, state: PullbackShortState, ma_period: int) -> None:
+    def _trim_closes(self, state: PullbackShortState, ma_period: int, params: StrategySettings | None = None) -> None:
         """裁剪 closes 序列，避免历史收盘价无限增长。
 
         需要保留 ma_period + 1 个值，是因为：
         - ma_period 个值用于计算当前 MA；
         - 额外 1 个值有助于比较前一根 bar 的 close/MA 状态。
+        动态止损还需要 MA60 斜率和最近 60 个 TR，因此保留更长的公共历史。
         """
-        keep = max(ma_period + 1, 2)
-        if len(state.closes) > keep:
-            state.closes = state.closes[-keep:]
+        params = params or {}
+        ma60_period = max(3, _int(params.get("ma60_period"), 60))
+        slope_lookback = max(1, _int(params.get("slope_lookback_bars"), 5))
+        stop_tr_lookback = max(1, _int(params.get("stop_tr_lookback"), 60))
+        keep = max(ma_period + 1, ma60_period + slope_lookback + 1, stop_tr_lookback + 1, 2)
+        state.closes = trim_tail(state.closes, keep)
+        state.trs = trim_tail(state.trs, keep)
 
     def _base_metrics(
         self,
@@ -578,6 +540,9 @@ class MA20PullbackShortStrategy(Strategy):
             "signal_atr": state.signal_atr,
             "profit_target": state.signal_profit_target,
             "adverse_target": state.signal_adverse_target,
+            "dynamic_stop_tr_avg": state.signal_stop_tr_avg,
+            "signal_entry_ma20_slope": state.signal_entry_ma20_slope,
+            "signal_entry_ma60_slope": state.signal_entry_ma60_slope,
             "wait_bars": state.wait_bars,
             "step_total": 5,
         }
@@ -607,6 +572,88 @@ class MA20PullbackShortStrategy(Strategy):
             checks,
             self._base_metrics(state, ma20, ma_period),
         )
+
+    def _core_bar(self, ctx: PullbackBarContext) -> PullbackKLine:
+        """将适配层上下文转换为 core 的最小 K 线结构。"""
+        return PullbackKLine(
+            open=ctx.open_price,
+            high=ctx.high,
+            low=ctx.low,
+            close=ctx.close,
+            volume=self._bar_volume(ctx.bar),
+            open_interest=self._bar_open_interest(ctx.bar),
+            event_time=ctx.event_time,
+        )
+
+    def _bar_volume(self, bar: BarDict) -> float:
+        """读取 K 线成交量。
+
+        当前行情字段使用 volume；若后续区分累计成交量/本根成交量，可在这里统一兼容。
+        """
+        return _float(bar.get("volume"), 0.0)
+
+    def _bar_open_interest(self, bar: BarDict) -> float:
+        """读取 K 线持仓量。
+
+        标准字段为 open_interest，同时兼容前端或外部数据可能传入的 openInterest/position。
+        """
+        return _float(bar.get("open_interest", bar.get("openInterest", bar.get("position", 0.0))), 0.0)
+
+    def _entry_decision(self, ctx: PullbackBarContext) -> PullbackDecision:
+        """调用 core 开仓算法，返回机器可读的开仓阶段决策。"""
+        return evaluate_setup(
+            ctx.state,
+            self._core_bar(ctx),
+            ctx.ma20,
+            ctx.previous_close,
+            ctx.previous_ma,
+            self._entry_settings(ctx.request),
+            self._exit_settings(ctx.request),
+            current_ma20_slope=ctx.ma20_slope,
+            current_ma60_slope=ctx.ma60_slope,
+        )
+
+    def _setup_checks(self, ctx: PullbackBarContext, decision: PullbackDecision) -> list[CheckDict]:
+        """把 core 开仓检查项转换成前端 trace 使用的检查列表。"""
+        c = decision.checks
+        if "full_above" in c:
+            return [_check(f"整根K线站上{ctx.ma_label}", c["full_above"], ctx.close, ctx.ma20, ctx.close - ctx.ma20, f"等待出现 OHLC 全部在 {ctx.ma_label} 上方的K线")]
+        if "touch_ma" in c:
+            return [_check(f"最高价触碰{ctx.ma_label}", c["touch_ma"], ctx.high, ctx.ma20, ctx.high - ctx.ma20, f"等待反抽到{ctx.ma_label}附近")]
+        if "broke_touch_open" in c:
+            wait_remaining = ctx.max_wait_bars - ctx.state.wait_bars
+            return [
+                _check(f"未重新站上{ctx.ma_label}", c["not_stood_above"], ctx.close, ctx.ma20, ctx.close - ctx.ma20, "重新站上则形态失败"),
+                _check("等待未超时", c["within_wait"], ctx.state.wait_bars, ctx.max_wait_bars, wait_remaining),
+                _check("触碰K开盘价有效", c["has_touch_open"], ctx.state.touch_open, "not null"),
+                _check("K线跌破触碰K开盘价", c["broke_touch_open"], ctx.low, ctx.state.touch_open),
+            ]
+        return [
+            _check(f"开盘低于{ctx.ma_label}", c.get("open_below_ma", False), ctx.open_price, ctx.ma20, ctx.open_price - ctx.ma20),
+            _check(f"收盘低于{ctx.ma_label}", c.get("close_below_ma", False), ctx.close, ctx.ma20, ctx.close - ctx.ma20),
+            _check("从上向下跌破", c.get("cross_break", False), ctx.close, ctx.ma20, ctx.close - ctx.ma20),
+        ]
+
+    def _exit_checks(self, request: RequestDict, state: PullbackShortState, decision: PullbackDecision, open_price: float, high: float, close: float, ma20: float) -> list[CheckDict]:
+        """把 core 平仓检查项转换成前端 trace 使用的检查列表。"""
+        c = decision.checks
+        values = decision.values
+        settings = self._signal_settings(request)
+        rebound = values.get("rebound")
+        rebound_threshold = values.get("rebound_threshold")
+        return [
+            _check("亏损进入动态TR止损区", c.get("in_dynamic_stop_zone", False), values.get("adverse_distance"), values.get("dynamic_stop_threshold")),
+            _check("MA20斜率比下单点更向下", c.get("ma20_more_bearish_than_entry", False), values.get("current_ma20_slope"), values.get("entry_ma20_slope")),
+            _check("MA60斜率比下单点更向下", c.get("ma60_more_bearish_than_entry", False), values.get("current_ma60_slope"), values.get("entry_ma60_slope")),
+            _check("动态止损触发", c.get("hit_adverse", False), close, state.signal_entry),
+            _check("亏损后连续未创新低", c.get("no_new_low_stop", False), state.signal_no_new_low_bars, settings["strength_exit_bars"]),
+            _check("亏损后重新站上MA", c.get("stood_above_stop", False), close, ma20),
+            _check("盈利后触碰MA", c.get("ma_touched", False), high, ma20),
+            _check("触碰MA后反弹幅度达标", c.get("rebound_ok", False), rebound, rebound_threshold),
+            _check("触碰MA后低点上移", c.get("rising_low_take", False), state.signal_rising_low_bars, settings["profit_rising_low_bars"]),
+            _check("强阳站稳MA", c.get("strong_bull_take", False), close - open_price, settings["strong_bull_atr_multiple"]),
+            _check("观察窗口未结束", c.get("within_observation", False), state.signal_bars, settings["observation_bars"]),
+        ]
 
     def on_bar(self, request: RequestDict) -> ResponseDict:
         """线程安全地处理 K 线事件。"""
@@ -649,7 +696,9 @@ class MA20PullbackShortStrategy(Strategy):
         previous_ma = self._ma(state.closes, ma_period)
         previous_close = state.prev_close
         state.closes.append(close)
-        self._trim_closes(state, ma_period)
+        signal_settings = self._signal_settings(request)
+        state.trs.append(true_range(high, low, previous_close))
+        self._trim_closes(state, ma_period, signal_settings)
         ma20 = self._ma(state.closes, ma_period)
 
         if ma20 is None:
@@ -677,6 +726,15 @@ class MA20PullbackShortStrategy(Strategy):
             previous_ma=previous_ma,
             previous_close=previous_close,
             ma20=ma20,
+            ma60=self._ma(state.closes, signal_settings["ma60_period"]),
+            ma20_slope=moving_average_slope(state.closes, 20, signal_settings["slope_lookback_bars"]),
+            ma60_slope=moving_average_slope(state.closes, signal_settings["ma60_period"], signal_settings["slope_lookback_bars"]),
+            stop_tr_avg=trimmed_top_average(
+                state.trs,
+                signal_settings["stop_tr_lookback"],
+                signal_settings["stop_tr_top_n"],
+                signal_settings["stop_tr_drop_n"],
+            ),
         )
         handlers = {
             WAIT_BREAK_BELOW_MA20: self._handle_wait_break_below_ma20,
@@ -703,28 +761,16 @@ class MA20PullbackShortStrategy(Strategy):
         warmup 后第一根正式 bar 直接被误认为“从上向下跌破”。只有先确认市场曾完整站上 MA，
         后续 cross_break 才有“跌破”语义。
         """
-        state = ctx.state
-        full_above = ctx.open_price > ctx.ma20 and ctx.high > ctx.ma20 and ctx.low > ctx.ma20 and ctx.close > ctx.ma20
-        if not state.break_below_armed:
-            state.break_below_armed = full_above
-            checks = [_check(f"整根K线站上{ctx.ma_label}", full_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, f"等待出现 OHLC 全部在 {ctx.ma_label} 上方的K线")]
-            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待先完整站上 {ctx.ma_label}", 1, "waiting", "waiting for first full bar above MA", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, "waiting for first full bar above MA", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
-
-        full_break = ctx.open_price < ctx.ma20 and ctx.close < ctx.ma20
-        cross_break = ctx.previous_close is not None and ctx.previous_ma is not None and ctx.previous_close >= ctx.previous_ma and ctx.close < ctx.ma20
-        checks = [
-            _check(f"开盘低于{ctx.ma_label}", ctx.open_price < ctx.ma20, ctx.open_price, ctx.ma20, ctx.open_price - ctx.ma20),
-            _check(f"收盘低于{ctx.ma_label}", ctx.close < ctx.ma20, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
-            _check("从上向下跌破", cross_break, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
-        ]
-        if (state.reset_requires_full_break and full_break) or (not state.reset_requires_full_break and cross_break):
-            state.state = BROKEN_BELOW_MA20
-            state.reset_requires_full_break = False
-            trace = self._bar_trace(ctx.request, state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "passed", f"break below {ctx.ma_label} confirmed", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, f"break below {ctx.ma_label} confirmed", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
-        trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "waiting", "no trade signal", checks, ctx.ma20, ctx.ma_period)
-        return _no_signal(ctx.request, "no trade signal", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
+        decision = self._entry_decision(ctx)
+        checks = self._setup_checks(ctx, decision)
+        if "full_above" in decision.checks:
+            trace = self._bar_trace(ctx.request, ctx.state, WAIT_BREAK_BELOW_MA20, f"等待先完整站上 {ctx.ma_label}", 1, "waiting", "waiting for first full bar above MA", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, "waiting for first full bar above MA", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
+        if decision.action == "setup_broken":
+            trace = self._bar_trace(ctx.request, ctx.state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "passed", f"break below {ctx.ma_label} confirmed", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, f"break below {ctx.ma_label} confirmed", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
+        trace = self._bar_trace(ctx.request, ctx.state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "waiting", "no trade signal", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "no trade signal", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
 
     def _handle_broken_below_ma20(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 2：跌破后等待反抽触碰 MA。
@@ -732,19 +778,13 @@ class MA20PullbackShortStrategy(Strategy):
         触碰条件使用 high >= MA，而不是 close >= MA：
         反抽做空关注的是价格曾经回抽到均线压力附近，哪怕收盘又回落，也说明压力位被测试过。
         """
-        state = ctx.state
-        checks = [_check(f"最高价触碰{ctx.ma_label}", ctx.high >= ctx.ma20, ctx.high, ctx.ma20, ctx.high - ctx.ma20, f"等待反抽到{ctx.ma_label}附近")]
-        if ctx.high >= ctx.ma20:
-            state.state = WAIT_BREAK_TOUCH_OPEN
-            state.touch_open = ctx.open_price
-            state.touch_high = ctx.high
-            state.touch_ma20 = ctx.ma20
-            state.touch_time = ctx.event_time
-            state.wait_bars = 1
-            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "passed", f"{ctx.ma_label} touch bar found", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, f"{ctx.ma_label} touch bar found", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
-        trace = self._bar_trace(ctx.request, state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "waiting", "waiting for MA touch", checks, ctx.ma20, ctx.ma_period)
-        return _no_signal(ctx.request, "waiting for MA touch", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace, False)
+        decision = self._entry_decision(ctx)
+        checks = self._setup_checks(ctx, decision)
+        if decision.action == "touch_found":
+            trace = self._bar_trace(ctx.request, ctx.state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "passed", f"{ctx.ma_label} touch bar found", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, f"{ctx.ma_label} touch bar found", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
+        trace = self._bar_trace(ctx.request, ctx.state, BROKEN_BELOW_MA20, f"已跌破，等待反抽触碰 {ctx.ma_label}", 2, "waiting", "waiting for MA touch", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "waiting for MA touch", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
 
     def _handle_wait_break_touch_open(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 3：触碰 MA 后等待跌破触碰 K 开盘价。
@@ -752,28 +792,23 @@ class MA20PullbackShortStrategy(Strategy):
         触碰 K 的开盘价是这套 baseline 提示词中的“回抽失败确认线”。
         后续 bar 的 low 跌破该价时，说明反抽后买盘没有延续，才输出 SHORT。
         """
-        state = ctx.state
-        stood_above = ctx.open_price > ctx.ma20 and ctx.close > ctx.ma20
-        wait_remaining = ctx.max_wait_bars - state.wait_bars
-        broke_touch_open = state.touch_open is not None and ctx.low <= state.touch_open
-        checks = [
-            _check(f"未重新站上{ctx.ma_label}", not stood_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, "重新站上则形态失败"),
-            _check("等待未超时", state.wait_bars < ctx.max_wait_bars, state.wait_bars, ctx.max_wait_bars, wait_remaining),
-            _check("触碰K开盘价有效", state.touch_open is not None, state.touch_open, "not null"),
-            _check("K线跌破触碰K开盘价", broke_touch_open, ctx.low, state.touch_open),
-        ]
-        if broke_touch_open:
-            atr = self._start_short_signal(state, state.touch_open, ctx.high, ctx.low, ctx.event_time, ctx.request)
-            metrics = self._signal_metrics(state, ctx.ma20, ctx.ma_period)
+        touch_open = ctx.state.touch_open
+        touch_high = ctx.state.touch_high
+        touch_ma20 = ctx.state.touch_ma20
+        touch_time = ctx.state.touch_time
+        decision = self._entry_decision(ctx)
+        checks = self._setup_checks(ctx, decision)
+        if decision.action == "enter_short":
+            metrics = self._signal_metrics(ctx.state, ctx.ma20, ctx.ma_period)
             metrics.update({
                 "signal": "SHORT",
-                "touch_open": state.touch_open,
-                "touch_high": state.touch_high,
-                "touch_ma20": state.touch_ma20,
-                "touch_time": state.touch_time,
-                "trigger_price": state.touch_open,
-                "entry_price": state.touch_open,
-                "atr": atr,
+                "touch_open": touch_open,
+                "touch_high": touch_high,
+                "touch_ma20": touch_ma20,
+                "touch_time": touch_time,
+                "trigger_price": decision.values.get("trigger_price"),
+                "entry_price": decision.values.get("entry_price"),
+                "atr": decision.values.get("atr"),
             })
             trace = _trace(ctx.request, "bar", SIGNAL_ACTIVE, "做空信号已触发", 4, "passed", "SHORT: bar broke below MA touch bar open", checks, metrics, {"target_position": -1, "confidence": 0.8, "signal": "SHORT"})
             return {
@@ -787,19 +822,14 @@ class MA20PullbackShortStrategy(Strategy):
                 "metrics": metrics,
                 "trace": trace,
             }
-        if stood_above:
-            # 重新站上 MA 表示回抽可能转强，此时形态失效；下一轮仍允许从 armed 状态继续等待跌破。
-            self._reset_after_failure(state)
-            state.break_below_armed = True
-            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "failed", f"reset: stood above {ctx.ma_label}", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, f"reset: stood above {ctx.ma_label}", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
-        state.wait_bars += 1
-        if state.wait_bars >= ctx.max_wait_bars:
-            self._reset_after_failure(state)
-            trace = self._bar_trace(ctx.request, state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "failed", "reset: wait bars exceeded", checks, ctx.ma20, ctx.ma_period)
-            return _no_signal(ctx.request, "reset: wait bars exceeded", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
-        trace = self._bar_trace(ctx.request, state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "waiting", "waiting for touch open break", checks, ctx.ma20, ctx.ma_period)
-        return _no_signal(ctx.request, "waiting for touch open break", self._base_metrics(state, ctx.ma20, ctx.ma_period), trace)
+        if decision.action == "reset" and decision.reason == "stood above MA":
+            trace = self._bar_trace(ctx.request, ctx.state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "failed", f"reset: stood above {ctx.ma_label}", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, f"reset: stood above {ctx.ma_label}", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
+        if decision.action == "reset":
+            trace = self._bar_trace(ctx.request, ctx.state, WAIT_BREAK_BELOW_MA20, f"等待跌破 {ctx.ma_label}", 1, "failed", "reset: wait bars exceeded", checks, ctx.ma20, ctx.ma_period)
+            return _no_signal(ctx.request, "reset: wait bars exceeded", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
+        trace = self._bar_trace(ctx.request, ctx.state, WAIT_BREAK_TOUCH_OPEN, "等待跌破触碰K开盘价", 3, "waiting", "waiting for touch open break", checks, ctx.ma20, ctx.ma_period)
+        return _no_signal(ctx.request, "waiting for touch open break", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
 
     def _handle_signal_active(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 4：信号触发后的下一根 bar 开盘确认入场。
@@ -807,28 +837,28 @@ class MA20PullbackShortStrategy(Strategy):
         这样做是为了避免在同一根触发 bar 内同时完成“触发”和“观察结果”。
         回测中用下一根开盘价作为持仓上下文，能更接近实际下单延迟，也让止盈/止损观察从持仓后开始。
         """
-        state = ctx.state
-        state.state = DONE
-        state.signal_entry = ctx.open_price
-        settings = self._signal_settings(ctx.request)
-        atr = max(0.0001, state.signal_atr or 0.0)
-        state.signal_profit_target = ctx.open_price - settings["profit_atr_multiple"] * atr
-        state.signal_adverse_target = ctx.open_price + settings["adverse_atr_multiple"] * atr
-        state.signal_lowest_low = ctx.open_price
-        state.signal_prev_low = None
-        state.signal_no_new_low_bars = 0
-        state.signal_rising_low_bars = 0
-        state.signal_ma20_touched = False
-        state.signal_ma20_touch_low = None
-        metrics = self._signal_metrics(state, ctx.ma20, ctx.ma_period)
+        self._entry_decision(ctx)
+        metrics = self._signal_metrics(ctx.state, ctx.ma20, ctx.ma_period)
         metrics["signal"] = "SHORT"
         checks = [_check("下一根K线开盘确认持仓", True, ctx.open_price, "entry open")]
-        trace = self._bar_trace(ctx.request, state, DONE, "已持仓，等待止盈/止损", 5, "passed", "short position confirmed at next bar open", checks, ctx.ma20, ctx.ma_period)
+        trace = self._bar_trace(ctx.request, ctx.state, DONE, "已持仓，等待止盈/止损", 5, "passed", "short position confirmed at next bar open", checks, ctx.ma20, ctx.ma_period)
         return _no_signal(ctx.request, "short position confirmed at next bar open", metrics, trace)
 
     def _handle_done(self, ctx: PullbackBarContext) -> ResponseDict:
         """状态 5：持仓观察，继续判断止盈/止损/未决。"""
-        return self._evaluate_done_signal(ctx.request, ctx.state, ctx.open_price, ctx.high, ctx.low, ctx.close, ctx.ma20, ctx.ma_period)
+        return self._evaluate_done_signal(
+            ctx.request,
+            ctx.state,
+            ctx.open_price,
+            ctx.high,
+            ctx.low,
+            ctx.close,
+            ctx.ma20,
+            ctx.ma_period,
+            ma20_slope=ctx.ma20_slope,
+            ma60_slope=ctx.ma60_slope,
+            stop_tr_avg=ctx.stop_tr_avg,
+        )
 
     def on_tick(self, request: RequestDict) -> ResponseDict:
         """baseline 策略只由 bar 驱动，tick 不参与入场。"""
@@ -857,21 +887,43 @@ class MA20WeakPullbackBaselineStrategy(MA20PullbackShortStrategy):
         if definition is None:
             definition = dict(MA20PullbackShortStrategy.definition)
             definition.update({
+                # baseline 策略唯一 ID：弱反弹策略族中用于选择 baseline 算法。
                 "strategy_id": MA20_WEAK_BASELINE_STRATEGY_ID,
+                # 前端展示名称：用于策略列表和回放结果展示。
                 "display_name": "MA20 Weak Pullback Baseline",
+                # baseline 入口脚本：保持页面策略项和代码入口对应。
                 "entry_script": "python/ma20_weak_pullback_baseline.py",
+                # baseline 默认参数：继承 MA20 反抽做空逻辑，并额外标识 algorithm。
                 "default_params": {
+                    # 均线周期：baseline 默认观察 MA20。
                     "ma_period": 20,
+                    # 动态止损使用的长均线和斜率回看。
+                    "ma60_period": 60,
+                    "slope_lookback_bars": 5,
+                    # 动态止损 TR 口径：最近60个TR中取最大10个，去掉最大2个后8个求平均。
+                    "stop_tr_lookback": 60,
+                    "stop_tr_top_n": 10,
+                    "stop_tr_drop_n": 2,
+                    # 反抽触碰均线后最多等待多少根 K 线跌破触碰 K 开盘价。
                     "max_wait_bars": 6,
+                    # 平仓观察窗口。
                     "observation_bars": 240,
+                    # 兼容旧参数：固定 ATR 止盈倍数，目前只用于诊断字段。
                     "profit_atr_multiple": 1.0,
+                    # 固定止损 ATR 倍数。
                     "adverse_atr_multiple": 0.8,
+                    # 亏损后连续未创新低的根数阈值。
                     "strength_exit_bars": 3,
+                    # 盈利后触碰均线，从最低点反弹多少 ATR 才允许止盈。
                     "profit_rebound_atr_multiple": 1.0,
+                    # 触碰均线后连续低点上移多少根，确认结构止盈。
                     "profit_rising_low_bars": 2,
+                    # 强阳完全站稳均线的实体 ATR 阈值。
                     "strong_bull_atr_multiple": 1.5,
+                    # 算法标识：回测或前端区分 baseline/hard_filter/score_filter。
                     "algorithm": "baseline",
                 },
+                # 策略定义更新时间：Go 侧按 RFC3339 解析。
                 "updated_at": _rfc3339_utc_now(),
             })
         super().__init__(definition=definition)
