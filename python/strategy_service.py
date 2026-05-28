@@ -29,6 +29,7 @@ from ma20_pullback_short import (
     PullbackBarContext,
     PullbackShortState,
 )
+from ma20_state_diagram_short import MA20StateDiagramShortStrategy, StateDiagramShortState
 from ma20_weak_pullback import (
     MA20WeakPullbackHardFilterStrategy,
     MA20WeakPullbackScoreFilterStrategy,
@@ -61,7 +62,19 @@ from strategy_common import (
     _strategy_params_for_instance,
     _trace,
 )
-from strategy_http import AsyncStrategyRunner, StrategyHTTPResource, build_app, main
+try:
+    from strategy_http import AsyncStrategyRunner, StrategyHTTPResource, build_app, main
+except ModuleNotFoundError as exc:  # pragma: no cover - HTTP runtime requires optional falcon dependency
+    if exc.name != "falcon":
+        raise
+    AsyncStrategyRunner = None
+    StrategyHTTPResource = None
+
+    def build_app(*args, **kwargs):
+        raise ModuleNotFoundError("falcon")
+
+    def main(*args, **kwargs):
+        raise ModuleNotFoundError("falcon")
 from strategy_registry import StrategyFactory, StrategyRegistryEntry, StrategyRuntimeInstance
 from strategy_runtime_service import StrategyService
 from strategy_sample import SampleMomentumStrategy

@@ -61,6 +61,17 @@ MA20_WEAK_STRATEGY_ID: str = "ma20.weak_pullback_short"
 MA20_WEAK_BASELINE_STRATEGY_ID: str = "ma20.weak_pullback_short.baseline"
 MA20_WEAK_HARD_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.hard_filter"
 MA20_WEAK_SCORE_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.score_filter"
+MA20_STATE_DIAGRAM_STRATEGY_ID: str = "ma20.state_diagram_short"
+
+# MA20 state-diagram short strategy constants.
+ABOVE_MA20: str = "ABOVE_MA20"
+BELOW_MA20: str = "BELOW_MA20"
+REBOUND_TO_HIGH: str = "REBOUND_TO_HIGH"
+SECOND_BREAK_SIGNAL: str = "SECOND_BREAK_SIGNAL"
+PROFIT_HOLDING: str = "PROFIT_HOLDING"
+LOSS_HOLDING: str = "LOSS_HOLDING"
+TAKE_PROFIT: str = "TAKE_PROFIT"
+STOP_LOSS: str = "STOP_LOSS"
 
 # Literal 类型让状态字段的可选值在注解里可见；运行时仍是普通字符串，便于 JSON 序列化。
 PullbackStateName: TypeAlias = Literal[
@@ -83,4 +94,12 @@ WeakRegime: TypeAlias = Literal[
     "BEARISH_REVERSAL_CANDIDATE",
     "WEAK_BEARISH_CANDIDATE",
     "UNCLEAR",
+]
+StateDiagramShortStateName: TypeAlias = Literal[
+    "ABOVE_MA20",
+    "BELOW_MA20",
+    "REBOUND_TO_HIGH",
+    "SECOND_BREAK_SIGNAL",
+    "PROFIT_HOLDING",
+    "LOSS_HOLDING",
 ]

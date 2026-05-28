@@ -361,6 +361,17 @@ const ma20WeakSteps = [
   { key: 'SIGNAL_RESULT', label: '信号结果', index: 6 },
 ]
 
+const ma20StateDiagramSteps = [
+  { key: 'ABOVE_MA20', label: 'MA20之上', index: 1 },
+  { key: 'BELOW_MA20', label: '跌破MA20之下', index: 2 },
+  { key: 'REBOUND_TO_HIGH', label: '反弹至高点', index: 3 },
+  { key: 'SECOND_BREAK_SIGNAL', label: '再次跌出出信号', index: 4 },
+  { key: 'PROFIT_HOLDING', label: '赚钱中', index: 5 },
+  { key: 'LOSS_HOLDING', label: '亏钱中', index: 6 },
+  { key: 'TAKE_PROFIT', label: '止盈', index: 6 },
+  { key: 'STOP_LOSS', label: '止损', index: 6 },
+]
+
 const strategyStepRows = computed(() => {
   const trace = latestStrategyTrace.value || {}
   const currentIndex = Number(trace.step_index || 0)
@@ -370,7 +381,8 @@ const strategyStepRows = computed(() => {
   let base = [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
   // ma20.weak_pullback_short.baseline 虽然带 weak 前缀，但算法本身已经重构成 baseline 的 5 状态机。
   // 这里显式区分 baseline 与 hard/score 变体，避免前端把不存在的趋势过滤步骤展示给用户。
-  if (strategyID === 'ma20.pullback_short' || strategyID === 'ma20.weak_pullback_short.baseline' || !strategyID) base = ma20BaselineSteps
+  if (strategyID === 'ma20.state_diagram_short') base = ma20StateDiagramSteps
+  else if (strategyID === 'ma20.pullback_short' || strategyID === 'ma20.weak_pullback_short.baseline' || !strategyID) base = ma20BaselineSteps
   else if (strategyID === 'ma20.weak_pullback_short' || strategyID.startsWith('ma20.weak_pullback_short.')) base = ma20WeakSteps
   return base.map((step) => {
     let state = 'waiting'

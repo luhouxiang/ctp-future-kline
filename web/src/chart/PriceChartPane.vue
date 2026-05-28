@@ -3248,7 +3248,7 @@ const strategyOverlayData = computed(() => {
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const strategyID = String(row?.strategy_id || "");
-      if (!(strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short")) {
+      if (!(strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short" || strategyID === "ma20.state_diagram_short")) {
         return false;
       }
       const traceTime = strategyTraceTime(row);

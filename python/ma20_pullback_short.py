@@ -760,6 +760,9 @@ class MA20PullbackShortStrategy(Strategy):
         先要求出现一根 OHLC 全部在 MA 上方的 bar，是为了避免策略启动时价格已经在 MA 下方，
         warmup 后第一根正式 bar 直接被误认为“从上向下跌破”。只有先确认市场曾完整站上 MA，
         后续 cross_break 才有“跌破”语义。
+        未 break_below_armed                -> WAIT_BREAK_BELOW_MA20
+        已 break_below_armed  且有效跌破     -> BROKEN_BELOW_MA20
+        已 break_below_armed  但未有效跌破   -> WAIT_BREAK_BELOW_MA20
         """
         decision = self._entry_decision(ctx)
         checks = self._setup_checks(ctx, decision)

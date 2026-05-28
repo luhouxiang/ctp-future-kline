@@ -1475,7 +1475,9 @@ func (m *Manager) persistSignalResultPoint(inst StrategyInstance, symbol string,
 	if m == nil || m.store == nil {
 		return
 	}
-	if strings.TrimSpace(trace.StepKey) != "SIGNAL_RESULT" {
+	switch strings.TrimSpace(trace.StepKey) {
+	case "SIGNAL_RESULT", "TAKE_PROFIT", "STOP_LOSS":
+	default:
 		return
 	}
 	result := signalResultKind(trace)

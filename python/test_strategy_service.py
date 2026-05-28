@@ -5,28 +5,41 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from strategy_service import (  # noqa: E402
+    ABOVE_MA20,
     BROKEN_BELOW_MA20,
+    BELOW_MA20,
+    LOSS_HOLDING,
     MA20_WEAK_BASELINE_STRATEGY_ID,
     MA20_WEAK_HARD_FILTER_STRATEGY_ID,
     MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
     MA20_WEAK_STRATEGY_ID,
+    MA20_STATE_DIAGRAM_STRATEGY_ID,
+    PROFIT_HOLDING,
+    REBOUND_TO_HIGH,
+    SECOND_BREAK_SIGNAL,
     SIGNAL_ACTIVE,
+    STOP_LOSS,
     StrategyService,
+    TAKE_PROFIT,
     WAIT_BREAK_BELOW_MA20,
     WAIT_BREAK_TOUCH_OPEN,
     WAIT_BREAK_REACTION_LOW,
     WAIT_PULLBACK_TOUCH_MA20,
     TREND_STRUCTURE_FILTER,
+    MA20StateDiagramShortStrategy,
     MA20PullbackShortStrategy,
     MA20WeakPullbackShortStrategy,
     PullbackShortState,
+    StateDiagramShortState,
     WeakPullbackShortState,
 )
-from strategy_http import AsyncStrategyRunner, build_app  # noqa: E402
 
 try:
+    from strategy_http import AsyncStrategyRunner, build_app  # noqa: E402
     import falcon.testing  # noqa: E402
 except ModuleNotFoundError:  # pragma: no cover - HTTP runtime tests require falcon
+    AsyncStrategyRunner = None
+    build_app = None
     falcon = None
 
 
@@ -130,6 +143,28 @@ def weak_warmup_bars(symbol="yl9", count=145, close=100):
             "close": close,
         })
     return bars
+
+
+def state_bar_req(instance_id="state-1", symbol="rb2601", open_=100, high=100, low=100, close=100, idx=1, params=None):
+    ts = f"2026-01-02T09:{idx:02d}:00+08:00"
+    return {
+        "instance": {
+            "instance_id": instance_id,
+            "strategy_id": MA20_STATE_DIAGRAM_STRATEGY_ID,
+            "params": params or {"ma_period": 20, "max_wait_bars": 6},
+        },
+        "symbol": symbol,
+        "event_time": ts,
+        "current_position": 0,
+        "bar": {
+            "adjusted_time": ts,
+            "data_time": ts,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+        },
+    }
 
 
 class MA20PullbackShortStrategyTest(unittest.TestCase):
@@ -460,6 +495,106 @@ class MA20WeakPullbackShortStrategyTest(unittest.TestCase):
         self.assertEqual(self.strategy.states[("live", "weak-1", "yl9")].state, WAIT_BREAK_BELOW_MA20)
 
 
+class MA20StateDiagramShortStrategyTest(unittest.TestCase):
+    def setUp(self):
+        self.strategy = MA20StateDiagramShortStrategy()
+        self.strategy.states[("live", "state-1", "rb2601")] = StateDiagramShortState()
+
+    def state(self):
+        return self.strategy.states[("live", "state-1", "rb2601")]
+
+    def warmup_flat(self):
+        for i in range(1, 21):
+            self.strategy.on_bar(state_bar_req(idx=i, open_=100, high=100, low=100, close=100))
+
+    def arm_above(self, idx=21):
+        return self.strategy.on_bar(state_bar_req(idx=idx, open_=101, high=101.2, low=100.9, close=101))
+
+    def setup_to_rebound(self):
+        self.warmup_flat()
+        self.arm_above()
+        self.strategy.on_bar(state_bar_req(idx=22, open_=100.6, high=100.7, low=99.0, close=99.2))
+        return self.strategy.on_bar(state_bar_req(idx=23, open_=99.6, high=100.3, low=99.1, close=99.2))
+
+    def signal_short(self, idx=24):
+        return self.strategy.on_bar(state_bar_req(idx=idx, open_=99.3, high=99.4, low=99.15, close=99.2))
+
+    def test_starting_below_ma20_requires_full_bar_above_first(self):
+        self.warmup_flat()
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=99.8, high=100.0, low=99.0, close=99.2))
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], ABOVE_MA20)
+        self.assertFalse(self.state().above_ready)
+        self.assertEqual(self.state().state, ABOVE_MA20)
+
+        self.arm_above(idx=22)
+        self.assertTrue(self.state().above_ready)
+
+    def test_above_to_below_to_rebound_records_trigger_line(self):
+        out = self.setup_to_rebound()
+        state = self.state()
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], REBOUND_TO_HIGH)
+        self.assertEqual(state.state, REBOUND_TO_HIGH)
+        self.assertEqual(state.trigger_line, min(state.touch_open, state.touch_close))
+        self.assertEqual(state.trigger_line, 99.2)
+
+    def test_second_break_uses_touch_open_close_low_not_touch_open_only(self):
+        self.setup_to_rebound()
+
+        no_signal = self.strategy.on_bar(state_bar_req(idx=24, open_=99.35, high=99.5, low=99.25, close=99.3))
+        self.assertTrue(no_signal["no_signal"])
+        self.assertEqual(self.state().state, REBOUND_TO_HIGH)
+
+        signal = self.signal_short(idx=25)
+        self.assertFalse(signal.get("no_signal", False))
+        self.assertEqual(signal["target_position"], -1)
+        self.assertEqual(signal["trace"]["step_key"], SECOND_BREAK_SIGNAL)
+        self.assertEqual(self.state().state, SECOND_BREAK_SIGNAL)
+
+    def test_entry_confirmation_enters_profit_or_loss_holding(self):
+        self.setup_to_rebound()
+        self.signal_short()
+
+        profit = self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=99.1, low=98.5, close=98.8))
+        self.assertTrue(profit["no_signal"])
+        self.assertEqual(profit["trace"]["step_key"], PROFIT_HOLDING)
+        self.assertEqual(self.state().state, PROFIT_HOLDING)
+
+        loss = self.strategy.on_bar(state_bar_req(idx=26, open_=98.9, high=99.15, low=98.8, close=99.05))
+        self.assertTrue(loss["no_signal"])
+        self.assertEqual(loss["trace"]["step_key"], LOSS_HOLDING)
+        self.assertEqual(self.state().state, LOSS_HOLDING)
+
+    def test_stop_loss_outputs_terminal_trace_and_resets(self):
+        self.setup_to_rebound()
+        self.signal_short()
+        self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=99.1, low=98.9, close=99.0))
+
+        result = self.strategy.on_bar(state_bar_req(idx=26, open_=99.0, high=100.0, low=98.9, close=99.6))
+
+        self.assertTrue(result["no_signal"])
+        self.assertEqual(result["trace"]["step_key"], STOP_LOSS)
+        self.assertEqual(result["metrics"]["signal_result"], "failure")
+        self.assertEqual(self.state().state, ABOVE_MA20)
+
+    def test_take_profit_outputs_terminal_trace_and_resets(self):
+        self.setup_to_rebound()
+        self.signal_short()
+        self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=99.1, low=98.0, close=98.4))
+        self.strategy.on_bar(state_bar_req(idx=26, open_=98.4, high=100.2, low=98.2, close=98.8))
+        self.strategy.on_bar(state_bar_req(idx=27, open_=98.8, high=100.4, low=98.6, close=98.9))
+
+        result = self.strategy.on_bar(state_bar_req(idx=28, open_=98.9, high=100.5, low=98.7, close=98.95))
+
+        self.assertTrue(result["no_signal"])
+        self.assertEqual(result["trace"]["step_key"], TAKE_PROFIT)
+        self.assertEqual(result["metrics"]["signal_result"], "success")
+        self.assertEqual(self.state().state, ABOVE_MA20)
+
+
 class StrategyServiceRegistryTest(unittest.TestCase):
     def test_get_start_requirements_comes_from_python_strategies(self):
         service = StrategyService()
@@ -486,10 +621,17 @@ class StrategyServiceRegistryTest(unittest.TestCase):
                 "params": {},
             }
         }, None)
+        state_diagram = service.GetStartRequirements({
+            "instance": {
+                "strategy_id": MA20_STATE_DIAGRAM_STRATEGY_ID,
+                "params": {},
+            }
+        }, None)
 
         self.assertEqual(pullback["warmup_target"], 55)
         self.assertTrue(pullback["requires_anchor_time"])
         self.assertEqual(baseline["warmup_target"], 20)
+        self.assertEqual(state_diagram["warmup_target"], 20)
         self.assertEqual(weak["warmup_target"], 208)
         self.assertEqual(sample["warmup_target"], 0)
         self.assertFalse(sample["requires_anchor_time"])
@@ -569,6 +711,7 @@ class StrategyServiceRegistryTest(unittest.TestCase):
         }
 
         self.assertEqual(definitions[MA20_WEAK_BASELINE_STRATEGY_ID], "python/ma20_weak_pullback_baseline.py")
+        self.assertEqual(definitions[MA20_STATE_DIAGRAM_STRATEGY_ID], "python/strategy_service.py")
         self.assertEqual(definitions[MA20_WEAK_HARD_FILTER_STRATEGY_ID], "python/ma20_weak_pullback_hard_filter.py")
         self.assertEqual(definitions[MA20_WEAK_SCORE_FILTER_STRATEGY_ID], "python/ma20_weak_pullback_score_filter.py")
 

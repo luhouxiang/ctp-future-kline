@@ -248,6 +248,42 @@ func TestRestoreRunningInstancesStartsPythonRuntimeAndWritesTrace(t *testing.T) 
 	}
 }
 
+func TestPersistSignalResultPointSupportsStateDiagramTerminals(t *testing.T) {
+	dsn := testmysql.NewDatabase(t)
+	store, err := NewStore(dsn)
+	if err != nil {
+		t.Fatalf("NewStore() error = %v", err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	m := &Manager{store: store}
+	inst := StrategyInstance{
+		InstanceID: "state-1",
+		StrategyID: "ma20.state_diagram_short",
+		Timeframe:  "1m",
+	}
+	eventTime := time.Date(2026, 1, 2, 9, 30, 0, 0, time.Local)
+	m.persistSignalResultPoint(inst, "rb2601", RunTypeReplay, eventTime, StrategyTraceRecord{
+		StepKey:   "TAKE_PROFIT",
+		StepLabel: "止盈",
+		Status:    "passed",
+		Reason:    "take profit",
+		Metrics:   map[string]any{"signal_result": "success"},
+		EventTime: eventTime,
+	})
+
+	items, err := store.ListSignals("state-1", "rb2601", 10)
+	if err != nil {
+		t.Fatalf("ListSignals() error = %v", err)
+	}
+	if len(items) != 1 {
+		t.Fatalf("signals len = %d, want 1", len(items))
+	}
+	if items[0].TargetPosition != 0 || items[0].Metrics["signal_result"] != "success" {
+		t.Fatalf("signal = %+v, want target 0 success exit", items[0])
+	}
+}
+
 func TestPrepareRuntimeStartInstanceUsesStartRequirements(t *testing.T) {
 	m := &Manager{}
 	out, err := m.prepareRuntimeStartInstance(StrategyInstance{

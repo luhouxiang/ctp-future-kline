@@ -20,6 +20,7 @@ from threading import RLock
 from typing import Any
 
 from ma20_pullback_short import MA20PullbackShortStrategy, MA20WeakPullbackBaselineStrategy
+from ma20_state_diagram_short import MA20StateDiagramShortStrategy
 from ma20_weak_pullback import (
     MA20WeakPullbackHardFilterStrategy,
     MA20WeakPullbackScoreFilterStrategy,
@@ -48,6 +49,7 @@ def _builtin_strategies() -> tuple[Strategy, ...]:
         # MA20PullbackShortStrategy(),
         # MA20WeakPullbackShortStrategy(),
         MA20WeakPullbackBaselineStrategy(),
+        MA20StateDiagramShortStrategy(),
         # MA20WeakPullbackHardFilterStrategy(),
         # MA20WeakPullbackScoreFilterStrategy(),
     )
@@ -72,6 +74,8 @@ def _clone_strategy_template(strategy: Strategy) -> Strategy:
     if isinstance(strategy, MA20PullbackShortStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, MA20WeakPullbackShortStrategy):
+        return strategy.__class__(definition=definition)
+    if isinstance(strategy, MA20StateDiagramShortStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, SampleMomentumStrategy):
         return SampleMomentumStrategy()
