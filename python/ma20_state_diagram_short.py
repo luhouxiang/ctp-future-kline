@@ -59,60 +59,60 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class StateDiagramShortState:
-    state: StateDiagramShortStateName = ABOVE_MA20
-    closes: list[float] = field(default_factory=list)
-    trs: list[float] = field(default_factory=list)
-    last_bar_ts: float | None = None
-    prev_close: float | None = None
-    prev_ma: float | None = None
-    above_ready: bool = False
-    touch_open: float | None = None
-    touch_close: float | None = None
-    touch_high: float | None = None
-    touch_ma20: float | None = None
-    touch_time: str = ""
-    trigger_line: float | None = None
-    wait_bars: int = 0
-    signal_entry: float | None = None
-    signal_trigger_price: float | None = None
-    signal_atr: float | None = None
-    signal_adverse_target: float | None = None
-    signal_time: str = ""
-    signal_bars: int = 0
-    signal_lowest_low: float | None = None
-    signal_prev_low: float | None = None
-    signal_no_new_low_bars: int = 0
-    signal_rising_low_bars: int = 0
-    signal_ma20_touched: bool = False
-    signal_entry_ma20_slope: float | None = None
-    signal_entry_ma60_slope: float | None = None
-    signal_stop_tr_avg: float | None = None
+class StateDiagramShortState:  # 单个策略实例和合约的状态机运行状态
+    state: StateDiagramShortStateName = ABOVE_MA20  # 当前状态机节点
+    closes: list[float] = field(default_factory=list)  # 收盘价缓存
+    trs: list[float] = field(default_factory=list)  # 真实波幅缓存
+    last_bar_ts: float | None = None  # 最近已处理K线时间戳
+    prev_close: float | None = None  # 上一根K线收盘价
+    prev_ma: float | None = None  # 上一根K线对应MA值
+    above_ready: bool = False  # 是否已出现完整站上MA20的准备K线
+    touch_open: float | None = None  # 触碰MA20那根K线的开盘价
+    touch_close: float | None = None  # 触碰MA20那根K线的收盘价
+    touch_high: float | None = None  # 触碰MA20那根K线的最高价
+    touch_ma20: float | None = None  # 触碰时的MA20值
+    touch_time: str = ""  # 触碰MA20的K线时间
+    trigger_line: float | None = None  # 二次跌破触发线
+    wait_bars: int = 0  # 等待二次跌破的K线数
+    signal_entry: float | None = None  # 空头持仓确认入场价
+    signal_trigger_price: float | None = None  # 空头信号触发价
+    signal_atr: float | None = None  # 信号K线波幅
+    signal_adverse_target: float | None = None  # 逆向止损参考价
+    signal_time: str = ""  # 空头信号触发时间
+    signal_bars: int = 0  # 信号后观察K线数
+    signal_lowest_low: float | None = None  # 信号后最低价
+    signal_prev_low: float | None = None  # 上一根持仓K线低点
+    signal_no_new_low_bars: int = 0  # 连续未创新低K线数
+    signal_rising_low_bars: int = 0  # 连续低点上移K线数
+    signal_ma20_touched: bool = False  # 持仓后是否触碰MA20
+    signal_entry_ma20_slope: float | None = None  # 入场时MA20斜率
+    signal_entry_ma60_slope: float | None = None  # 入场时MA60斜率
+    signal_stop_tr_avg: float | None = None  # 当前动态止损波幅均值
 
 
 @dataclass
-class StateDiagramBarContext:
-    request: RequestDict
-    state: StateDiagramShortState
-    bar: BarDict
-    ma_period: int
-    max_wait_bars: int
-    open_price: float
-    high: float
-    low: float
-    close: float
-    event_time: str
-    previous_ma: float | None
-    previous_close: float | None
-    ma20: float
-    ma60: float | None
-    ma20_slope: float | None
-    ma60_slope: float | None
-    stop_tr_avg: float | None
+class StateDiagramBarContext:  # 单根K线处理时的只读上下文
+    request: RequestDict  # 原始策略请求
+    state: StateDiagramShortState  # 当前合约状态对象
+    bar: BarDict  # 当前K线数据
+    ma_period: int  # MA20计算周期
+    max_wait_bars: int  # 二次跌破最大等待K线数
+    open_price: float  # 当前K线开盘价
+    high: float  # 当前K线最高价
+    low: float  # 当前K线最低价
+    close: float  # 当前K线收盘价
+    event_time: str  # 当前K线事件时间
+    previous_ma: float | None  # 处理当前K线前的MA值
+    previous_close: float | None  # 处理当前K线前的收盘价
+    ma20: float  # 当前MA20值
+    ma60: float | None  # 当前MA60值
+    ma20_slope: float | None  # 当前MA20斜率
+    ma60_slope: float | None  # 当前MA60斜率
+    stop_tr_avg: float | None  # 动态止损使用的波幅均值
 
 
-class MA20StateDiagramShortStrategy(Strategy):
-    definition: StrategyDefinition = {
+class MA20StateDiagramShortStrategy(Strategy):  # MA20状态图做空策略实现
+    definition: StrategyDefinition = {  # 策略元数据和默认参数
         "strategy_id": MA20_STATE_DIAGRAM_STRATEGY_ID,
         "display_name": "MA20 State Diagram Short",
         "entry_script": "python/strategy_service.py",
@@ -136,18 +136,21 @@ class MA20StateDiagramShortStrategy(Strategy):
     }
 
     def __init__(self, definition: StrategyDefinition | None = None) -> None:
+        # 初始化策略定义、状态表和并发锁。
         if definition is not None:
             self.definition = definition
-        self.states: dict[StateKey, StateDiagramShortState] = {}
-        self._lock: RLock = RLock()
+        self.states: dict[StateKey, StateDiagramShortState] = {}  # 按模式、实例、合约索引的状态表
+        self._lock: RLock = RLock()  # 保护状态表和状态推进的可重入锁
 
     def required_warmup_bars(self, instance: JSONObject) -> int:
+        # 返回实例启动前至少需要预热的K线数量，保证MA计算有足够样本。
         params = _strategy_params_for_instance(self.definition, instance)
         if _int(params.get("warmup_target"), 0) > 0:
             return _int(params.get("warmup_target"), 0)
         return max(2, _int(params.get("ma_period"), 20))
 
     def start_instance(self, instance: JSONObject) -> None:
+        # 启动策略实例，为每个合约创建独立状态，并应用预热K线。
         logger.info("start_state_diagram_instance args=%s", json.dumps(_instance_start_log_payload(instance), ensure_ascii=False, sort_keys=True))
         instance_id = str(instance.get("instance_id") or "")
         symbols = instance.get("symbols") or [""]
@@ -159,12 +162,14 @@ class MA20StateDiagramShortStrategy(Strategy):
         self.validate_warmup(instance, counts)
 
     def stop_instance(self, instance_id: str) -> None:
+        # 停止策略实例时清理该实例的所有合约状态。
         with self._lock:
             for key in list(self.states):
                 if key[1] == instance_id:
                     del self.states[key]
 
     def validate_warmup(self, instance: JSONObject, applied_counts: dict[str, int] | None = None) -> None:
+        # 校验预热数据是否足以计算MA，避免运行期第一批K线因样本不足误判。
         target = self.required_warmup_bars(instance)
         if target <= 0:
             return
@@ -190,6 +195,7 @@ class MA20StateDiagramShortStrategy(Strategy):
             )
 
     def _state_for(self, request: RequestDict) -> StateDiagramShortState:
+        # 根据请求中的模式、实例和合约定位运行状态。
         key = (_mode_key(request), _instance_id(request), request.get("symbol", ""))
         if key not in self.states:
             raise ValueError(
@@ -199,6 +205,7 @@ class MA20StateDiagramShortStrategy(Strategy):
         return self.states[key]
 
     def _apply_warmup_bars(self, instance: JSONObject, bars: Any, mode: str) -> dict[str, int]:
+        # 将历史K线灌入状态缓存，只更新指标样本，不触发交易信号。
         counts: dict[str, int] = {}
         if not isinstance(bars, list) or not bars:
             return counts
@@ -233,22 +240,26 @@ class MA20StateDiagramShortStrategy(Strategy):
             state.prev_ma = previous_ma
             if event_ts is not None:
                 state.last_bar_ts = event_ts
+            # 预热结束后从初始观察状态开始，等待完整站上MA20。
             state.state = ABOVE_MA20
             state.above_ready = False
             counts[symbol] = counts.get(symbol, 0) + 1
         return counts
 
     def _settings(self, request: RequestDict) -> tuple[int, int]:
+        # 合并默认参数和请求参数，提取状态图主流程使用的基础参数。
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return max(2, _int(params.get("ma_period"), 20)), max(1, _int(params.get("max_wait_bars"), 6))
 
     def _signal_settings(self, request: RequestDict) -> dict[str, Any]:
+        # 合并参数后生成信号确认、止盈止损和观察窗口使用的参数。
         params = dict(self.definition.get("default_params") or {})
         params.update(_params(request))
         return self._signal_settings_from_params(params)
 
     def _signal_settings_from_params(self, params: dict[str, Any]) -> dict[str, Any]:
+        # 规范化信号参数下限，避免0或负数导致指标、阈值计算异常。
         return {
             "ma60_period": max(3, _int(params.get("ma60_period"), 60)),
             "slope_lookback_bars": max(1, _int(params.get("slope_lookback_bars"), 5)),
@@ -264,11 +275,13 @@ class MA20StateDiagramShortStrategy(Strategy):
         }
 
     def _trim(self, state: StateDiagramShortState, ma_period: int, settings: dict[str, Any]) -> None:
+        # 裁剪指标缓存，只保留后续MA、斜率和波幅计算需要的最近样本。
         keep = max(ma_period, settings["ma60_period"] + settings["slope_lookback_bars"], settings["stop_tr_lookback"]) + 5
         state.closes = trim_tail(state.closes, keep)
         state.trs = trim_tail(state.trs, keep)
 
     def _base_metrics(self, state: StateDiagramShortState, ma20: float | None = None, ma_period: int = 20) -> MetricsDict:
+        # 构造统一返回的指标快照，供无信号、trace和信号响应复用。
         return {
             "signal": "",
             "state": state.state,
@@ -296,9 +309,11 @@ class MA20StateDiagramShortStrategy(Strategy):
         }
 
     def _bar_trace(self, ctx: StateDiagramBarContext, step_key: str, label: str, index: int, status: str, reason: str, checks: list[CheckDict]) -> dict[str, Any]:
+        # 生成单根K线在状态图中的执行轨迹。
         return _trace(ctx.request, "bar", step_key, label, index, status, reason, checks, self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period))
 
     def _reset_setup(self, state: StateDiagramShortState, keep_above_ready: bool = True) -> None:
+        # 重置建仓前状态，清空触碰和信号信息，准备下一轮状态图识别。
         state.state = ABOVE_MA20
         state.above_ready = keep_above_ready
         state.touch_open = None
@@ -311,6 +326,7 @@ class MA20StateDiagramShortStrategy(Strategy):
         self._clear_signal(state)
 
     def _clear_signal(self, state: StateDiagramShortState) -> None:
+        # 清空信号后持仓观察相关字段。
         state.signal_entry = None
         state.signal_trigger_price = None
         state.signal_atr = None
@@ -327,10 +343,12 @@ class MA20StateDiagramShortStrategy(Strategy):
         state.signal_stop_tr_avg = None
 
     def on_bar(self, request: RequestDict) -> ResponseDict:
+        # K线入口，加锁后推进状态机。
         with self._lock:
             return self._on_bar_locked(request)
 
     def _on_bar_locked(self, request: RequestDict) -> ResponseDict:
+        # 处理单根K线：校验、更新指标、构建上下文，并按当前状态分派处理函数。
         bar = request.get("bar") or {}
         if not bar:
             return _no_signal(request, "no bar")
@@ -349,6 +367,7 @@ class MA20StateDiagramShortStrategy(Strategy):
         if event_ts is not None:
             state.last_bar_ts = event_ts
 
+        # 先用旧缓存计算上一根MA，再追加当前K线，便于判断是否从上向下跌破MA20。
         previous_ma = simple_moving_average(state.closes, ma_period)
         previous_close = state.prev_close
         state.closes.append(close)
@@ -362,6 +381,7 @@ class MA20StateDiagramShortStrategy(Strategy):
             trace = _trace(request, "bar", "WAIT_MA_READY", "等待 MA20 数据足够", 1, "waiting", "waiting for enough bars", checks, self._base_metrics(state, ma20, ma_period))
             return _no_signal(request, "waiting for enough bars", self._base_metrics(state, ma20, ma_period), trace, False)
 
+        # 汇总当前K线、均线、斜率和动态止损波幅，后续状态处理只读这个上下文。
         ctx = StateDiagramBarContext(
             request=request,
             state=state,
@@ -381,6 +401,7 @@ class MA20StateDiagramShortStrategy(Strategy):
             ma60_slope=moving_average_slope(state.closes, settings["ma60_period"], settings["slope_lookback_bars"]),
             stop_tr_avg=trimmed_top_average(state.trs, settings["stop_tr_lookback"], settings["stop_tr_top_n"], settings["stop_tr_drop_n"]),
         )
+        # 当前状态决定使用哪段状态图逻辑；持仓盈利和亏损共用持仓处理函数。
         handlers = {
             ABOVE_MA20: self._handle_above_ma20,
             BELOW_MA20: self._handle_below_ma20,
@@ -400,17 +421,19 @@ class MA20StateDiagramShortStrategy(Strategy):
         return out
 
     def _handle_above_ma20(self, ctx: StateDiagramBarContext) -> ResponseDict:
+        # 状态1：等待先完整站上MA20，再确认收盘从上向下跌破MA20。
         full_above = ctx.open_price > ctx.ma20 and ctx.high > ctx.ma20 and ctx.low > ctx.ma20 and ctx.close > ctx.ma20
         cross_break = ctx.previous_close is not None and ctx.previous_ma is not None and ctx.previous_close >= ctx.previous_ma and ctx.close < ctx.ma20
         checks = [
-            _check("整根K线在MA20之上", full_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
-            _check("收盘从上向下跌破MA20", cross_break, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
+            _check("整根K线在MA20之上", full_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, "dt:{}".format(ctx.event_time)),
+            _check("收盘从上向下跌破MA20", cross_break, ctx.close, ctx.ma20, ctx.close - ctx.ma20, "dt:{}".format(ctx.event_time)),
         ]
         if not ctx.state.above_ready:
             ctx.state.above_ready = full_above
             trace = self._bar_trace(ctx, ABOVE_MA20, "MA20之上", 1, "waiting", "waiting for first full bar above MA20", checks)
             return _no_signal(ctx.request, "waiting for first full bar above MA20", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
         if cross_break:
+            # 第一次跌破成立，进入MA20下方等待反弹触碰阶段。
             ctx.state.state = BELOW_MA20
             trace = self._bar_trace(ctx, BELOW_MA20, "跌破MA20之下", 2, "passed", "break below MA20 confirmed", checks)
             return _no_signal(ctx.request, "break below MA20 confirmed", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
@@ -418,17 +441,20 @@ class MA20StateDiagramShortStrategy(Strategy):
         return _no_signal(ctx.request, "waiting above MA20 break", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
 
     def _handle_below_ma20(self, ctx: StateDiagramBarContext) -> ResponseDict:
+        # 状态2：跌破后等待反弹触碰MA20；若重新站上MA20则重置。
         stood_above = ctx.open_price > ctx.ma20 and ctx.close > ctx.ma20
         touched = ctx.high >= ctx.ma20
         checks = [
-            _check("未重新站上MA20", not stood_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
-            _check("最高价反弹触碰MA20", touched, ctx.high, ctx.ma20, ctx.high - ctx.ma20),
+            _check("未重新站上MA20", not stood_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, "dt:{}".format(ctx.event_time)),
+            _check("最高价反弹触碰MA20", touched, ctx.high, ctx.ma20, ctx.high - ctx.ma20, "dt:{}".format(ctx.event_time)),
         ]
         if stood_above:
+            # 重新站上MA20说明跌破结构失效，回到起点。
             self._reset_setup(ctx.state, keep_above_ready=True)
             trace = self._bar_trace(ctx, ABOVE_MA20, "MA20之上", 1, "passed", "reclaimed MA20", checks)
             return _no_signal(ctx.request, "reclaimed MA20", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
         if touched:
+            # 记录触碰K线的开收低位作为后续二次跌破触发线。
             ctx.state.state = REBOUND_TO_HIGH
             ctx.state.touch_open = ctx.open_price
             ctx.state.touch_close = ctx.close
@@ -443,19 +469,22 @@ class MA20StateDiagramShortStrategy(Strategy):
         return _no_signal(ctx.request, "waiting for rebound to MA20", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace, False)
 
     def _handle_rebound_to_high(self, ctx: StateDiagramBarContext) -> ResponseDict:
+        # 状态3：反弹触碰MA20后，在限定K线内等待跌破触碰K线开收低价。
         ctx.state.wait_bars += 1
         stood_above = ctx.open_price > ctx.ma20 and ctx.close > ctx.ma20
         broke_trigger = ctx.state.trigger_line is not None and ctx.low <= ctx.state.trigger_line
         checks = [
-            _check("未重新站上MA20", not stood_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20),
-            _check("触发等待未超时", ctx.state.wait_bars <= ctx.max_wait_bars, ctx.state.wait_bars, ctx.max_wait_bars),
-            _check("跌破触碰K开收低价", broke_trigger, ctx.low, ctx.state.trigger_line),
+            _check("未重新站上MA20", not stood_above, ctx.close, ctx.ma20, ctx.close - ctx.ma20, "dt:{}".format(ctx.event_time)),
+            _check("触发等待未超时", ctx.state.wait_bars <= ctx.max_wait_bars, ctx.state.wait_bars, ctx.max_wait_bars, "dt:{}".format(ctx.event_time)),
+            _check("跌破触碰K开收低价", broke_trigger, ctx.low, ctx.state.trigger_line, "dt:{}".format(ctx.event_time)),
         ]
         if stood_above:
+            # 等待二次跌破前重新站上MA20，当前形态作废。
             self._reset_setup(ctx.state, keep_above_ready=True)
             trace = self._bar_trace(ctx, ABOVE_MA20, "MA20之上", 1, "failed", "reset: stood above MA20 before second break", checks)
             return _no_signal(ctx.request, "reset: stood above MA20 before second break", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
         if broke_trigger:
+            # 二次跌破触发空头信号，并记录信号价、波幅和逆向止损参考。
             trigger = ctx.state.trigger_line if ctx.state.trigger_line is not None else ctx.low
             atr = max(0.0001, ctx.high - ctx.low)
             settings = self._signal_settings(ctx.request)
@@ -479,6 +508,7 @@ class MA20StateDiagramShortStrategy(Strategy):
                 "trace": trace,
             }
         if ctx.state.wait_bars > ctx.max_wait_bars:
+            # 超过等待窗口还没有二次跌破，回到MA20下方等待新的反弹触碰。
             ctx.state.state = BELOW_MA20
             ctx.state.wait_bars = 0
             ctx.state.touch_open = None
@@ -492,6 +522,7 @@ class MA20StateDiagramShortStrategy(Strategy):
         return _no_signal(ctx.request, "waiting for second break", self._base_metrics(ctx.state, ctx.ma20, ctx.ma_period), trace)
 
     def _handle_second_break_signal(self, ctx: StateDiagramBarContext) -> ResponseDict:
+        # 状态4：信号后的下一根K线，用开盘价确认空头持仓并进入盈利或亏损持仓状态。
         settings = self._signal_settings(ctx.request)
         ctx.state.signal_entry = ctx.open_price
         atr = max(0.0001, ctx.state.signal_atr or (ctx.high - ctx.low))
@@ -505,7 +536,7 @@ class MA20StateDiagramShortStrategy(Strategy):
         ctx.state.signal_entry_ma20_slope = ctx.ma20_slope
         ctx.state.signal_entry_ma60_slope = ctx.ma60_slope
         ctx.state.state = PROFIT_HOLDING if ctx.close < ctx.open_price else LOSS_HOLDING
-        checks = [_check("下一根K线开盘确认持仓", True, ctx.open_price, "entry open")]
+        checks = [_check("下一根K线开盘确认持仓", True, ctx.open_price, "entry open"), "dt:{}".format(ctx.event_time)]
         step_key = ctx.state.state
         label = "赚钱中" if step_key == PROFIT_HOLDING else "亏钱中"
         trace = self._bar_trace(ctx, step_key, label, 5 if step_key == PROFIT_HOLDING else 6, "passed", "short position confirmed at next bar open", checks)
@@ -514,11 +545,13 @@ class MA20StateDiagramShortStrategy(Strategy):
         return _no_signal(ctx.request, "short position confirmed at next bar open", metrics, trace)
 
     def _handle_holding(self, ctx: StateDiagramBarContext) -> ResponseDict:
+        # 状态5/6：持仓观察，按盈利回撤、亏损止损和观察窗口决定退出。
         state = ctx.state
         settings = self._signal_settings(ctx.request)
         state.signal_bars += 1
         entry = state.signal_entry
         atr = max(0.0001, state.signal_atr or (ctx.high - ctx.low))
+        # 更新持仓以来的最低价、未创新低计数和低点上移计数。
         if state.signal_lowest_low is None or ctx.low < state.signal_lowest_low:
             state.signal_lowest_low = ctx.low
             state.signal_no_new_low_bars = 0
@@ -533,8 +566,10 @@ class MA20StateDiagramShortStrategy(Strategy):
             state.signal_ma20_touched = True
         state.signal_stop_tr_avg = ctx.stop_tr_avg
 
+        # 盈亏状态由当前收盘价相对入场价决定，并同步到状态图节点。
         profitable = entry is not None and ctx.close < entry
         state.state = PROFIT_HOLDING if profitable else LOSS_HOLDING
+        # 亏损止损区使用动态波幅阈值；若均线斜率继续转弱，可延后止损。
         adverse_distance = (ctx.close - entry) if entry is not None else None
         dynamic_threshold = ctx.stop_tr_avg or ((state.signal_adverse_target - entry) if entry is not None and state.signal_adverse_target is not None else None)
         in_stop_zone = not profitable and dynamic_threshold is not None and adverse_distance is not None and adverse_distance >= dynamic_threshold
@@ -544,28 +579,31 @@ class MA20StateDiagramShortStrategy(Strategy):
         hit_stop = bool(in_stop_zone and not stop_deferred)
         no_new_low_stop = not profitable and state.signal_no_new_low_bars >= settings["strength_exit_bars"]
         stood_above_stop = not profitable and ctx.open_price > ctx.ma20 and ctx.close > ctx.ma20
+        # 盈利退出关注触碰MA20后的反弹、低点上移，以及强阳站稳MA20。
         rebound = ctx.close - (state.signal_lowest_low if state.signal_lowest_low is not None else ctx.close)
         rebound_ok = state.signal_ma20_touched and rebound >= settings["profit_rebound_atr_multiple"] * atr
         rising_low_take = profitable and rebound_ok and state.signal_rising_low_bars >= settings["profit_rising_low_bars"]
         strong_bull_take = profitable and ctx.low > ctx.ma20 and ctx.close > ctx.open_price and (ctx.close - ctx.open_price) >= settings["strong_bull_atr_multiple"] * atr
         checks = [
-            _check("当前持仓盈利", profitable, ctx.close, entry),
-            _check("亏损进入止损区", in_stop_zone, adverse_distance, dynamic_threshold),
-            _check("止损未被空头斜率延后", not stop_deferred, ctx.ma20_slope, state.signal_entry_ma20_slope),
-            _check("亏损后连续未创新低", no_new_low_stop, state.signal_no_new_low_bars, settings["strength_exit_bars"]),
-            _check("亏损后重新站上MA20", stood_above_stop, ctx.close, ctx.ma20),
-            _check("盈利后触碰MA20", state.signal_ma20_touched, ctx.high, ctx.ma20),
-            _check("触碰MA20后反弹达标", rebound_ok, rebound, settings["profit_rebound_atr_multiple"] * atr),
-            _check("触碰MA20后低点上移", rising_low_take, state.signal_rising_low_bars, settings["profit_rising_low_bars"]),
-            _check("强阳站稳MA20", strong_bull_take, ctx.close - ctx.open_price, settings["strong_bull_atr_multiple"] * atr),
+            _check("当前持仓盈利", profitable, ctx.close, entry, ctx.close - entry, "dt:{}".format(ctx.event_time)),
+            _check("亏损进入止损区", in_stop_zone, adverse_distance, dynamic_threshold, None, "dt:{}".format(ctx.event_time)),
+            _check("止损未被空头斜率延后", not stop_deferred, ctx.ma20_slope, state.signal_entry_ma20_slope, None, "dt:{}".format(ctx.event_time)),
+            _check("亏损后连续未创新低", no_new_low_stop, state.signal_no_new_low_bars, settings["strength_exit_bars"], None, "dt:{}".format(ctx.event_time)),
+            _check("亏损后重新站上MA20", stood_above_stop, ctx.close, ctx.ma20, None, "dt:{}".format(ctx.event_time)),
+            _check("盈利后触碰MA20", state.signal_ma20_touched, ctx.high, ctx.ma20, None, "dt:{}".format(ctx.event_time)),
+            _check("触碰MA20后反弹达标", rebound_ok, rebound, settings["profit_rebound_atr_multiple"] * atr, None, "dt:{}".format(ctx.event_time)),
+            _check("触碰MA20后低点上移", rising_low_take, state.signal_rising_low_bars, settings["profit_rising_low_bars"], None, "dt:{}".format(ctx.event_time)),
+            _check("强阳站稳MA20", strong_bull_take, ctx.close - ctx.open_price, settings["strong_bull_atr_multiple"] * atr, None, "dt:{}".format(ctx.event_time)),
         ]
         if rising_low_take or strong_bull_take:
+            # 盈利结构退出，标记本轮信号成功后重置状态图。
             metrics = self._base_metrics(state, ctx.ma20, ctx.ma_period)
             metrics["signal_result"] = "success"
             trace = _trace(ctx.request, "bar", TAKE_PROFIT, "止盈", 6, "passed", "trend-following profit exit after MA20 reclaim", checks, metrics)
             self._reset_setup(state, keep_above_ready=True)
             return _no_signal(ctx.request, "trend-following profit exit after MA20 reclaim", metrics, trace)
         if hit_stop or no_new_low_stop or stood_above_stop:
+            # 亏损或走势转强触发退出，标记本轮信号失败后重置。
             metrics = self._base_metrics(state, ctx.ma20, ctx.ma_period)
             metrics["signal_result"] = "failure"
             reason = "dynamic stop zone hit" if hit_stop else "market strengthened before short worked"
@@ -573,6 +611,7 @@ class MA20StateDiagramShortStrategy(Strategy):
             self._reset_setup(state, keep_above_ready=True)
             return _no_signal(ctx.request, reason, metrics, trace)
         if state.signal_bars >= settings["observation_bars"] and not profitable:
+            # 观察窗口结束仍未形成有效盈利结构，按未解决的止损路径结束。
             metrics = self._base_metrics(state, ctx.ma20, ctx.ma_period)
             metrics["signal_result"] = "unresolved"
             trace = _trace(ctx.request, "bar", STOP_LOSS, "止损", 6, "done", "observation window ended without structural exit", checks, metrics)
@@ -585,10 +624,12 @@ class MA20StateDiagramShortStrategy(Strategy):
         return _no_signal(ctx.request, "holding short until exit state", metrics, trace)
 
     def on_tick(self, request: RequestDict) -> ResponseDict:
+        # Tick入口：该策略只按K线推进，tick事件直接返回无信号。
         with self._lock:
             state = self._state_for(request)
             ma_period, _ = self._settings(request)
             return _no_signal(request, "bar driven strategy ignores ticks", self._base_metrics(state, None, ma_period))
 
     def on_replay_bar(self, request: RequestDict) -> ResponseDict:
+        # 回放K线与实时K线共用同一套状态推进逻辑。
         return self.on_bar(request)

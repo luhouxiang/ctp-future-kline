@@ -21,6 +21,7 @@ import os
 import time
 from logging.handlers import RotatingFileHandler
 from typing import Any
+import datetime
 
 from strategy_types import (
     CheckDict,
@@ -261,8 +262,8 @@ def _instance_start_log_payload(instance: JSONObject) -> dict[str, Any]:
     warmup_last_time = ""
     if isinstance(warmup_bars, list):
         if warmup_bars:
-            warmup_first_time = _warmup_bar_time(warmup_bars[0])
-            warmup_last_time = _warmup_bar_time(warmup_bars[-1])
+            warmup_first_time = datetime.datetime.fromtimestamp(int(_warmup_bar_time(warmup_bars[0]))).strftime("%Y-%m-%d %H:%M:%S")
+            warmup_last_time = datetime.datetime.fromtimestamp(int(_warmup_bar_time(warmup_bars[-1]))).strftime("%Y-%m-%d %H:%M:%S")
         params["warmup_bars"] = f"<{len(warmup_bars)} bars>"
     return {
         "instance_id": instance.get("instance_id", ""),

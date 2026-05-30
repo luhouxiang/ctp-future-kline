@@ -54,7 +54,9 @@ class StrategyService:
 
     def StartInstance(self, request: RequestDict, context: Any) -> ResponseDict:
         instance = request.get("instance") or {}
-        logger.info("strategy StartInstance begin")
+        instance_id = instance.get("instance_id", "")
+        logger.info("strategy StartInstance begin..., instance_id=%s strategy_id=%s mode=%s timeframe=%s", 
+                    instance_id, instance.get("strategy_id", ""), instance.get("mode", ""), instance.get("timeframe", ""))
         self.factory.start_instance(instance)
         logger.info("strategy StartInstance end runtime_count=%s", len(self.factory.instances))
         return {"ok": True, "version": "python-sample-v1", "server_time": time.strftime("%Y-%m-%d %H:%M:%S")}

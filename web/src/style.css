@@ -1645,15 +1645,23 @@ select {
   left: 10px;
   z-index: 16;
   display: flex;
-  align-items: center;
-  gap: 6px;
-  flex-wrap: wrap;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 4px;
   max-width: calc(100% - 20px);
   font-size: 12px;
   line-height: 1.2;
   color: #dce7f5;
   pointer-events: none;
   user-select: none;
+}
+
+.tv-quote-row,
+.tv-ma-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
 }
 
 .theme-light .tv-quote-header {
@@ -1666,6 +1674,15 @@ select {
 
 .theme-light .tv-quote-header .dim {
   color: #5c7897;
+}
+
+.tv-quote-header .ma20 {
+  color: #ff00d4;
+  font-weight: 600;
+}
+
+.tv-quote-header .ma60 {
+  color: #9ca3af;
 }
 
 .tv-quote-header .up {

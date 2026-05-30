@@ -575,6 +575,8 @@ function initCharts() {
     borderDownColor: COLOR_DOWN_KLINE_VOLUME,
     wickUpColor: COLOR_UP,
     wickDownColor: COLOR_DOWN_KLINE_VOLUME,
+    priceLineVisible: false,
+    lastValueVisible: false,
   });
   seriesRefs.ma20 = chartRefs.candle.addSeries(LineSeries, {
     color: COLOR_MA20,
@@ -768,6 +770,18 @@ function buildMAData(bars, period) {
     else out.push({ time: t });
   }
   return out;
+}
+
+function movingAverageAtIndex(bars, period, index) {
+  const normalizedPeriod = Math.max(1, Math.floor(Number(period) || 1));
+  const end = Math.floor(Number(index));
+  if (!Array.isArray(bars) || end < normalizedPeriod - 1 || end >= bars.length) return null;
+  let sum = 0;
+  for (let i = end - normalizedPeriod + 1; i <= end; i += 1) {
+    const close = Number(bars[i]?.close);
+    sum += Number.isFinite(close) ? close : 0;
+  }
+  return sum / normalizedPeriod;
 }
 
 function calcMACD(bars) {
@@ -3925,6 +3939,16 @@ const selectedPrevBar = computed(() => {
   return state.bars[idx - 1];
 });
 
+const quoteMovingAverages = computed(() => {
+  const idx = selectedBarIndex.value;
+  const ma20 = movingAverageAtIndex(state.bars, 20, idx);
+  const ma60 = movingAverageAtIndex(state.bars, 60, idx);
+  return {
+    ma20: Number.isFinite(ma20) ? formatPrice(ma20) : "--",
+    ma60: Number.isFinite(ma60) ? formatPrice(ma60) : "--",
+  };
+});
+
 const quoteHeader = computed(() => {
   const bar = selectedBar.value;
   const prev = selectedPrevBar.value;
@@ -4476,24 +4500,30 @@ onUnmounted(() => {
           </div>
         </div>
         <div class="tv-quote-header">
-          <span class="dim">Symbol</span>
-          <span>{{ quoteHeader.symbol }}</span>
-          <span class="dim">TF</span>
-          <span>{{ quoteHeader.timeframe }}</span>
-          <span class="dim">Open</span>
-          <span>{{ quoteHeader.open }}</span>
-          <span class="dim">High</span>
-          <span>{{ quoteHeader.high }}</span>
-          <span class="dim">Low</span>
-          <span>{{ quoteHeader.low }}</span>
-          <span class="dim">Close</span>
-          <span>{{ quoteHeader.close }}</span>
-          <span class="dim">Vol</span>
-          <span>{{ quoteHeader.volume }}</span>
-          <span class="dim">Change</span>
-          <span :class="quoteHeader.changeClass">{{ quoteHeader.change }}</span>
-          <span class="dim">Index</span>
-          <span>{{ quoteHeader.index }}</span>
+          <div class="tv-quote-row">
+            <span class="dim">Symbol</span>
+            <span>{{ quoteHeader.symbol }}</span>
+            <span class="dim">TF</span>
+            <span>{{ quoteHeader.timeframe }}</span>
+            <span class="dim">Open</span>
+            <span>{{ quoteHeader.open }}</span>
+            <span class="dim">High</span>
+            <span>{{ quoteHeader.high }}</span>
+            <span class="dim">Low</span>
+            <span>{{ quoteHeader.low }}</span>
+            <span class="dim">Close</span>
+            <span>{{ quoteHeader.close }}</span>
+            <span class="dim">Vol</span>
+            <span>{{ quoteHeader.volume }}</span>
+            <span class="dim">Change</span>
+            <span :class="quoteHeader.changeClass">{{ quoteHeader.change }}</span>
+            <span class="dim">Index</span>
+            <span>{{ quoteHeader.index }}</span>
+          </div>
+          <div class="tv-ma-row">
+            <span class="ma20">MA20 {{ quoteMovingAverages.ma20 }}</span>
+            <span class="ma60">MA60 {{ quoteMovingAverages.ma60 }}</span>
+          </div>
         </div>
         <div v-if="props.showChannelDebug" class="channel-debug-panel">
           <div class="channel-debug-title">
