@@ -27,11 +27,15 @@ class ZigZagState:
     mode: str
     instance_id: str
     symbol: str
-    phase: str = "INIT"
+    stage: str = "INIT"
     bars: list[dict[str, Any]] = field(default_factory=list)
     trs: list[float] = field(default_factory=list)
-    extreme_bar: dict[str, Any] | None = None
+    init_cache: list[dict[str, Any]] = field(default_factory=list)
+    last_fixed: dict[str, Any] | None = None
+    curr_provisional: dict[str, Any] | None = None
+    next_provisional: dict[str, Any] | None = None
     last_event_ts: float | None = None
+    next_index: int = 0
 
 
 class ATRZigZagIndicatorStrategy(Strategy):
@@ -43,6 +47,8 @@ class ATRZigZagIndicatorStrategy(Strategy):
         "updated_at": _rfc3339_utc_now(),
         "default_params": {
             "atr_period": 26,
+            "atr_multiple": 2.0,
+            "min_bars": 5,
             "warmup_target": 26,
         },
     }
@@ -122,43 +128,118 @@ class ATRZigZagIndicatorStrategy(Strategy):
 
     def _process_bar(self, state: ZigZagState, bar: dict[str, Any], params: dict[str, Any]) -> dict[str, Any] | None:
         atr_period = max(1, int(_float(params.get("atr_period"), 26)))
-        normalized = self._normalize_bar(bar)
+        min_bars = max(1, int(_float(params.get("min_bars"), _float(params.get("min_pivot_bars"), 5))))
+        normalized = self._normalize_bar(bar, state.next_index)
+        state.next_index += 1
         tr = self._true_range(state.bars[-1] if state.bars else None, normalized)
         state.bars.append(normalized)
         state.trs.append(tr)
-        keep = max(atr_period + 4, 128)
+        keep = max(atr_period + min_bars * 3 + 8, 128)
         if len(state.bars) > keep:
             drop = len(state.bars) - keep
             state.bars = state.bars[drop:]
             state.trs = state.trs[drop:]
+            if state.stage == "INIT" and len(state.init_cache) > keep:
+                state.init_cache = state.init_cache[-keep:]
+        if state.stage == "INIT":
+            state.init_cache.append(normalized)
         atr = self._atr(state.trs, atr_period)
         if atr is None or atr <= 0:
             return None
-        if state.phase == "INIT" or state.extreme_bar is None:
-            state.extreme_bar = normalized
-            state.phase = "FIND_PEAK"
+        reversal_value = atr * max(0.0001, _float(params.get("atr_multiple"), 2.0))
+
+        if state.stage == "INIT":
+            self._initialize(state, reversal_value)
             return None
-        if state.phase == "FIND_PEAK":
-            if normalized["high"] > state.extreme_bar["high"]:
-                state.extreme_bar = normalized
-            if normalized["low"] <= state.extreme_bar["high"] - atr:
-                peak = state.extreme_bar
-                state.phase = "FIND_TROUGH"
-                state.extreme_bar = normalized
-                return self._event("PEAK", peak, normalized, atr)
-        elif state.phase == "FIND_TROUGH":
-            if normalized["low"] < state.extreme_bar["low"]:
-                state.extreme_bar = normalized
-            if normalized["high"] >= state.extreme_bar["low"] + atr:
-                trough = state.extreme_bar
-                state.phase = "FIND_PEAK"
-                state.extreme_bar = normalized
-                return self._event("TROUGH", trough, normalized, atr)
+
+        if not state.last_fixed or not state.curr_provisional:
+            return None
+
+        high = normalized["high"]
+        low = normalized["low"]
+        if state.last_fixed["type"] == "TROUGH":
+            if state.next_provisional is None:
+                if high > state.curr_provisional["kline"]["high"]:
+                    state.curr_provisional = self._point("PEAK", normalized)
+                elif state.curr_provisional["kline"]["high"] - low >= reversal_value:
+                    state.next_provisional = self._point("TROUGH", normalized)
+            else:
+                if high > state.curr_provisional["kline"]["high"]:
+                    state.curr_provisional = self._point("PEAK", normalized)
+                    state.next_provisional = None
+                else:
+                    if low < state.next_provisional["kline"]["low"]:
+                        state.next_provisional = self._point("TROUGH", normalized)
+                    if high - state.next_provisional["kline"]["low"] >= reversal_value:
+                        if not self._lock_spacing_ok(state, min_bars):
+                            return None
+                        locked = state.curr_provisional
+                        previous = state.last_fixed
+                        state.last_fixed = state.curr_provisional
+                        state.curr_provisional = state.next_provisional
+                        state.next_provisional = self._point("PEAK", normalized)
+                        return self._event("PEAK", locked, previous, normalized, reversal_value)
+
+        elif state.last_fixed["type"] == "PEAK":
+            if state.next_provisional is None:
+                if low < state.curr_provisional["kline"]["low"]:
+                    state.curr_provisional = self._point("TROUGH", normalized)
+                elif high - state.curr_provisional["kline"]["low"] >= reversal_value:
+                    state.next_provisional = self._point("PEAK", normalized)
+            else:
+                if low < state.curr_provisional["kline"]["low"]:
+                    state.curr_provisional = self._point("TROUGH", normalized)
+                    state.next_provisional = None
+                else:
+                    if high > state.next_provisional["kline"]["high"]:
+                        state.next_provisional = self._point("PEAK", normalized)
+                    if state.next_provisional["kline"]["high"] - low >= reversal_value:
+                        if not self._lock_spacing_ok(state, min_bars):
+                            return None
+                        locked = state.curr_provisional
+                        previous = state.last_fixed
+                        state.last_fixed = state.curr_provisional
+                        state.curr_provisional = state.next_provisional
+                        state.next_provisional = self._point("TROUGH", normalized)
+                        return self._event("TROUGH", locked, previous, normalized, reversal_value)
         return None
 
-    def _normalize_bar(self, bar: dict[str, Any]) -> dict[str, Any]:
+    def _initialize(self, state: ZigZagState, reversal_value: float) -> None:
+        highs = [item["high"] for item in state.init_cache]
+        lows = [item["low"] for item in state.init_cache]
+        max_h = max(highs)
+        min_l = min(lows)
+        if max_h - min_l < reversal_value:
+            return
+        idx_max = highs.index(max_h)
+        idx_min = lows.index(min_l)
+        if idx_min < idx_max:
+            state.last_fixed = self._point("TROUGH", state.init_cache[idx_min])
+            state.curr_provisional = self._point("PEAK", state.init_cache[idx_max])
+        else:
+            state.last_fixed = self._point("PEAK", state.init_cache[idx_max])
+            state.curr_provisional = self._point("TROUGH", state.init_cache[idx_min])
+        state.stage = "RUNNING"
+        state.init_cache.clear()
+
+    def _point(self, typ: str, bar: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "type": typ,
+            "kline": bar,
+            "index": int(bar["index"]),
+        }
+
+    def _lock_spacing_ok(self, state: ZigZagState, min_bars: int) -> bool:
+        if not state.last_fixed or not state.curr_provisional or not state.next_provisional:
+            return False
+        cond1 = int(state.curr_provisional["index"]) - int(state.last_fixed["index"]) >= min_bars
+        cond2 = int(state.next_provisional["index"]) - int(state.curr_provisional["index"]) >= min_bars
+        return cond1 and cond2
+
+    def _normalize_bar(self, bar: dict[str, Any], index: int) -> dict[str, Any]:
         ts = _bar_event_time(bar)
         return {
+            "index": index,
             "adjusted_time": ts,
             "open": _float(bar.get("open")),
             "high": _float(bar.get("high")),
@@ -181,16 +262,29 @@ class ATRZigZagIndicatorStrategy(Strategy):
         recent = trs[-period:]
         return sum(recent) / period
 
-    def _event(self, typ: str, pivot: dict[str, Any], confirmed: dict[str, Any], atr: float) -> dict[str, Any]:
+    def _event(
+        self,
+        typ: str,
+        locked: dict[str, Any],
+        previous: dict[str, Any],
+        confirmed: dict[str, Any],
+        atr: float,
+    ) -> dict[str, Any]:
+        pivot = locked["kline"]
+        previous_index = int(previous["index"])
         price = pivot["high"] if typ == "PEAK" else pivot["low"]
+        bars_since_previous = int(locked["index"]) - previous_index
         return {
             "indicator": "zigzag_atr26",
             "signal": "ZIGZAG",
             "zigzag_type": typ,
+            "pivot_index": locked["index"],
             "pivot_time": pivot["adjusted_time"],
             "pivot_price": price,
             "pivot_high": pivot["high"],
             "pivot_low": pivot["low"],
+            "previous_pivot_index": previous_index,
+            "pivot_bars_since_previous": bars_since_previous,
             "confirmed_time": confirmed["adjusted_time"],
             "confirmed_high": confirmed["high"],
             "confirmed_low": confirmed["low"],
@@ -200,14 +294,24 @@ class ATRZigZagIndicatorStrategy(Strategy):
     def _metrics(self, state: ZigZagState, params: dict[str, Any]) -> dict[str, Any]:
         atr_period = max(1, int(_float(params.get("atr_period"), 26)))
         atr = self._atr(state.trs, atr_period)
+        atr_multiple = max(0.0001, _float(params.get("atr_multiple"), 2.0))
+        min_bars = max(1, int(_float(params.get("min_bars"), _float(params.get("min_pivot_bars"), 5))))
         return {
             "indicator": "zigzag_atr26",
-            "state": state.phase,
+            "state": state.stage,
+            "stage": state.stage,
             "step_total": 1,
             "atr_period": atr_period,
+            "atr_multiple": atr_multiple,
+            "min_bars": min_bars,
             "atr": atr,
+            "reversal_threshold": None if atr is None else atr * atr_multiple,
             "bars": len(state.bars),
-            "extreme_time": (state.extreme_bar or {}).get("adjusted_time"),
-            "extreme_high": (state.extreme_bar or {}).get("high"),
-            "extreme_low": (state.extreme_bar or {}).get("low"),
+            "next_index": state.next_index,
+            "last_fixed_type": (state.last_fixed or {}).get("type"),
+            "last_fixed_index": (state.last_fixed or {}).get("index"),
+            "curr_provisional_type": (state.curr_provisional or {}).get("type"),
+            "curr_provisional_index": (state.curr_provisional or {}).get("index"),
+            "next_provisional_type": (state.next_provisional or {}).get("type"),
+            "next_provisional_index": (state.next_provisional or {}).get("index"),
         }
