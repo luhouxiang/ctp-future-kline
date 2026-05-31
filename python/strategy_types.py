@@ -64,6 +64,7 @@ MA20_WEAK_SCORE_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.score_filter
 MA20_STATE_DIAGRAM_STRATEGY_ID: str = "ma20.state_diagram_short"
 
 # MA20 state-diagram short strategy constants.
+INIT: str = "INIT"
 ABOVE_MA20: str = "ABOVE_MA20"
 BELOW_MA20: str = "BELOW_MA20"
 REBOUND_TO_HIGH: str = "REBOUND_TO_HIGH"
@@ -96,10 +97,13 @@ WeakRegime: TypeAlias = Literal[
     "UNCLEAR",
 ]
 StateDiagramShortStateName: TypeAlias = Literal[
+    "INIT",
     "ABOVE_MA20",
     "BELOW_MA20",
     "REBOUND_TO_HIGH",
     "SECOND_BREAK_SIGNAL",
     "PROFIT_HOLDING",
     "LOSS_HOLDING",
+    "TAKE_PROFIT",
+    "STOP_LOSS",
 ]

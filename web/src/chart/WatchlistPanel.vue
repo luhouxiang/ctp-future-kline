@@ -362,14 +362,15 @@ const ma20WeakSteps = [
 ]
 
 const ma20StateDiagramSteps = [
-  { key: 'ABOVE_MA20', label: 'MA20之上', index: 1 },
-  { key: 'BELOW_MA20', label: '跌破MA20之下', index: 2 },
-  { key: 'REBOUND_TO_HIGH', label: '反弹至高点', index: 3 },
-  { key: 'SECOND_BREAK_SIGNAL', label: '再次跌出出信号', index: 4 },
-  { key: 'PROFIT_HOLDING', label: '赚钱中', index: 5 },
-  { key: 'LOSS_HOLDING', label: '亏钱中', index: 6 },
-  { key: 'TAKE_PROFIT', label: '止盈', index: 6 },
-  { key: 'STOP_LOSS', label: '止损', index: 6 },
+  { key: 'INIT', label: '初始待机', index: 1 },
+  { key: 'ABOVE_MA20', label: 'MA20之上', index: 2 },
+  { key: 'BELOW_MA20', label: '跌破MA20之下', index: 3 },
+  { key: 'REBOUND_TO_HIGH', label: '反弹至高点', index: 4 },
+  { key: 'SECOND_BREAK_SIGNAL', label: '再次跌出出信号', index: 5 },
+  { key: 'PROFIT_HOLDING', label: '赚钱中', index: 6 },
+  { key: 'LOSS_HOLDING', label: '亏钱中', index: 7 },
+  { key: 'TAKE_PROFIT', label: '止盈', index: 8 },
+  { key: 'STOP_LOSS', label: '止损', index: 8 },
 ]
 
 const strategyStepRows = computed(() => {

@@ -8,6 +8,7 @@ from strategy_service import (  # noqa: E402
     ABOVE_MA20,
     BROKEN_BELOW_MA20,
     BELOW_MA20,
+    INIT,
     LOSS_HOLDING,
     MA20_WEAK_BASELINE_STRATEGY_ID,
     MA20_WEAK_HARD_FILTER_STRATEGY_ID,
@@ -519,17 +520,20 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
     def signal_short(self, idx=24):
         return self.strategy.on_bar(state_bar_req(idx=idx, open_=99.3, high=99.4, low=99.15, close=99.2))
 
-    def test_starting_below_ma20_requires_full_bar_above_first(self):
+    def test_init_waits_below_ma20_then_enters_above(self):
         self.warmup_flat()
 
         out = self.strategy.on_bar(state_bar_req(idx=21, open_=99.8, high=100.0, low=99.0, close=99.2))
         self.assertTrue(out["no_signal"])
-        self.assertEqual(out["trace"]["step_key"], ABOVE_MA20)
+        self.assertEqual(out["trace"]["step_key"], INIT)
         self.assertFalse(self.state().above_ready)
-        self.assertEqual(self.state().state, ABOVE_MA20)
+        self.assertEqual(self.state().state, INIT)
 
-        self.arm_above(idx=22)
+        above = self.arm_above(idx=22)
+        self.assertEqual(above["trace"]["step_key"], ABOVE_MA20)
+        self.assertEqual(above["trace"]["step_index"], 2)
         self.assertTrue(self.state().above_ready)
+        self.assertEqual(self.state().state, ABOVE_MA20)
 
     def test_above_to_below_to_rebound_records_trigger_line(self):
         out = self.setup_to_rebound()
@@ -541,10 +545,10 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(state.trigger_line, min(state.touch_open, state.touch_close))
         self.assertEqual(state.trigger_line, 99.2)
 
-    def test_second_break_uses_touch_open_close_low_not_touch_open_only(self):
+    def test_second_break_uses_close_below_ma20_not_touch_open_close_low(self):
         self.setup_to_rebound()
 
-        no_signal = self.strategy.on_bar(state_bar_req(idx=24, open_=99.35, high=99.5, low=99.25, close=99.3))
+        no_signal = self.strategy.on_bar(state_bar_req(idx=24, open_=100.15, high=100.3, low=99.0, close=100.12))
         self.assertTrue(no_signal["no_signal"])
         self.assertEqual(self.state().state, REBOUND_TO_HIGH)
 
@@ -552,9 +556,11 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertFalse(signal.get("no_signal", False))
         self.assertEqual(signal["target_position"], -1)
         self.assertEqual(signal["trace"]["step_key"], SECOND_BREAK_SIGNAL)
-        self.assertEqual(self.state().state, SECOND_BREAK_SIGNAL)
+        self.assertEqual(signal["metrics"]["entry_price"], 99.2)
+        self.assertEqual(self.state().signal_entry, 99.2)
+        self.assertEqual(self.state().state, LOSS_HOLDING)
 
-    def test_entry_confirmation_enters_profit_or_loss_holding(self):
+    def test_holding_switches_between_profit_and_loss(self):
         self.setup_to_rebound()
         self.signal_short()
 
@@ -563,7 +569,7 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(profit["trace"]["step_key"], PROFIT_HOLDING)
         self.assertEqual(self.state().state, PROFIT_HOLDING)
 
-        loss = self.strategy.on_bar(state_bar_req(idx=26, open_=98.9, high=99.15, low=98.8, close=99.05))
+        loss = self.strategy.on_bar(state_bar_req(idx=26, open_=98.9, high=99.3, low=98.8, close=99.25))
         self.assertTrue(loss["no_signal"])
         self.assertEqual(loss["trace"]["step_key"], LOSS_HOLDING)
         self.assertEqual(self.state().state, LOSS_HOLDING)
@@ -571,28 +577,30 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
     def test_stop_loss_outputs_terminal_trace_and_resets(self):
         self.setup_to_rebound()
         self.signal_short()
-        self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=99.1, low=98.9, close=99.0))
 
-        result = self.strategy.on_bar(state_bar_req(idx=26, open_=99.0, high=100.0, low=98.9, close=99.6))
+        result = self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=100.0, low=98.9, close=99.6))
 
-        self.assertTrue(result["no_signal"])
+        self.assertFalse(result.get("no_signal", False))
+        self.assertEqual(result["target_position"], 0)
         self.assertEqual(result["trace"]["step_key"], STOP_LOSS)
+        self.assertEqual(result["trace"]["step_index"], 8)
         self.assertEqual(result["metrics"]["signal_result"], "failure")
-        self.assertEqual(self.state().state, ABOVE_MA20)
+        self.assertEqual(self.state().state, INIT)
 
     def test_take_profit_outputs_terminal_trace_and_resets(self):
         self.setup_to_rebound()
         self.signal_short()
         self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=99.1, low=98.0, close=98.4))
         self.strategy.on_bar(state_bar_req(idx=26, open_=98.4, high=100.2, low=98.2, close=98.8))
-        self.strategy.on_bar(state_bar_req(idx=27, open_=98.8, high=100.4, low=98.6, close=98.9))
 
-        result = self.strategy.on_bar(state_bar_req(idx=28, open_=98.9, high=100.5, low=98.7, close=98.95))
+        result = self.strategy.on_bar(state_bar_req(idx=27, open_=98.8, high=100.4, low=98.6, close=98.9))
 
-        self.assertTrue(result["no_signal"])
+        self.assertFalse(result.get("no_signal", False))
+        self.assertEqual(result["target_position"], 0)
         self.assertEqual(result["trace"]["step_key"], TAKE_PROFIT)
+        self.assertEqual(result["trace"]["step_index"], 8)
         self.assertEqual(result["metrics"]["signal_result"], "success")
-        self.assertEqual(self.state().state, ABOVE_MA20)
+        self.assertEqual(self.state().state, INIT)
 
 
 class StrategyServiceRegistryTest(unittest.TestCase):
