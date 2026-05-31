@@ -1585,6 +1585,59 @@ select {
   z-index: 5;
 }
 
+.macd-value-header {
+  position: absolute;
+  top: 5px;
+  left: 10px;
+  z-index: 16;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-width: calc(100% - 20px);
+  color: #dce7f5;
+  font-size: 12px;
+  line-height: 1.2;
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.theme-light .macd-value-header {
+  color: #223347;
+}
+
+.macd-value-header .macd-title {
+  color: #9cc20f;
+  font-weight: 600;
+}
+
+.macd-value-header .macd-dif-label {
+  color: #ff7043;
+  font-weight: 600;
+}
+
+.macd-value-header .macd-dea-label {
+  color: #42a5f5;
+  font-weight: 600;
+}
+
+.macd-value-header .up {
+  color: #e53935;
+}
+
+.macd-value-header .down {
+  color: #2e7d32;
+}
+
+.macd-value-header .flat {
+  color: #8ea5bf;
+}
+
+.theme-light .macd-value-header .flat {
+  color: #5c7897;
+}
+
 .candle-vline {
   position: absolute;
   top: 0;

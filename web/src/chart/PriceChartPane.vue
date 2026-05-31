@@ -81,6 +81,8 @@ const state = reactive({
   loadingMore: false,
   error: "",
   bars: [],
+  macdDif: [],
+  macdDea: [],
   macdHist: [],
   channelSegments: [],
   channelAutoCandidates: [],
@@ -920,6 +922,8 @@ function renderDerivedSeries(bars, options = {}) {
   const ma20Data = buildMAData(normalizedBars, 20);
   const ma60Data = buildMAData(normalizedBars, 60);
   const m = calcMACD(normalizedBars);
+  state.macdDif = m.dif;
+  state.macdDea = m.dea;
   state.macdHist = m.hist;
   try {
     seriesRefs.ma20.setData(ma20Data);
@@ -1664,6 +1668,8 @@ async function loadChunkWindow(endParam) {
   state.loading = true;
   state.error = "";
   state.bars = [];
+  state.macdDif = [];
+  state.macdDea = [];
   state.macdHist = [];
   state.hasMore = true;
   renderSeries();
@@ -3949,6 +3955,19 @@ const quoteMovingAverages = computed(() => {
   };
 });
 
+const quoteMacd = computed(() => {
+  const idx = selectedBarIndex.value;
+  const dif = idx >= 0 ? Number(state.macdDif[idx]?.value) : Number.NaN;
+  const dea = idx >= 0 ? Number(state.macdDea[idx]?.value) : Number.NaN;
+  const hist = idx >= 0 ? Number(state.macdHist[idx]?.value) : Number.NaN;
+  return {
+    dif: Number.isFinite(dif) ? formatAxisValue("macd", dif) : "--",
+    dea: Number.isFinite(dea) ? formatAxisValue("macd", dea) : "--",
+    hist: Number.isFinite(hist) ? formatAxisValue("macd", hist) : "--",
+    histClass: !Number.isFinite(hist) ? "flat" : hist > 0 ? "up" : hist < 0 ? "down" : "flat",
+  };
+});
+
 const quoteHeader = computed(() => {
   const bar = selectedBar.value;
   const prev = selectedPrevBar.value;
@@ -3968,13 +3987,7 @@ const quoteHeader = computed(() => {
     ? "down"
     : "flat";
   return {
-    symbol:
-      state.resolvedSymbol ||
-      String(props.scope?.symbol || "")
-        .trim()
-        .toLowerCase() ||
-      "--",
-    timeframe: props.scope?.timeframe || "--",
+    dt: bar ? fmtTime(getAdjustedTime(bar)) : "--",
     open: bar ? formatPrice(bar.open) : "--",
     high: bar ? formatPrice(bar.high) : "--",
     low: bar ? formatPrice(bar.low) : "--",
@@ -4501,10 +4514,8 @@ onUnmounted(() => {
         </div>
         <div class="tv-quote-header">
           <div class="tv-quote-row">
-            <span class="dim">Symbol</span>
-            <span>{{ quoteHeader.symbol }}</span>
-            <span class="dim">TF</span>
-            <span>{{ quoteHeader.timeframe }}</span>
+            <span class="dim">DT</span>
+            <span>{{ quoteHeader.dt }}</span>
             <span class="dim">Open</span>
             <span>{{ quoteHeader.open }}</span>
             <span class="dim">High</span>
@@ -4794,6 +4805,14 @@ onUnmounted(() => {
         >
           {{ formatAxisValue("macd", rightValueOverlay.macdValue) }}
         </div>
+      </div>
+      <div class="macd-value-header">
+        <span class="macd-title">MACD(12,26,9)</span>
+        <span class="macd-dif-label">DIFF</span>
+        <span>{{ quoteMacd.dif }}</span>
+        <span class="macd-dea-label">DEA</span>
+        <span>{{ quoteMacd.dea }}</span>
+        <span :class="quoteMacd.histClass">{{ quoteMacd.hist }}</span>
       </div>
       <div class="macd-stem-layer">
         <svg :width="macdRef?.clientWidth || 0" :height="macdRef?.clientHeight || 0">
