@@ -35,6 +35,7 @@ from strategy_types import (
     RuntimeKey,
     StrategyDefinition,
 )
+from zigzag_atr_indicator import ATRZigZagIndicatorStrategy
 
 
 def _builtin_strategies() -> tuple[Strategy, ...]:
@@ -50,6 +51,7 @@ def _builtin_strategies() -> tuple[Strategy, ...]:
         # MA20WeakPullbackShortStrategy(),
         MA20WeakPullbackBaselineStrategy(),
         MA20StateDiagramShortStrategy(),
+        ATRZigZagIndicatorStrategy(),
         # MA20WeakPullbackHardFilterStrategy(),
         # MA20WeakPullbackScoreFilterStrategy(),
     )
@@ -76,6 +78,8 @@ def _clone_strategy_template(strategy: Strategy) -> Strategy:
     if isinstance(strategy, MA20WeakPullbackShortStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, MA20StateDiagramShortStrategy):
+        return strategy.__class__(definition=definition)
+    if isinstance(strategy, ATRZigZagIndicatorStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, SampleMomentumStrategy):
         return SampleMomentumStrategy()

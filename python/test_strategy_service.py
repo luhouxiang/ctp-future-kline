@@ -518,7 +518,28 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         return self.strategy.on_bar(state_bar_req(idx=23, open_=99.6, high=100.3, low=99.1, close=99.2))
 
     def signal_short(self, idx=24):
-        return self.strategy.on_bar(state_bar_req(idx=idx, open_=99.3, high=99.4, low=99.15, close=99.2))
+        return self.strategy.on_bar(state_bar_req(idx=idx, open_=99.3, high=99.6, low=98.0, close=99.2))
+
+    def prime_holding_state(self, closes, trs=None, entry=200.0, state_name=PROFIT_HOLDING, touched_ma20=True):
+        state = self.state()
+        state.state = state_name
+        state.closes = [float(v) for v in closes]
+        state.trs = [float(v) for v in (trs or [2.0] * len(closes))]
+        state.prev_close = state.closes[-1]
+        state.signal_entry = entry
+        state.signal_trigger_price = entry
+        state.signal_atr = 2.0
+        state.signal_adverse_target = entry + 2.0
+        state.signal_lowest_low = min(state.closes[-20:])
+        state.signal_prev_low = state.signal_lowest_low
+        state.signal_ma20_touched = touched_ma20
+
+    def test_required_warmup_collects_ma60_and_atr26(self):
+        target = self.strategy.required_warmup_bars({
+            "params": {"ma_period": 20, "ma60_period": 60, "take_profit_atr_period": 26, "warmup_target": 20}
+        })
+
+        self.assertEqual(target, 60)
 
     def test_init_waits_below_ma20_then_enters_above(self):
         self.warmup_flat()
@@ -578,7 +599,8 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.setup_to_rebound()
         self.signal_short()
 
-        result = self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=100.0, low=98.9, close=99.6))
+        self.strategy.on_bar(state_bar_req(idx=25, open_=100.1, high=100.4, low=98.9, close=100.2))
+        result = self.strategy.on_bar(state_bar_req(idx=26, open_=100.2, high=100.5, low=99.8, close=100.3))
 
         self.assertFalse(result.get("no_signal", False))
         self.assertEqual(result["target_position"], 0)
@@ -587,13 +609,49 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(result["metrics"]["signal_result"], "failure")
         self.assertEqual(self.state().state, INIT)
 
-    def test_take_profit_outputs_terminal_trace_and_resets(self):
+    def test_single_ma20_reclaim_bar_does_not_stop_loss(self):
         self.setup_to_rebound()
         self.signal_short()
-        self.strategy.on_bar(state_bar_req(idx=25, open_=99.0, high=99.1, low=98.0, close=98.4))
-        self.strategy.on_bar(state_bar_req(idx=26, open_=98.4, high=100.2, low=98.2, close=98.8))
 
-        result = self.strategy.on_bar(state_bar_req(idx=27, open_=98.8, high=100.4, low=98.6, close=98.9))
+        held = self.strategy.on_bar(state_bar_req(idx=25, open_=100.1, high=100.4, low=98.9, close=100.2))
+
+        self.assertTrue(held["no_signal"])
+        self.assertEqual(held["trace"]["step_key"], LOSS_HOLDING)
+        self.assertEqual(self.state().state, LOSS_HOLDING)
+        self.assertEqual(self.state().reclaim_above_bars, 1)
+
+        stopped = self.strategy.on_bar(state_bar_req(idx=26, open_=100.2, high=100.5, low=99.8, close=100.3))
+        self.assertFalse(stopped.get("no_signal", False))
+        self.assertEqual(stopped["target_position"], 0)
+        self.assertEqual(stopped["trace"]["step_key"], STOP_LOSS)
+        self.assertEqual(self.state().state, INIT)
+
+    def test_bearish_ma60_guard_ignores_all_stop_loss_conditions(self):
+        state = self.state()
+        state.state = LOSS_HOLDING
+        state.closes = [float(v) for v in range(200, 130, -1)]
+        state.trs = [1.0] * 70
+        state.prev_close = state.closes[-1]
+        state.signal_entry = 140.0
+        state.signal_trigger_price = 140.0
+        state.signal_atr = 1.0
+        state.signal_adverse_target = 140.8
+        state.signal_lowest_low = 130.0
+        state.signal_prev_low = 130.0
+        state.signal_no_new_low_bars = 2
+        state.touch_high = 143.0
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=145.0, high=146.0, low=144.0, close=145.0))
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], LOSS_HOLDING)
+        self.assertEqual(out["trace"]["checks"][0]["name"], "空头排列且K线低于MA60，忽略止损")
+        self.assertEqual(self.state().state, LOSS_HOLDING)
+
+    def test_take_profit_outputs_terminal_trace_and_resets(self):
+        self.prime_holding_state([200.0] * 70, [2.0] * 70, entry=205.0)
+
+        result = self.strategy.on_bar(state_bar_req(idx=21, open_=200.0, high=202.0, low=199.0, close=201.0))
 
         self.assertFalse(result.get("no_signal", False))
         self.assertEqual(result["target_position"], 0)
@@ -601,6 +659,42 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(result["trace"]["step_index"], 8)
         self.assertEqual(result["metrics"]["signal_result"], "success")
         self.assertEqual(self.state().state, INIT)
+
+    def test_profit_touch_ma60_intrabar_without_close_above_uses_below_ma60_rules(self):
+        self.prime_holding_state([130.0] * 40 + [100.0] * 30, [10.0] * 70, entry=140.0)
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=104.0, high=120.0, low=103.0, close=105.0))
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], PROFIT_HOLDING)
+        self.assertEqual(out["trace"]["checks"][0]["name"], "MA60下站上MA20但距离小于ATR26，不止盈")
+
+    def test_profit_without_ma20_touch_does_not_take_profit(self):
+        self.prime_holding_state([200.0] * 70, [2.0] * 70, entry=205.0, touched_ma20=False)
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=198.0, high=199.0, low=197.0, close=198.0))
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], PROFIT_HOLDING)
+        self.assertEqual(out["trace"]["checks"][0]["name"], "当前持仓盈利，等待触碰MA20")
+
+    def test_profit_below_ma60_small_ma20_distance_does_not_take_profit(self):
+        self.prime_holding_state([130.0] * 40 + [100.0] * 30, [10.0] * 70, entry=130.0)
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=104.0, high=110.0, low=103.0, close=105.0))
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], PROFIT_HOLDING)
+        self.assertEqual(out["trace"]["checks"][0]["name"], "MA60下站上MA20但距离小于ATR26，不止盈")
+
+    def test_profit_below_ma60_dual_down_slopes_does_not_take_profit(self):
+        self.prime_holding_state(list(range(200, 130, -1)), [2.0] * 70, entry=180.0)
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=145.0, high=150.0, low=144.0, close=145.0))
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], PROFIT_HOLDING)
+        self.assertEqual(out["trace"]["checks"][0]["name"], "MA60下反弹达ATR但MA20/MA60斜率均向下，不止盈")
 
 
 class StrategyServiceRegistryTest(unittest.TestCase):

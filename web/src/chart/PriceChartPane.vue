@@ -3205,6 +3205,60 @@ const reversalOverlayData = computed(() => {
   return { lines: outLines, events: outEvents };
 });
 
+const zigzagOverlayData = computed(() => {
+  void viewVersion.value;
+  if (!props.replayKlineMode || !seriesRefs.candle) return [];
+  const bars = Array.isArray(state.bars) ? state.bars : [];
+  if (bars.length < 2) return [];
+  const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
+  const seen = new Set();
+  return (Array.isArray(props.strategyTraces) ? props.strategyTraces : [])
+    .filter((row) => {
+      if (String(row?.strategy_id || "") !== "indicator.zigzag_atr26") return false;
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+      const key = String(row?.step_key || "");
+      return key === "ZIGZAG_PEAK" || key === "ZIGZAG_TROUGH";
+    })
+    .slice()
+    .sort((a, b) => strategyTraceTime(a) - strategyTraceTime(b))
+    .map((row, idx) => {
+      const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+      const typ = String(metrics.zigzag_type || (String(row?.step_key || "").includes("PEAK") ? "PEAK" : "TROUGH")).trim().toUpperCase();
+      if (typ !== "PEAK" && typ !== "TROUGH") return null;
+      const t = parseStrategyMetricTime(metrics.pivot_time) || strategyTraceTime(row);
+      if (!Number.isFinite(t) || t <= 0) return null;
+      const dedupeKey = `${typ}-${t}`;
+      if (seen.has(dedupeKey)) return null;
+      seen.add(dedupeKey);
+      const bar = findNearestBarByDisplayTime(t);
+      const barIndex = bar ? bars.findIndex((item) => Number(getDisplayTime(item)) === Number(getDisplayTime(bar))) : -1;
+      const x = mapTimeToXWithFallback(t);
+      const price = Number(metrics.pivot_price ?? (typ === "PEAK" ? bar?.high : bar?.low));
+      const y = Number(seriesRefs.candle.priceToCoordinate(price));
+      if (x === null || !Number.isFinite(y)) return null;
+      const leftX = barIndex > 0 ? mapTimeToXWithFallback(getDisplayTime(bars[barIndex - 1])) : null;
+      const rightX = barIndex >= 0 && barIndex + 1 < bars.length ? mapTimeToXWithFallback(getDisplayTime(bars[barIndex + 1])) : null;
+      let step = 10;
+      if (leftX !== null && Number.isFinite(leftX)) step = Math.max(4, Math.abs(x - leftX));
+      else if (rightX !== null && Number.isFinite(rightX)) step = Math.max(4, Math.abs(rightX - x));
+      const x0 = leftX !== null && Number.isFinite(leftX) ? leftX : x - step;
+      const x1 = rightX !== null && Number.isFinite(rightX) ? rightX : x + step;
+      const h = overlaySize.value?.height || candleRef.value?.clientHeight || 0;
+      const baseY = typ === "PEAK" ? Math.max(6, y - 8) : Math.min(Math.max(6, h - 6), y + 8);
+      const controlY = typ === "PEAK" ? Math.max(4, y - 22) : Math.min(Math.max(4, h - 4), y + 22);
+      return {
+        id: `zigzag-${typ}-${t}-${String(row?.trace_id || idx)}`,
+        type: typ.toLowerCase(),
+        d: `M ${x0} ${baseY} Q ${x} ${controlY} ${x1} ${baseY}`,
+      };
+    })
+    .filter((x) => !!x);
+});
+
 const strategyOverlayData = computed(() => {
   void viewVersion.value;
   if (!seriesRefs.candle) return [];
@@ -3441,6 +3495,8 @@ function buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, cur
         y: Math.max(7, Number.isFinite(highY) ? highY - 18 : exitY - 18),
         result: exit.result,
         pnl,
+        pnlLabel: formatStrategyPnlPoints(pnl),
+        profitable,
       });
     }
   }
@@ -3475,7 +3531,7 @@ function strategySignalResultKind(row) {
 
 function isStrategyResultTrace(row) {
   const key = String(row?.step_key || "").trim();
-  if (key !== "SIGNAL_RESULT") return false;
+  if (key !== "SIGNAL_RESULT" && key !== "TAKE_PROFIT" && key !== "STOP_LOSS") return false;
   const result = strategyResultKind(row);
   return result === "success" || result === "failure" || result === "unresolved";
 }
@@ -3535,6 +3591,16 @@ function strategyTraceTime(row) {
   return Number(row?.metrics?.adjusted_time || 0);
 }
 
+function parseStrategyMetricTime(value) {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  const text = String(value || "").trim();
+  if (!text) return 0;
+  const numeric = Number(text);
+  if (Number.isFinite(numeric)) return numeric;
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) ? Math.floor(parsed / 1000) : 0;
+}
+
 function findNearestBarByDisplayTime(time) {
   const ts = Number(time || 0);
   if (!Number.isFinite(ts) || ts <= 0) return null;
@@ -3579,6 +3645,8 @@ function strategyTraceKind(row) {
   const status = String(row?.status || "");
   const reason = String(row?.reason || "");
   if (key === "SHORT_SIGNAL" || key === "DONE" || key === "signal") return "short";
+  if (key === "TAKE_PROFIT") return "success";
+  if (key === "STOP_LOSS") return "blocked";
   if (key === "SIGNAL_RESULT" && status === "passed") return "success";
   if (key === "SIGNAL_RESULT" || status === "failed" || reason.includes("BULLISH") || reason.includes("strong uptrend")) return "blocked";
   if (key === "WAIT_PULLBACK_TOUCH_MA20" || key === "WAIT_BREAK_TOUCH_OPEN") return "touch";
@@ -3586,18 +3654,22 @@ function strategyTraceKind(row) {
   return "setup";
 }
 
+function formatStrategyPnlPoints(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "";
+  const abs = Math.abs(n);
+  const decimals = abs >= 100 ? 0 : abs >= 10 ? 1 : 2;
+  const fixed = n.toFixed(decimals).replace(/\.?0+$/, "");
+  return n > 0 ? `+${fixed}` : fixed;
+}
+
 function strategyTraceLabel(row, kind) {
   if (kind === "short") return "SHORT";
   if (kind === "success") return "OK";
   if (kind === "blocked") return "X";
-  const stepIndex = Number(row?.step_index || 0);
-  const stepTotal = Number(row?.step_total || 0);
-  if (Number.isFinite(stepIndex) && stepIndex > 0 && Number.isFinite(stepTotal) && stepTotal > 0) {
-    return `${stepIndex}/${stepTotal}`;
-  }
   if (kind === "touch") return "T";
   if (kind === "filter") return "F";
-  return "B";
+  return "";
 }
 
 const reversalDebugRows = computed(() => {
@@ -4680,6 +4752,16 @@ onUnmounted(() => {
             </template>
           </svg>
         </div>
+        <div class="zigzag-overlay-layer">
+          <svg :width="overlaySize.width" :height="overlaySize.height">
+            <path
+              v-for="item in zigzagOverlayData"
+              :key="item.id"
+              :class="['zigzag-arc', item.type]"
+              :d="item.d"
+            />
+          </svg>
+        </div>
         <div class="strategy-overlay-layer">
           <svg :width="overlaySize.width" :height="overlaySize.height">
             <template v-for="item in strategyOverlayData" :key="item.id">
@@ -4691,19 +4773,31 @@ onUnmounted(() => {
                 :width="item.width"
                 :height="item.height"
               />
-              <circle
+              <g
                 v-else-if="item.shape === 'exit-circle'"
-                class="strategy-exit-circle"
-                :cx="item.x"
-                :cy="item.y"
-                r="5"
-              />
+                class="strategy-exit-marker"
+              >
+                <circle
+                  :class="['strategy-exit-circle', item.profitable ? 'profit' : 'loss']"
+                  :cx="item.x"
+                  :cy="item.y"
+                  r="5"
+                />
+                <text
+                  v-if="item.pnlLabel"
+                  :class="['strategy-exit-label', item.profitable ? 'profit' : 'loss']"
+                  :x="item.x + 7"
+                  :y="item.y - 7"
+                >
+                  {{ item.pnlLabel }}
+                </text>
+              </g>
               <g v-else-if="item.shape === 'entry-arrow'" class="strategy-entry-arrow">
                 <path :d="`M ${item.x} ${item.y + 16} L ${item.x - 6} ${item.y + 6} L ${item.x - 2.5} ${item.y + 6} L ${item.x - 2.5} ${item.y} L ${item.x + 2.5} ${item.y} L ${item.x + 2.5} ${item.y + 6} L ${item.x + 6} ${item.y + 6} Z`" />
               </g>
               <template v-else>
                 <circle :class="['strategy-marker-dot', item.kind]" :cx="item.x" :cy="item.y" r="4.5" />
-                <text :class="['strategy-marker-label', item.kind]" :x="item.x + 6" :y="item.y - 6">{{ item.label }}</text>
+                <text v-if="item.label" :class="['strategy-marker-label', item.kind]" :x="item.x + 6" :y="item.y - 6">{{ item.label }}</text>
               </template>
             </template>
           </svg>
@@ -5150,6 +5244,31 @@ onUnmounted(() => {
   z-index: 7;
 }
 
+.zigzag-overlay-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 6;
+}
+
+.zigzag-arc {
+  fill: none;
+  stroke-width: 2.2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  paint-order: stroke;
+  stroke: #ef4444;
+  filter: drop-shadow(0 0 2px rgba(11, 19, 32, 0.72));
+}
+
+.zigzag-arc.peak {
+  stroke: #ef4444;
+}
+
+.zigzag-arc.trough {
+  stroke: #22c55e;
+}
+
 .strategy-marker-dot {
   stroke: #0b1320;
   stroke-width: 1.5;
@@ -5180,23 +5299,50 @@ onUnmounted(() => {
 }
 
 .strategy-trade-shade {
-  stroke: rgba(148, 163, 184, 0.78);
+  stroke: rgba(148, 163, 184, 0.84);
   stroke-width: 1.2;
   pointer-events: none;
 }
 
 .strategy-trade-shade.profit {
-  fill: rgba(248, 113, 113, 0.32);
+  fill: rgba(239, 68, 68, 0.42);
+  stroke: rgba(248, 113, 113, 0.9);
 }
 
 .strategy-trade-shade.loss {
-  fill: rgba(96, 165, 250, 0.32);
+  fill: rgba(34, 197, 94, 0.36);
+  stroke: rgba(74, 222, 128, 0.88);
 }
 
 .strategy-exit-circle {
   fill: #22d3ee;
   stroke: #0b1320;
   stroke-width: 1.4;
+}
+
+.strategy-exit-circle.profit {
+  fill: #ef4444;
+}
+
+.strategy-exit-circle.loss {
+  fill: #22c55e;
+}
+
+.strategy-exit-label {
+  font-size: 11px;
+  font-weight: 800;
+  fill: #f8fafc;
+  paint-order: stroke;
+  stroke: rgba(11, 19, 32, 0.94);
+  stroke-width: 2.5px;
+}
+
+.strategy-exit-label.profit {
+  fill: #fecaca;
+}
+
+.strategy-exit-label.loss {
+  fill: #bbf7d0;
 }
 
 .strategy-entry-arrow path {
