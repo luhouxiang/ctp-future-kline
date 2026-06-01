@@ -31,11 +31,22 @@ type strategyServiceProcessInfo struct {
 }
 
 const minRuntimeStartTimeout = 30 * time.Second
+const zigzagATR26FeatureID = "zigzag_atr26"
+
+type strategyFeatureKey struct {
+	Mode      string
+	Symbol    string
+	Timeframe string
+	Indicator string
+}
 
 type Manager struct {
 	cfg   config.StrategyConfig
 	store *Store
 	exec  *ExecutionEngine
+
+	featureMu sync.RWMutex
+	features  map[strategyFeatureKey][]map[string]any
 
 	mu          sync.RWMutex
 	restoreMu   sync.Mutex
@@ -72,6 +83,7 @@ func NewManager(cfg config.StrategyConfig, dsn string, registry *queuewatch.Regi
 		cfg:       cfg,
 		store:     store,
 		exec:      NewExecutionEngine(),
+		features:  make(map[strategyFeatureKey][]map[string]any),
 		events:    make(map[chan EventEnvelope]struct{}),
 		instances: make(map[string]StrategyInstance),
 		reports:   make(map[string]*ReplayReport),
@@ -1346,18 +1358,29 @@ func (m *Manager) handleBar(ev BarEvent, mode string) {
 	// 	"mode", mode,
 	// 	"event_time", strategyBarEventTime(ev),
 	// )
-	m.forEachMatchingInstance(ev.InstrumentID, ev.Period, mode, func(inst StrategyInstance) {
+	indicators, trading := splitMatchingInstances(m.matchingInstances(ev.InstrumentID, ev.Period, mode))
+	for _, inst := range indicators {
 		m.callDecision(inst, ev.InstrumentID, mode, ev.ReplayTaskID, strategyBarEventTime(ev), nil, &ev)
-	})
+	}
+	for _, inst := range trading {
+		m.callDecision(inst, ev.InstrumentID, mode, ev.ReplayTaskID, strategyBarEventTime(ev), nil, &ev)
+	}
 }
 
 func (m *Manager) forEachMatchingInstance(symbol string, timeframe string, mode string, fn func(StrategyInstance)) {
+	for _, item := range m.matchingInstances(symbol, timeframe, mode) {
+		fn(item)
+	}
+}
+
+func (m *Manager) matchingInstances(symbol string, timeframe string, mode string) []StrategyInstance {
 	m.mu.RLock()
 	items := make([]StrategyInstance, 0, len(m.instances))
 	for _, item := range m.instances {
 		items = append(items, item)
 	}
 	m.mu.RUnlock()
+	out := make([]StrategyInstance, 0, len(items))
 	for _, item := range items {
 		if item.Status != InstanceStatusRunning {
 			continue
@@ -1371,8 +1394,26 @@ func (m *Manager) forEachMatchingInstance(symbol string, timeframe string, mode 
 		if len(item.Symbols) > 0 && !containsFold(item.Symbols, symbol) {
 			continue
 		}
-		fn(item)
+		out = append(out, item)
 	}
+	return out
+}
+
+func splitMatchingInstances(items []StrategyInstance) ([]StrategyInstance, []StrategyInstance) {
+	indicators := make([]StrategyInstance, 0, len(items))
+	trading := make([]StrategyInstance, 0, len(items))
+	for _, item := range items {
+		if isIndicatorStrategyID(item.StrategyID) {
+			indicators = append(indicators, item)
+			continue
+		}
+		trading = append(trading, item)
+	}
+	return indicators, trading
+}
+
+func isIndicatorStrategyID(strategyID string) bool {
+	return strings.HasPrefix(strings.ToLower(strings.TrimSpace(strategyID)), "indicator.")
 }
 
 func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string, replayTaskID string, eventTime time.Time, tick *TickEvent, bar *BarEvent) {
@@ -1393,6 +1434,7 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		Mode:            mode,
 		CurrentPosition: m.exec.CurrentPosition(symbol),
 		Account:         map[string]any{"account_id": inst.AccountID},
+		Features:        m.featuresFor(inst, symbol, mode),
 		Tick:            tick,
 		Bar:             bar,
 	}
@@ -1427,7 +1469,9 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		return
 	}
 	if decision.Trace != nil {
-		m.persistTrace(inst, symbol, mode, eventTime, *decision.Trace)
+		trace := normalizeStrategyTrace(inst, symbol, mode, eventTime, *decision.Trace)
+		m.persistTrace(inst, symbol, mode, eventTime, trace)
+		m.updateFeatureCacheFromTrace(trace)
 	}
 	if decision.NoSignal {
 		if decision.Trace != nil {
@@ -1438,12 +1482,138 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 	m.persistDecision(inst, symbol, mode, replayTaskID, eventTime, decision)
 }
 
+func featureKey(mode string, symbol string, timeframe string, indicator string) strategyFeatureKey {
+	return strategyFeatureKey{
+		Mode:      strings.ToLower(strings.TrimSpace(mode)),
+		Symbol:    strings.ToLower(strings.TrimSpace(symbol)),
+		Timeframe: strings.ToLower(strings.TrimSpace(timeframe)),
+		Indicator: strings.ToLower(strings.TrimSpace(indicator)),
+	}
+}
+
+func (m *Manager) updateFeatureCacheFromTrace(trace StrategyTraceRecord) {
+	if m == nil || !isIndicatorStrategyID(trace.StrategyID) || trace.Metrics == nil {
+		return
+	}
+	indicator := strings.ToLower(strings.TrimSpace(fmt.Sprint(trace.Metrics["indicator"])))
+	if indicator != zigzagATR26FeatureID {
+		return
+	}
+	typ := strings.ToUpper(strings.TrimSpace(fmt.Sprint(trace.Metrics["zigzag_type"])))
+	if typ != "PEAK" {
+		return
+	}
+	pivotIndex, ok := metricInt(trace.Metrics["pivot_index"])
+	if !ok {
+		return
+	}
+	confirmedTime := strings.TrimSpace(fmt.Sprint(trace.Metrics["confirmed_time"]))
+	if confirmedTime == "" || confirmedTime == "<nil>" {
+		confirmedTime = trace.EventTime.Format(time.RFC3339Nano)
+	}
+	pivot := map[string]any{
+		"pivot_index":    pivotIndex,
+		"pivot_time":     trace.Metrics["pivot_time"],
+		"pivot_price":    trace.Metrics["pivot_price"],
+		"confirmed_time": confirmedTime,
+	}
+	if confirmedIndex, ok := metricInt(trace.Metrics["confirmed_index"]); ok {
+		pivot["confirmed_index"] = confirmedIndex
+	}
+	key := featureKey(trace.Mode, trace.Symbol, trace.Timeframe, indicator)
+	m.featureMu.Lock()
+	if m.features == nil {
+		m.features = make(map[strategyFeatureKey][]map[string]any)
+	}
+	items := append(m.features[key], pivot)
+	const keep = 64
+	if len(items) > keep {
+		items = items[len(items)-keep:]
+	}
+	m.features[key] = items
+	m.featureMu.Unlock()
+}
+
+func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string) map[string]any {
+	if m == nil {
+		return nil
+	}
+	key := featureKey(mode, symbol, inst.Timeframe, zigzagATR26FeatureID)
+	m.featureMu.RLock()
+	items := m.features[key]
+	m.featureMu.RUnlock()
+	if len(items) == 0 {
+		return nil
+	}
+	limit := 3
+	if len(items) < limit {
+		limit = len(items)
+	}
+	peaks := make([]map[string]any, 0, limit)
+	for i := len(items) - 1; i >= 0 && len(peaks) < limit; i-- {
+		item := make(map[string]any, len(items[i]))
+		for k, v := range items[i] {
+			item[k] = v
+		}
+		peaks = append(peaks, item)
+	}
+	return map[string]any{
+		zigzagATR26FeatureID: map[string]any{
+			"peaks": peaks,
+		},
+	}
+}
+
+func metricInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, true
+	case int64:
+		return int(v), true
+	case int32:
+		return int(v), true
+	case float64:
+		return int(v), true
+	case float32:
+		return int(v), true
+	case json.Number:
+		i, err := v.Int64()
+		if err == nil {
+			return int(i), true
+		}
+		f, err := v.Float64()
+		if err == nil {
+			return int(f), true
+		}
+	case string:
+		i, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return i, true
+		}
+	}
+	return 0, false
+}
+
 func (m *Manager) persistTrace(inst StrategyInstance, symbol string, mode string, eventTime time.Time, trace StrategyTraceRecord) {
+	if m == nil || m.store == nil {
+		return
+	}
+	trace = normalizeStrategyTrace(inst, symbol, mode, eventTime, trace)
+	if !isPersistableTraceEventType(trace.EventType) {
+		return
+	}
+	id, err := m.store.AppendTrace(trace)
+	if err != nil {
+		m.setError(err)
+		return
+	}
+	trace.TraceID = id
+	m.broadcast("strategy_trace_update", trace)
+}
+
+func normalizeStrategyTrace(inst StrategyInstance, symbol string, mode string, eventTime time.Time, trace StrategyTraceRecord) StrategyTraceRecord {
 	if strings.TrimSpace(trace.EventType) == "" {
 		trace.EventType = "bar"
-	}
-	if trace.EventType != "bar" && trace.EventType != "key_tick" && trace.EventType != "signal" && trace.EventType != "order_plan" && trace.EventType != "order_result" {
-		return
 	}
 	trace.InstanceID = firstNonEmpty(trace.InstanceID, inst.InstanceID)
 	trace.StrategyID = firstNonEmpty(trace.StrategyID, inst.StrategyID)
@@ -1462,13 +1632,16 @@ func (m *Manager) persistTrace(inst StrategyInstance, symbol string, mode string
 	if trace.SignalPreview == nil {
 		trace.SignalPreview = map[string]any{}
 	}
-	id, err := m.store.AppendTrace(trace)
-	if err != nil {
-		m.setError(err)
-		return
+	return trace
+}
+
+func isPersistableTraceEventType(eventType string) bool {
+	switch strings.TrimSpace(eventType) {
+	case "bar", "key_tick", "signal", "order_plan", "order_result":
+		return true
+	default:
+		return false
 	}
-	trace.TraceID = id
-	m.broadcast("strategy_trace_update", trace)
 }
 
 func (m *Manager) persistSignalResultPoint(inst StrategyInstance, symbol string, mode string, eventTime time.Time, trace StrategyTraceRecord) {

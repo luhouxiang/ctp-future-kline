@@ -72,6 +72,8 @@ type DecisionRequest struct {
 	CurrentPosition float64 `json:"current_position"`
 	// Account 是账户快照扩展信息。
 	Account map[string]any `json:"account"`
+	// Features 是由其它独立指标策略发布、Go 侧按 symbol/timeframe/mode 注入的只读快照。
+	Features map[string]any `json:"features,omitempty"`
 	// Tick 是 tick 驱动决策时附带的 tick 数据。
 	Tick *TickEvent `json:"tick,omitempty"`
 	// Bar 是 bar 驱动决策时附带的 bar 数据。

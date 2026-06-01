@@ -146,7 +146,7 @@ def weak_warmup_bars(symbol="yl9", count=145, close=100):
     return bars
 
 
-def state_bar_req(instance_id="state-1", symbol="rb2601", open_=100, high=100, low=100, close=100, idx=1, params=None):
+def state_bar_req(instance_id="state-1", symbol="rb2601", open_=100, high=100, low=100, close=100, idx=1, params=None, features=None):
     ts = f"2026-01-02T09:{idx:02d}:00+08:00"
     return {
         "instance": {
@@ -157,6 +157,7 @@ def state_bar_req(instance_id="state-1", symbol="rb2601", open_=100, high=100, l
         "symbol": symbol,
         "event_time": ts,
         "current_position": 0,
+        "features": features or {},
         "bar": {
             "adjusted_time": ts,
             "data_time": ts,
@@ -695,6 +696,47 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertTrue(out["no_signal"])
         self.assertEqual(out["trace"]["step_key"], PROFIT_HOLDING)
         self.assertEqual(out["trace"]["checks"][0]["name"], "MA60下反弹达ATR但MA20/MA60斜率均向下，不止盈")
+
+    def test_zigzag_features_are_optional_metrics_enrichment(self):
+        self.warmup_flat()
+        features = {
+            "zigzag_atr26": {
+                "peaks": [
+                    {
+                        "pivot_index": 18,
+                        "pivot_time": "2026-01-02T09:18:00+08:00",
+                        "pivot_price": 102.5,
+                        "confirmed_time": "2026-01-02T09:20:00+08:00",
+                        "confirmed_index": 20,
+                    },
+                    {
+                        "pivot_index": 10,
+                        "pivot_time": "2026-01-02T09:10:00+08:00",
+                        "pivot_price": 101.0,
+                        "confirmed_time": "2026-01-02T09:13:00+08:00",
+                        "confirmed_index": 13,
+                    },
+                ]
+            }
+        }
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=101, high=101.2, low=100.9, close=101, features=features))
+
+        metrics = out["trace"]["metrics"]
+        self.assertEqual(metrics["bar_index"], 20)
+        self.assertEqual(metrics["zigzag_peak_distances"], [2, 10])
+        self.assertEqual(metrics["zigzag_recent_peaks"][0]["pivot_price"], 102.5)
+        self.assertEqual(metrics["zigzag_recent_peaks"][0]["bars_from_peak"], 2)
+
+    def test_missing_zigzag_features_keep_original_flow(self):
+        self.warmup_flat()
+
+        out = self.strategy.on_bar(state_bar_req(idx=21, open_=101, high=101.2, low=100.9, close=101))
+
+        self.assertTrue(out["no_signal"])
+        self.assertEqual(out["trace"]["step_key"], ABOVE_MA20)
+        self.assertEqual(out["trace"]["metrics"]["zigzag_recent_peaks"], [])
+        self.assertEqual(out["trace"]["metrics"]["zigzag_peak_distances"], [])
 
 
 class StrategyServiceRegistryTest(unittest.TestCase):

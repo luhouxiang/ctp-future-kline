@@ -286,6 +286,7 @@ class ATRZigZagIndicatorStrategy(Strategy):
             "previous_pivot_index": previous_index,
             "pivot_bars_since_previous": bars_since_previous,
             "confirmed_time": confirmed["adjusted_time"],
+            "confirmed_index": confirmed["index"],
             "confirmed_high": confirmed["high"],
             "confirmed_low": confirmed["low"],
             "reversal_value": atr,

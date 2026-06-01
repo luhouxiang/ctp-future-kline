@@ -2,6 +2,10 @@ package strategy
 
 import (
 	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -124,6 +128,200 @@ func TestStrategyBarEventTimeDoesNotUseDataTimeFallback(t *testing.T) {
 	got := strategyBarEventTime(BarEvent{DataTime: dataTime})
 	if !got.IsZero() {
 		t.Fatalf("strategyBarEventTime() = %v, want zero when adjusted_time is missing", got)
+	}
+}
+
+func TestSplitMatchingInstancesRunsIndicatorsFirst(t *testing.T) {
+	items := []StrategyInstance{
+		{InstanceID: "trade-1", StrategyID: "ma20.state_diagram_short"},
+		{InstanceID: "indicator-1", StrategyID: "indicator.zigzag_atr26"},
+		{InstanceID: "trade-2", StrategyID: "ma20.weak_pullback_short.baseline"},
+	}
+
+	indicators, trading := splitMatchingInstances(items)
+
+	if len(indicators) != 1 || indicators[0].InstanceID != "indicator-1" {
+		t.Fatalf("indicators = %+v, want indicator-1 only", indicators)
+	}
+	if len(trading) != 2 || trading[0].InstanceID != "trade-1" || trading[1].InstanceID != "trade-2" {
+		t.Fatalf("trading = %+v, want non-indicators in original order", trading)
+	}
+}
+
+func TestZigZagFeatureCacheInjectsRecentPeaksByScope(t *testing.T) {
+	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
+	baseTrace := StrategyTraceRecord{
+		StrategyID: "indicator.zigzag_atr26",
+		Symbol:     "rb2601",
+		Timeframe:  "1m",
+		Mode:       RunTypeReplay,
+		EventTime:  time.Date(2026, 1, 2, 9, 40, 0, 0, time.Local),
+		Metrics: map[string]any{
+			"indicator":       "zigzag_atr26",
+			"zigzag_type":     "PEAK",
+			"pivot_index":     12,
+			"pivot_time":      "2026-01-02T09:32:00+08:00",
+			"pivot_price":     3520.5,
+			"confirmed_time":  "2026-01-02T09:40:00+08:00",
+			"confirmed_index": 20,
+		},
+	}
+	m.updateFeatureCacheFromTrace(baseTrace)
+	trough := baseTrace
+	trough.Metrics = map[string]any{"indicator": "zigzag_atr26", "zigzag_type": "TROUGH", "pivot_index": 15}
+	m.updateFeatureCacheFromTrace(trough)
+	otherMode := baseTrace
+	otherMode.Mode = RunTypeRealtime
+	otherMode.Metrics = map[string]any{"indicator": "zigzag_atr26", "zigzag_type": "PEAK", "pivot_index": 99}
+	m.updateFeatureCacheFromTrace(otherMode)
+
+	features := m.featuresFor(StrategyInstance{Timeframe: "1m"}, "rb2601", RunTypeReplay)
+	zigzag, ok := features[zigzagATR26FeatureID].(map[string]any)
+	if !ok {
+		t.Fatalf("features missing zigzag payload: %+v", features)
+	}
+	peaks, ok := zigzag["peaks"].([]map[string]any)
+	if !ok || len(peaks) != 1 {
+		t.Fatalf("peaks = %#v, want one replay peak", zigzag["peaks"])
+	}
+	if peaks[0]["pivot_index"] != 12 || peaks[0]["confirmed_index"] != 20 {
+		t.Fatalf("peak = %+v, want cached pivot and confirmed index", peaks[0])
+	}
+}
+
+func TestHandleBarRunsIndicatorBeforeTradingAndInjectsFeature(t *testing.T) {
+	type capturedRequest struct {
+		StrategyID string
+		Features   map[string]any
+	}
+	var captured []capturedRequest
+	results := make(map[string]SignalDecision)
+	nextPushID := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/runtime/result" {
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode result request: %v", err)
+			}
+			pushID := strings.TrimSpace(req["push_id"].(string))
+			result, ok := results[pushID]
+			if !ok {
+				t.Fatalf("missing result for push_id=%s", pushID)
+			}
+			raw, err := json.Marshal(result)
+			if err != nil {
+				t.Fatalf("marshal result: %v", err)
+			}
+			if err := json.NewEncoder(w).Encode(map[string]any{"status": "done", "result": json.RawMessage(raw)}); err != nil {
+				t.Fatalf("encode result response: %v", err)
+			}
+			return
+		}
+		var req DecisionRequest
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Fatalf("decode request: %v", err)
+		}
+		captured = append(captured, capturedRequest{StrategyID: req.Instance.StrategyID, Features: req.Features})
+		resp := SignalDecision{
+			NoSignal:       true,
+			InstanceID:     req.Instance.InstanceID,
+			Symbol:         req.Symbol,
+			EventTime:      req.EventTime,
+			TargetPosition: req.CurrentPosition,
+			Metrics:        map[string]any{},
+		}
+		if req.Instance.StrategyID == "indicator.zigzag_atr26" {
+			resp.Trace = &StrategyTraceRecord{
+				StrategyID: req.Instance.StrategyID,
+				Symbol:     req.Symbol,
+				Timeframe:  req.Instance.Timeframe,
+				Mode:       req.Mode,
+				EventType:  "bar",
+				EventTime:  time.Date(2026, 1, 2, 9, 35, 0, 0, time.Local),
+				StepKey:    "ZIGZAG_PEAK",
+				StepLabel:  "确认波峰",
+				StepIndex:  1,
+				StepTotal:  1,
+				Status:     "passed",
+				Metrics: map[string]any{
+					"indicator":       "zigzag_atr26",
+					"zigzag_type":     "PEAK",
+					"pivot_index":     7,
+					"pivot_time":      "2026-01-02T09:32:00+08:00",
+					"pivot_price":     3510.0,
+					"confirmed_time":  "2026-01-02T09:35:00+08:00",
+					"confirmed_index": 10,
+				},
+			}
+		}
+		nextPushID++
+		pushID := "push-" + strconv.Itoa(nextPushID)
+		results[pushID] = resp
+		if err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "push_id": pushID}); err != nil {
+			t.Fatalf("encode push response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	m := &Manager{
+		cfg:       config.StrategyConfig{RequestTimeoutMS: 3000},
+		exec:      NewExecutionEngine(),
+		client:    NewStrategyServiceClient(server.URL, server.Client()),
+		connReady: true,
+		features:  make(map[strategyFeatureKey][]map[string]any),
+		instances: map[string]StrategyInstance{
+			"trade-1": {
+				InstanceID: "trade-1",
+				StrategyID: "ma20.state_diagram_short",
+				Mode:       RunTypeRealtime,
+				Status:     InstanceStatusRunning,
+				Symbols:    []string{"rb2601"},
+				Timeframe:  "1m",
+				Params:     map[string]any{},
+			},
+			"indicator-1": {
+				InstanceID: "indicator-1",
+				StrategyID: "indicator.zigzag_atr26",
+				Mode:       RunTypeRealtime,
+				Status:     InstanceStatusRunning,
+				Symbols:    []string{"rb2601"},
+				Timeframe:  "1m",
+				Params:     map[string]any{},
+			},
+		},
+	}
+
+	m.HandleRealtimeBar(BarEvent{
+		InstrumentID: "rb2601",
+		AdjustedTime: time.Date(2026, 1, 2, 9, 35, 0, 0, time.Local),
+		Period:       "1m",
+		Open:         3500,
+		High:         3512,
+		Low:          3498,
+		Close:        3508,
+	})
+
+	if len(captured) != 2 {
+		t.Fatalf("captured requests = %d, want 2", len(captured))
+	}
+	if captured[0].StrategyID != "indicator.zigzag_atr26" || captured[1].StrategyID != "ma20.state_diagram_short" {
+		t.Fatalf("strategy call order = %+v, want indicator then trading", captured)
+	}
+	if captured[1].Features == nil {
+		t.Fatalf("trading request features nil, want zigzag peak")
+	}
+	zigzag, ok := captured[1].Features[zigzagATR26FeatureID].(map[string]any)
+	if !ok {
+		t.Fatalf("trading features missing zigzag payload: %+v", captured[1].Features)
+	}
+	peaks, ok := zigzag["peaks"].([]any)
+	if !ok || len(peaks) != 1 {
+		t.Fatalf("trading peaks = %#v, want one peak", zigzag["peaks"])
+	}
+	peak, ok := peaks[0].(map[string]any)
+	if !ok || peak["pivot_index"] != float64(7) || peak["confirmed_index"] != float64(10) {
+		t.Fatalf("trading peak = %#v, want injected zigzag pivot", peaks[0])
 	}
 }
 

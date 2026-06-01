@@ -74,6 +74,7 @@ class ATRZigZagIndicatorStrategyTest(unittest.TestCase):
         self.assertEqual(peak_metrics["pivot_index"], 28)
         self.assertEqual(peak_metrics["pivot_price"], 115)
         self.assertEqual(peak_metrics["confirmed_time"], cases[33]["bar"]["adjusted_time"])
+        self.assertEqual(peak_metrics["confirmed_index"], 33)
         self.assertGreaterEqual(peak_metrics["pivot_bars_since_previous"], 5)
         self.assertAlmostEqual(peak_metrics["reversal_value"], peak_metrics["atr"] * 2.0)
 
