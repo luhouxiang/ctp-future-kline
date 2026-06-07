@@ -46,3 +46,4 @@ go.work.sum
 __debug_bin.exe*
 .tmp/
 doc/.$*
+logs/strategy_signal_events/

@@ -5,6 +5,7 @@ package strategy
 import (
 	"context"
 	"database/sql"
+	"encoding/csv"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,8 +46,10 @@ type Manager struct {
 	store *Store
 	exec  *ExecutionEngine
 
-	featureMu sync.RWMutex
-	features  map[strategyFeatureKey][]map[string]any
+	featureMu              sync.RWMutex
+	features               map[strategyFeatureKey][]map[string]any
+	signalLogMu            sync.Mutex
+	signalLogOpenPositions map[string]strategySignalEventOpenPosition
 
 	mu          sync.RWMutex
 	restoreMu   sync.Mutex
@@ -1479,7 +1482,7 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		}
 		return
 	}
-	m.persistDecision(inst, symbol, mode, replayTaskID, eventTime, decision)
+	m.persistDecision(inst, symbol, mode, replayTaskID, eventTime, decision, bar)
 }
 
 func featureKey(mode string, symbol string, timeframe string, indicator string) strategyFeatureKey {
@@ -1715,7 +1718,11 @@ func firstTime(values ...time.Time) time.Time {
 	return time.Now()
 }
 
-func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode string, replayTaskID string, eventTime time.Time, decision SignalDecision) {
+func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode string, replayTaskID string, eventTime time.Time, decision SignalDecision, bars ...*BarEvent) {
+	var bar *BarEvent
+	if len(bars) > 0 {
+		bar = bars[0]
+	}
 	sig := SignalRecord{
 		InstanceID:     inst.InstanceID,
 		StrategyID:     inst.StrategyID,
@@ -1761,6 +1768,7 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		},
 	})
 	plan := m.exec.Plan(inst, symbol, decision.TargetPosition, mode)
+	m.appendSignalEventLog(inst, symbol, mode, eventTime, decision, plan, bar)
 	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
 		EventType: "order_plan",
 		StepKey:   "order_plan",
@@ -1829,6 +1837,311 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 	m.broadcast("strategy_signal", sig)
 	m.broadcast("order_audit_update", audit)
 	m.appendReplayReport(replayTaskID, inst, sig, audit)
+}
+
+type strategySignalEventLogRecord struct {
+	LoggedAt        string
+	Action          string
+	ActionLabel     string
+	EventTime       string
+	BarTime         string
+	InstanceID      string
+	StrategyID      string
+	StrategyName    string
+	Symbol          string
+	Timeframe       string
+	Mode            string
+	Open            float64
+	High            float64
+	Low             float64
+	Close           float64
+	MA20            *float64
+	MA60            *float64
+	CurrentPosition float64
+	TargetPosition  float64
+	PlannedDelta    float64
+	ProfitPoints    float64
+	Reason          string
+}
+
+type strategySignalEventOpenPosition struct {
+	Direction int
+	Price     float64
+}
+
+func (m *Manager) appendSignalEventLog(inst StrategyInstance, symbol string, mode string, eventTime time.Time, decision SignalDecision, plan ExecutionPlan, bar *BarEvent) {
+	if m == nil || bar == nil {
+		return
+	}
+	action, actionLabel := signalEventAction(decision.TargetPosition)
+	if action == "" {
+		return
+	}
+	metrics := decision.Metrics
+	if metrics == nil && decision.Trace != nil {
+		metrics = decision.Trace.Metrics
+	}
+	record := strategySignalEventLogRecord{
+		LoggedAt:        formatStrategySignalEventLogTime(time.Now()),
+		Action:          action,
+		ActionLabel:     actionLabel,
+		EventTime:       formatStrategySignalEventLogTime(eventTime),
+		BarTime:         formatStrategySignalEventLogTime(strategyBarEventTime(*bar)),
+		InstanceID:      inst.InstanceID,
+		StrategyID:      inst.StrategyID,
+		StrategyName:    firstNonEmpty(inst.DisplayName, inst.StrategyID),
+		Symbol:          symbol,
+		Timeframe:       inst.Timeframe,
+		Mode:            mode,
+		Open:            bar.Open,
+		High:            bar.High,
+		Low:             bar.Low,
+		Close:           bar.Close,
+		MA20:            metricFloatPtr(metrics, "ma20", "ma"),
+		MA60:            metricFloatPtr(metrics, "ma60"),
+		CurrentPosition: plan.CurrentPosition,
+		TargetPosition:  plan.TargetPosition,
+		PlannedDelta:    plan.PlannedDelta,
+		Reason:          firstNonEmpty(decision.Reason, traceReason(decision.Trace)),
+	}
+	path := strategySignalEventLogPath(inst, symbol)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		logger.Warn("create strategy signal event log directory failed", "path", path, "error", err)
+		return
+	}
+	m.signalLogMu.Lock()
+	defer m.signalLogMu.Unlock()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err != nil {
+		logger.Warn("open strategy signal event log failed", "path", path, "error", err)
+		return
+	}
+	defer f.Close()
+	stat, err := f.Stat()
+	if err != nil {
+		logger.Warn("stat strategy signal event log failed", "path", path, "error", err)
+		return
+	}
+	record.ProfitPoints = m.updateSignalEventProfitPointsLocked(path, record)
+	if stat.Size() == 0 {
+		if _, err := f.Write([]byte{0xEF, 0xBB, 0xBF}); err != nil {
+			logger.Warn("write strategy signal event log bom failed", "path", path, "error", err)
+			return
+		}
+	}
+	writer := csv.NewWriter(f)
+	if stat.Size() == 0 {
+		if err := writer.Write(strategySignalEventLogCSVHeader()); err != nil {
+			logger.Warn("write strategy signal event log header failed", "path", path, "error", err)
+			return
+		}
+	}
+	if err := writer.Write(record.strategySignalEventLogCSVRow()); err != nil {
+		logger.Warn("write strategy signal event log failed", "path", path, "error", err)
+		return
+	}
+	writer.Flush()
+	if err := writer.Error(); err != nil {
+		logger.Warn("flush strategy signal event log failed", "path", path, "error", err)
+	}
+}
+
+func signalEventAction(targetPosition float64) (string, string) {
+	if targetPosition == 0 {
+		return "close", "平仓"
+	}
+	return "open", "开仓"
+}
+
+func strategySignalEventLogCSVHeader() []string {
+	return []string{
+		"记录时间",
+		"动作",
+		"动作标签",
+		"信号时间",
+		"K线时间",
+		"实例ID",
+		"策略ID",
+		"策略名",
+		"合约",
+		"周期",
+		"模式",
+		"开盘价",
+		"最高价",
+		"最低价",
+		"收盘价",
+		"MA20",
+		"MA60",
+		"当前仓位",
+		"目标仓位",
+		"计划变化",
+		"盈亏点数",
+		"原因",
+	}
+}
+
+func (r strategySignalEventLogRecord) strategySignalEventLogCSVRow() []string {
+	return []string{
+		r.LoggedAt,
+		r.Action,
+		r.ActionLabel,
+		r.EventTime,
+		r.BarTime,
+		r.InstanceID,
+		r.StrategyID,
+		r.StrategyName,
+		r.Symbol,
+		r.Timeframe,
+		r.Mode,
+		formatCSVFloat(r.Open),
+		formatCSVFloat(r.High),
+		formatCSVFloat(r.Low),
+		formatCSVFloat(r.Close),
+		formatCSVFloatPtr(r.MA20),
+		formatCSVFloatPtr(r.MA60),
+		formatCSVFloat(r.CurrentPosition),
+		formatCSVFloat(r.TargetPosition),
+		formatCSVFloat(r.PlannedDelta),
+		formatCSVFloat(r.ProfitPoints),
+		r.Reason,
+	}
+}
+
+func (m *Manager) updateSignalEventProfitPointsLocked(path string, record strategySignalEventLogRecord) float64 {
+	if m.signalLogOpenPositions == nil {
+		m.signalLogOpenPositions = make(map[string]strategySignalEventOpenPosition)
+	}
+	switch record.Action {
+	case "open":
+		m.signalLogOpenPositions[path] = strategySignalEventOpenPosition{
+			Direction: signalEventPositionDirection(record.TargetPosition),
+			Price:     record.Close,
+		}
+		return 0
+	case "close":
+		open, ok := m.signalLogOpenPositions[path]
+		if !ok {
+			return 0
+		}
+		delete(m.signalLogOpenPositions, path)
+		if open.Direction < 0 {
+			return normalizeZero(open.Price - record.Close)
+		}
+		if open.Direction > 0 {
+			return normalizeZero(record.Close - open.Price)
+		}
+		return 0
+	default:
+		return 0
+	}
+}
+
+func signalEventPositionDirection(targetPosition float64) int {
+	if targetPosition < 0 {
+		return -1
+	}
+	if targetPosition > 0 {
+		return 1
+	}
+	return 0
+}
+
+func strategySignalEventLogPath(inst StrategyInstance, symbol string) string {
+	startedAt := time.Now()
+	if inst.LastStartedAt != nil && !inst.LastStartedAt.IsZero() {
+		startedAt = *inst.LastStartedAt
+	} else if !inst.CreatedAt.IsZero() {
+		startedAt = inst.CreatedAt
+	}
+	filename := fmt.Sprintf(
+		"%s_%s_%s_%s_%s_strategy_signal_events.csv",
+		sanitizeStrategySignalEventLogFilenamePart(firstNonEmpty(inst.DisplayName, inst.StrategyID, "strategy")),
+		sanitizeStrategySignalEventLogFilenamePart(firstNonEmpty(inst.InstanceID, "instance")),
+		sanitizeStrategySignalEventLogFilenamePart(firstNonEmpty(symbol, firstSymbol(inst.Symbols), "symbol")),
+		sanitizeStrategySignalEventLogFilenamePart(firstNonEmpty(inst.Timeframe, "timeframe")),
+		startedAt.Local().Format("20060102_150405"),
+	)
+	return filepath.Join("logs", "strategy_signal_events", filename)
+}
+
+func sanitizeStrategySignalEventLogFilenamePart(value string) string {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "unknown"
+	}
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range value {
+		if r <= 31 || strings.ContainsRune(`<>:"/\|?*`, r) || r == ' ' || r == '\t' || r == '\n' || r == '\r' {
+			if !lastUnderscore {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+			continue
+		}
+		b.WriteRune(r)
+		lastUnderscore = false
+	}
+	out := strings.Trim(b.String(), "._- ")
+	if out == "" {
+		return "unknown"
+	}
+	return out
+}
+
+func formatStrategySignalEventLogTime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Local().Format("2006-01-02 15:04:05")
+}
+
+func formatCSVFloat(value float64) string {
+	return strconv.FormatFloat(value, 'f', -1, 64)
+}
+
+func formatCSVFloatPtr(value *float64) string {
+	if value == nil {
+		return ""
+	}
+	return formatCSVFloat(*value)
+}
+
+func traceReason(trace *StrategyTraceRecord) string {
+	if trace == nil {
+		return ""
+	}
+	return trace.Reason
+}
+
+func metricFloatPtr(metrics map[string]any, keys ...string) *float64 {
+	for _, key := range keys {
+		if value, ok := metricFloat(metrics[key]); ok {
+			return &value
+		}
+	}
+	return nil
+}
+
+func metricFloat(value any) (float64, bool) {
+	switch v := value.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case json.Number:
+		f, err := v.Float64()
+		return f, err == nil
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func firstNonEmpty(values ...string) string {

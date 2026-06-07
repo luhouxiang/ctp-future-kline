@@ -41,6 +41,37 @@ const COLOR_MA20 = "#ff00d4";
 const COLOR_MA60 = "#9ca3af";
 const KLINE_REPLAY_MIN_INTERVAL_MS = 10;
 const KLINE_REPLAY_MAX_INTERVAL_MS = 60000;
+const KLINE_REPLAY_PANEL_WIDTH = 720;
+const REPLAY_TRADE_COLUMN_DEFAULT_WIDTHS = {
+  signalTime: 82,
+  symbol: 58,
+  side: 34,
+  openClose: 34,
+  price: 58,
+  position: 70,
+  pnl: 48,
+  reason: 308,
+};
+const REPLAY_TRADE_COLUMN_MIN_WIDTHS = {
+  signalTime: 68,
+  symbol: 44,
+  side: 30,
+  openClose: 30,
+  price: 48,
+  position: 56,
+  pnl: 40,
+  reason: 120,
+};
+const REPLAY_TRADE_COLUMNS = [
+  { key: "signalTime", label: "信号时间" },
+  { key: "symbol", label: "合约" },
+  { key: "side", label: "买卖" },
+  { key: "openClose", label: "开平" },
+  { key: "price", label: "成交价" },
+  { key: "position", label: "持仓量" },
+  { key: "pnl", label: "盈亏" },
+  { key: "reason", label: "缘由" },
+];
 
 const props = defineProps({
   scope: { type: Object, required: true },
@@ -118,7 +149,11 @@ const klineReplayPanel = reactive({
   hasStarted: false,
   startedDate: "",
   startedEnd: "",
+  tradeListExpanded: false,
+  selectedTradeId: "",
+  tradeListResetAt: 0,
 });
+const replayTradeColumnWidths = reactive({ ...REPLAY_TRADE_COLUMN_DEFAULT_WIDTHS });
 
 function loadKlineReplayPanelPrefs() {
   klineReplayPanelPrefsLoaded = true;
@@ -239,6 +274,7 @@ let klineReplayViewportLock = null;
 let klineReplayViewportApplying = false;
 let klineReplayPanelPrefsLoaded = false;
 let klineReplayPanelPrefsExist = false;
+let replayTradeColumnDrag = null;
 let lastKlineReplayTaskID = "";
 let reportedKlineReplayTaskID = "";
 
@@ -352,6 +388,10 @@ const dataZoneMaskStyle = computed(() => ({
 }));
 
 const overlayInteractive = computed(() => props.activeTool !== "cursor");
+const replayTradeTableStyle = computed(() => {
+  const width = REPLAY_TRADE_COLUMNS.reduce((sum, col) => sum + replayTradeColumnWidth(col.key), 0);
+  return { width: `${width}px` };
+});
 
 function fmtTime(unixTs) {
   if (!unixTs) return "--";
@@ -360,6 +400,49 @@ function fmtTime(unixTs) {
   return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(
     d.getUTCHours()
   )}:${p(d.getUTCMinutes())}`;
+}
+
+function fmtReplaySignalTime(unixTs) {
+  if (!unixTs) return "--";
+  const d = new Date((unixTs + DISPLAY_TZ_OFFSET_SECONDS) * 1000);
+  const p = (n) => String(n).padStart(2, "0");
+  return `${p(d.getUTCMonth() + 1)}/${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+}
+
+function replayTradeColumnWidth(key) {
+  const fallback = REPLAY_TRADE_COLUMN_DEFAULT_WIDTHS[key] || 80;
+  const min = REPLAY_TRADE_COLUMN_MIN_WIDTHS[key] || 32;
+  const value = Number(replayTradeColumnWidths[key]);
+  return Math.max(min, Number.isFinite(value) ? Math.round(value) : fallback);
+}
+
+function replayTradeColumnWidthStyle(key) {
+  return { width: `${replayTradeColumnWidth(key)}px` };
+}
+
+function startReplayTradeColumnResize(key, evt) {
+  if (evt?.button !== undefined && evt.button !== 0) return;
+  evt.preventDefault();
+  replayTradeColumnDrag = {
+    key,
+    startX: evt.clientX,
+    startWidth: replayTradeColumnWidth(key),
+  };
+  window.addEventListener("pointermove", onReplayTradeColumnResizeMove);
+  window.addEventListener("pointerup", stopReplayTradeColumnResize);
+}
+
+function onReplayTradeColumnResizeMove(evt) {
+  if (!replayTradeColumnDrag) return;
+  const { key, startX, startWidth } = replayTradeColumnDrag;
+  const min = REPLAY_TRADE_COLUMN_MIN_WIDTHS[key] || 32;
+  replayTradeColumnWidths[key] = Math.max(min, Math.round(startWidth + evt.clientX - startX));
+}
+
+function stopReplayTradeColumnResize() {
+  replayTradeColumnDrag = null;
+  window.removeEventListener("pointermove", onReplayTradeColumnResizeMove);
+  window.removeEventListener("pointerup", stopReplayTradeColumnResize);
 }
 
 function normalizeTimeToUnix(timeValue) {
@@ -2644,6 +2727,51 @@ async function ensureWarmupBarsBeforeAnchor(anchor, count = 20) {
   }
 }
 
+function focusReplayTradeSignalBar(row) {
+  if (!row) return;
+  const idx = Number(row.signalIndex);
+  const time = Number(row.signalTime || 0);
+  if (!Number.isFinite(idx) || idx < 0 || !Number.isFinite(time) || time <= 0) return;
+  const range = currentVisibleLogicalRangeRaw();
+  const span = range && Number.isFinite(Number(range.to) - Number(range.from))
+    ? Math.max(20, Number(range.to) - Number(range.from))
+    : Math.min(Math.max(60, state.bars.length || 60), 240);
+  applyVisibleLogicalRange({
+    from: idx - span / 2,
+    to: idx + span / 2,
+  });
+  if (isKlineReplayActiveStatus()) {
+    refreshKlineReplayViewportLockFromRange(currentVisibleLogicalRangeRaw());
+  }
+  requestAnimationFrame(() => {
+    const x = chartRefs.candle?.timeScale?.()?.timeToCoordinate?.(time);
+    syncCrosshair.visible = true;
+    syncCrosshair.time = time;
+    syncCrosshair.x = Number.isFinite(Number(x)) ? Number(x) : Number(mainWrapRef.value?.clientWidth || 0) * 0.5;
+    viewVersion.value += 1;
+  });
+}
+
+function selectReplayTrade(row) {
+  klineReplayPanel.selectedTradeId = String(row?.id || "");
+}
+
+function onReplayTradeDblClick(row) {
+  selectReplayTrade(row);
+  focusReplayTradeSignalBar(row);
+}
+
+function resetKlineReplayTradeList() {
+  klineReplayPanel.selectedTradeId = "";
+  klineReplayPanel.tradeListResetAt = Date.now();
+}
+
+function toggleKlineReplayTradeList() {
+  klineReplayPanel.tradeListExpanded = !klineReplayPanel.tradeListExpanded;
+  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - currentKlineReplayPanelWidth() - 20, Math.round(klineReplayPanel.x)));
+  saveKlineReplayPanelPrefs();
+}
+
 function pad2(n) {
   return String(n).padStart(2, "0");
 }
@@ -2688,6 +2816,7 @@ function applyReplayDateToChart() {
     return;
   }
   klineReplayPanel.error = "";
+  resetKlineReplayTradeList();
   saveKlineReplayPanelPrefs();
   emit("kline-replay-date-change", { end });
 }
@@ -2826,9 +2955,13 @@ function stopKlineReplayStatusPolling() {
   klineReplayStatusTimer = null;
 }
 
+function currentKlineReplayPanelWidth() {
+  return klineReplayPanel.tradeListExpanded ? KLINE_REPLAY_PANEL_WIDTH : 456;
+}
+
 function placeKlineReplayPanelFromRect(rect) {
   if (!rect) return;
-  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - 476, Math.round(rect.left)));
+  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - currentKlineReplayPanelWidth() - 20, Math.round(rect.left)));
   klineReplayPanel.y = Math.max(8, Math.min(window.innerHeight - 230, Math.round(rect.bottom + 6)));
   saveKlineReplayPanelPrefs();
 }
@@ -2846,6 +2979,7 @@ function openKlineReplayPanelFromToolbar(evt) {
 
 function closeKlineReplayPanel() {
   klineReplayPanel.open = false;
+  resetKlineReplayTradeList();
   saveKlineReplayPanelPrefs();
 }
 
@@ -2865,7 +2999,7 @@ function onKlineReplayPanelDragMove(evt) {
   if (!klineReplayPanelDrag) return;
   const nextX = evt.clientX - klineReplayPanelDrag.offsetX;
   const nextY = evt.clientY - klineReplayPanelDrag.offsetY;
-  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - 476, Math.round(nextX)));
+  klineReplayPanel.x = Math.max(8, Math.min(window.innerWidth - currentKlineReplayPanelWidth() - 20, Math.round(nextX)));
   klineReplayPanel.y = Math.max(8, Math.min(window.innerHeight - 80, Math.round(nextY)));
 }
 
@@ -2908,6 +3042,7 @@ async function startKlineReplayFromPanel() {
   });
   klineReplayPanel.loading = true;
   klineReplayPanel.error = "";
+  resetKlineReplayTradeList();
   rememberKlineReplayStart(anchor);
   reportedKlineReplayTaskID = "";
   lastKlineReplayTaskID = "";
@@ -3363,6 +3498,49 @@ const strategyOverlayData = computed(() => {
 });
 
 function buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, currentSymbol) {
+  const rows = buildReplayStrategyTrades(signals, traces, activeInstanceID, currentSymbol);
+  if (!rows.length) return [];
+  const out = [];
+  for (const trade of rows) {
+    if (!trade.exit) continue;
+    const entryX = mapTimeToXWithFallback(trade.entryTime);
+    const exitX = mapTimeToXWithFallback(trade.exitTime);
+    const entryY = Number(seriesRefs.candle.priceToCoordinate(trade.entryPrice));
+    const exitY = Number(seriesRefs.candle.priceToCoordinate(trade.exitPrice));
+    if (entryX === null || exitX === null || !Number.isFinite(entryY) || !Number.isFinite(exitY)) continue;
+    const highPrice = Number(trade.exitBar?.high || trade.exitPrice);
+    const highY = Number(seriesRefs.candle.priceToCoordinate(highPrice));
+    const minX = Math.min(entryX, exitX);
+    const maxX = Math.max(entryX, exitX);
+    const topY = Math.min(entryY, exitY);
+    const bottomY = Math.max(entryY, exitY);
+    out.push({
+      id: `strategy-trade-shade-${trade.id}`,
+      shape: "trade-shade",
+      x: minX,
+      y: topY,
+      width: Math.max(2, maxX - minX),
+      height: Math.max(2, bottomY - topY),
+      profitable: trade.profitable,
+      pnl: trade.pnl,
+    });
+    if (trade.result === "success" || trade.result === "failure") {
+      out.push({
+        id: `strategy-exit-dot-${trade.id}`,
+        shape: "exit-circle",
+        x: exitX,
+        y: Math.max(7, Number.isFinite(highY) ? highY - 18 : exitY - 18),
+        result: trade.result,
+        pnl: trade.pnl,
+        pnlLabel: formatStrategyPnlPoints(trade.pnl),
+        profitable: trade.profitable,
+      });
+    }
+  }
+  return out;
+}
+
+function buildReplayStrategyTrades(signals, traces, activeInstanceID, currentSymbol) {
   const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
   const signalRows = Array.isArray(signals) ? signals : [];
   const entries = signalRows
@@ -3443,7 +3621,7 @@ function buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, cur
     .filter((x) => !!x);
   const exits = dedupeReplayExits([...signalExits, ...traceExits])
     .sort((a, b) => a.time - b.time || a.idx - b.idx);
-  if (!entries.length || !exits.length) return [];
+  if (!entries.length) return [];
 
   const out = [];
   const points = [
@@ -3457,51 +3635,156 @@ function buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, cur
   let open = null;
   for (const point of points) {
     if (point.type === "entry") {
-      if (!open) open = point.item;
+      if (open) out.push(buildReplayStrategyTradeRow(open, null, out.length));
+      open = point.item;
       continue;
     }
     if (!open) continue;
     const entry = open;
     const exit = point.item;
     open = null;
-    const entryX = mapTimeToXWithFallback(entry.time);
-    const exitX = mapTimeToXWithFallback(exit.time);
-    const entryY = Number(seriesRefs.candle.priceToCoordinate(entry.close));
-    const exitY = Number(seriesRefs.candle.priceToCoordinate(exit.close));
-    if (entryX === null || exitX === null || !Number.isFinite(entryY) || !Number.isFinite(exitY)) continue;
-    const highPrice = Number(exit.bar?.high || exit.close);
-    const highY = Number(seriesRefs.candle.priceToCoordinate(highPrice));
-    const pnl = entry.target < 0 ? entry.close - exit.close : exit.close - entry.close;
-    const profitable = Number.isFinite(pnl) && pnl > 0;
-    const minX = Math.min(entryX, exitX);
-    const maxX = Math.max(entryX, exitX);
-    const topY = Math.min(entryY, exitY);
-    const bottomY = Math.max(entryY, exitY);
-    out.push({
-      id: `strategy-trade-shade-${String(entry.row?.id || entry.idx)}-${String(exit.row?.trace_id || exit.idx)}`,
-      shape: "trade-shade",
-      x: minX,
-      y: topY,
-      width: Math.max(2, maxX - minX),
-      height: Math.max(2, bottomY - topY),
-      profitable,
-      pnl,
+    out.push(buildReplayStrategyTradeRow(entry, exit, out.length));
+  }
+  if (open) out.push(buildReplayStrategyTradeRow(open, null, out.length));
+  return out;
+}
+
+function buildReplayStrategyTradeRow(entry, exit, idx) {
+  const target = Number(entry?.target || 0);
+  const entryPrice = Number(entry?.close);
+  const exitPrice = exit ? Number(exit.close) : null;
+  const pnl = exit && Number.isFinite(entryPrice) && Number.isFinite(exitPrice)
+    ? (target < 0 ? entryPrice - exitPrice : exitPrice - entryPrice)
+    : null;
+  const entryIndex = findBarIndexByTime(Number(entry?.time || 0));
+  const exitIndex = exit ? findBarIndexByTime(Number(exit.time || 0)) : -1;
+  return {
+    id: `${String(entry?.row?.id || entry?.idx || idx)}-${String(exit?.row?.trace_id || exit?.row?.id || exit?.idx || "open")}`,
+    entry: entry?.row || null,
+    exit: exit?.row || null,
+    entryBar: entry?.bar || null,
+    exitBar: exit?.bar || null,
+    entryIndex,
+    exitIndex,
+    entryTime: Number(entry?.time || 0),
+    exitTime: exit ? Number(exit.time || 0) : 0,
+    symbol: String(entry?.row?.symbol || props.scope?.symbol || ""),
+    direction: target > 0 ? "long" : "short",
+    openClose: exit ? "平" : "开",
+    entryPrice,
+    exitPrice,
+    pnl,
+    profitable: Number.isFinite(pnl) && pnl > 0,
+    result: exit?.result || "",
+    reason: String(exit?.row?.reason || entry?.row?.reason || ""),
+  };
+}
+
+const replayStrategyTradeRows = computed(() => {
+  void viewVersion.value;
+  if (!props.replayKlineMode) return [];
+  const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
+  if (!activeInstanceID) return [];
+  const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  return buildReplayStrategyTrades(
+    Array.isArray(props.strategySignals) ? props.strategySignals : [],
+    Array.isArray(props.strategyTraces) ? props.strategyTraces : [],
+    activeInstanceID,
+    currentSymbol
+  );
+});
+
+function buildReplayStrategySignalRows(signals, activeInstanceID, currentSymbol) {
+  const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
+  const rows = (Array.isArray(signals) ? signals : [])
+    .filter((row) => {
+      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+      if (!isReplaySignalAfterTradeListReset(row)) return false;
+      return strategySignalTime(row) > 0;
+    })
+    .slice()
+    .sort((a, b) => {
+      const ta = strategySignalTime(a);
+      const tb = strategySignalTime(b);
+      if (ta !== tb) return ta - tb;
+      return Number(a?.id || 0) - Number(b?.id || 0);
     });
-    if (exit.result === "success" || exit.result === "failure") {
-      out.push({
-        id: `strategy-exit-dot-${String(exit.row?.trace_id || exit.idx)}`,
-        shape: "exit-circle",
-        x: exitX,
-        y: Math.max(7, Number.isFinite(highY) ? highY - 18 : exitY - 18),
-        result: exit.result,
-        pnl,
-        pnlLabel: formatStrategyPnlPoints(pnl),
-        profitable,
-      });
-    }
+  const out = [];
+  let open = null;
+  for (const row of rows) {
+    const signalTime = strategySignalTime(row);
+    const bar = findNearestBarByDisplayTime(signalTime);
+    const price = Number(bar?.close);
+    if (!bar || !Number.isFinite(price)) continue;
+    const isExit = isStrategyExitSignal(row) || strategySignalTarget(row) === 0;
+    const target = strategySignalTarget(row);
+    const direction = isExit && open ? open.direction : target > 0 ? "long" : "short";
+    const pnl = isExit && open
+      ? (open.direction === "short" ? open.tradePrice - price : price - open.tradePrice)
+      : null;
+    const signalIndex = findBarIndexByTime(signalTime);
+    const item = {
+      id: `signal-row-${String(row?.id || `${row?.instance_id || ""}-${row?.event_time || ""}`)}`,
+      source: row,
+      signalTime,
+      signalIndex,
+      symbol: String(row?.symbol || props.scope?.symbol || ""),
+      direction,
+      openClose: isExit ? "平" : "开",
+      tradePrice: price,
+      positionText: isExit ? "平仓" : formatReplayPositionText(target),
+      pnl,
+      profitable: Number.isFinite(pnl) && pnl > 0,
+      reason: String(row?.reason || ""),
+    };
+    out.push(item);
+    if (isExit) open = null;
+    else open = item;
   }
   return out;
 }
+
+function strategySignalCreatedAtMs(row) {
+  const raw = row?.created_at || row?.createdAt || "";
+  if (!raw) return 0;
+  const parsed = Date.parse(String(raw));
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
+function isReplaySignalAfterTradeListReset(row) {
+  const resetAt = Number(klineReplayPanel.tradeListResetAt || 0);
+  if (!Number.isFinite(resetAt) || resetAt <= 0) return true;
+  return strategySignalCreatedAtMs(row) > resetAt;
+}
+
+function formatReplayPositionText(target) {
+  const n = Math.abs(Number(target || 0));
+  if (!Number.isFinite(n) || n <= 0) return "--";
+  return `${formatStrategyQuantity(n)}手${Number(target) < 0 ? "空仓" : "多仓"}`;
+}
+
+function formatStrategyQuantity(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "--";
+  return Number.isInteger(n) ? String(n) : n.toFixed(2).replace(/\.?0+$/, "");
+}
+
+const replayStrategySignalRows = computed(() => {
+  void viewVersion.value;
+  if (!props.replayKlineMode) return [];
+  const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
+  if (!activeInstanceID) return [];
+  const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  return buildReplayStrategySignalRows(
+    Array.isArray(props.strategySignals) ? props.strategySignals : [],
+    activeInstanceID,
+    currentSymbol
+  );
+});
 
 function dedupeReplayExits(exits) {
   const seen = new Set();
@@ -4506,6 +4789,7 @@ onUnmounted(() => {
   }
   stopResize();
   stopKlineReplayPanelDrag();
+  stopReplayTradeColumnResize();
   stopKlineReplayStatusPolling();
   clearKlineReplayViewportLock();
   if (channelRecalcTimer) {
@@ -4982,6 +5266,7 @@ onUnmounted(() => {
     <div
       v-if="klineReplayPanel.open"
       class="kline-replay-panel"
+      :class="{ 'trade-expanded': klineReplayPanel.tradeListExpanded }"
       :style="{ left: `${klineReplayPanel.x}px`, top: `${klineReplayPanel.y}px` }"
       @click.stop
     >
@@ -4991,7 +5276,17 @@ onUnmounted(() => {
         @pointerdown="startKlineReplayPanelDrag"
       >
         <span>复盘训练 - K线逐根</span>
-        <button class="kline-replay-close" title="关闭" @pointerdown.stop @click="closeKlineReplayPanel">×</button>
+        <div class="kline-replay-title-actions">
+          <button
+            class="kline-replay-toggle-trades"
+            :title="klineReplayPanel.tradeListExpanded ? '收缩交易列表' : '展开交易列表'"
+            @pointerdown.stop
+            @click.stop="toggleKlineReplayTradeList"
+          >
+            {{ klineReplayPanel.tradeListExpanded ? "收缩" : "展开" }}
+          </button>
+          <button class="kline-replay-close" title="关闭" @pointerdown.stop @click="closeKlineReplayPanel">×</button>
+        </div>
       </div>
       <div class="kline-replay-date-row">
         <input v-model="klineReplayPanel.date" type="datetime-local" step="60" />
@@ -5032,6 +5327,52 @@ onUnmounted(() => {
         <span class="kline-replay-latest-time">当前K线：{{ klineReplayLatestAdjustedTimeLabel }}</span>
       </div>
       <div class="kline-replay-progress"><span></span></div>
+      <div v-if="klineReplayPanel.tradeListExpanded" class="kline-replay-trades">
+        <div class="kline-replay-trades-title">开仓平仓交易列表</div>
+        <div class="kline-replay-trades-table-wrap">
+          <table :style="replayTradeTableStyle">
+            <colgroup>
+              <col
+                v-for="col in REPLAY_TRADE_COLUMNS"
+                :key="col.key"
+                :style="replayTradeColumnWidthStyle(col.key)"
+              />
+            </colgroup>
+            <thead>
+              <tr>
+                <th v-for="col in REPLAY_TRADE_COLUMNS" :key="col.key">
+                  {{ col.label }}
+                  <span
+                    class="replay-trade-col-resizer"
+                    @pointerdown.stop.prevent="startReplayTradeColumnResize(col.key, $event)"
+                  ></span>
+                </th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="row in replayStrategySignalRows"
+                :key="row.id"
+                :class="{ selected: String(row.id) === String(klineReplayPanel.selectedTradeId || '') }"
+                @click="selectReplayTrade(row)"
+                @dblclick="onReplayTradeDblClick(row)"
+              >
+                <td>{{ fmtReplaySignalTime(row.signalTime) }}</td>
+                <td>{{ row.symbol }}</td>
+                <td :class="row.direction === 'short' ? 'short' : 'long'">{{ row.direction === "short" ? "卖" : "买" }}</td>
+                <td>{{ row.openClose }}</td>
+                <td>{{ formatPrice(row.tradePrice) }}</td>
+                <td>{{ row.positionText }}</td>
+                <td :class="row.profitable ? 'profit' : row.pnl !== null ? 'loss' : ''">{{ row.pnl !== null ? formatStrategyPnlPoints(row.pnl) : "--" }}</td>
+                <td class="reason" :title="row.reason">{{ row.reason || "--" }}</td>
+              </tr>
+              <tr v-if="!replayStrategySignalRows.length">
+                <td colspan="8" class="empty">暂无交易信号</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </div>
       <div v-if="klineReplayPanel.error" class="kline-replay-error">{{ klineReplayPanel.error }}</div>
     </div>
   </Teleport>
@@ -5102,6 +5443,10 @@ onUnmounted(() => {
   z-index: 5000;
 }
 
+.kline-replay-panel.trade-expanded {
+  width: 720px;
+}
+
 .kline-replay-panel-title {
   display: flex;
   align-items: center;
@@ -5115,6 +5460,23 @@ onUnmounted(() => {
   cursor: move;
   user-select: none;
   touch-action: none;
+}
+
+.kline-replay-title-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.kline-replay-toggle-trades {
+  height: 22px;
+  min-width: 48px;
+  border: 1px solid #9aa5b5;
+  background: #fff;
+  color: #111827;
+  cursor: pointer;
+  padding: 0 8px;
+  line-height: 1;
 }
 
 .kline-replay-panel-title.dragging {
@@ -5229,6 +5591,96 @@ onUnmounted(() => {
   width: 0;
   height: 100%;
   background: #3f8ed8;
+}
+
+.kline-replay-trades {
+  margin-top: 8px;
+}
+
+.kline-replay-trades-title {
+  margin-bottom: 4px;
+  font-size: 12px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.kline-replay-trades-table-wrap {
+  height: 172px;
+  overflow: auto;
+  border: 1px solid #b7c2d0;
+  background: #fff;
+}
+
+.kline-replay-trades table {
+  min-width: 100%;
+  border-collapse: collapse;
+  table-layout: fixed;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.kline-replay-trades th,
+.kline-replay-trades td {
+  height: 22px;
+  padding: 2px 4px;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-align: left;
+}
+
+.kline-replay-trades th {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #edf2f7;
+  color: #374151;
+  font-weight: 600;
+  user-select: none;
+}
+
+.replay-trade-col-resizer {
+  position: absolute;
+  top: 0;
+  right: -3px;
+  width: 6px;
+  height: 100%;
+  cursor: col-resize;
+  z-index: 2;
+}
+
+.replay-trade-col-resizer:hover,
+.replay-trade-col-resizer:active {
+  background: rgba(37, 99, 235, 0.28);
+}
+
+.kline-replay-trades tr.selected td {
+  background: #0b66d8;
+  color: #fff;
+}
+
+.kline-replay-trades td.long,
+.kline-replay-trades td.profit {
+  color: #dc2626;
+}
+
+.kline-replay-trades td.short,
+.kline-replay-trades td.loss {
+  color: #047857;
+}
+
+.kline-replay-trades tr.selected td.long,
+.kline-replay-trades tr.selected td.short,
+.kline-replay-trades tr.selected td.profit,
+.kline-replay-trades tr.selected td.loss {
+  color: #fff;
+}
+
+.kline-replay-trades td.empty {
+  color: #6b7280;
+  text-align: center;
 }
 
 .kline-replay-error {

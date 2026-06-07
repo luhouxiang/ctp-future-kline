@@ -411,8 +411,8 @@ class MA20PullbackShortStrategy(Strategy):
     def _clear_signal(self, state: PullbackShortState) -> None:
         clear_signal(state)
 
-    def _signal_metrics(self, state: PullbackShortState, ma20: float | None, ma_period: int) -> MetricsDict:
-        metrics = self._base_metrics(state, ma20, ma_period)
+    def _signal_metrics(self, state: PullbackShortState, ma20: float | None, ma_period: int, ma60: float | None = None) -> MetricsDict:
+        metrics = self._base_metrics(state, ma20, ma_period, ma60)
         metrics.update({
             "signal_entry": state.signal_entry,
             "signal_trigger_price": state.signal_trigger_price,
@@ -521,6 +521,7 @@ class MA20PullbackShortStrategy(Strategy):
         state: PullbackShortState,
         ma20: float | None = None,
         ma_period: int = 20,
+        ma60: float | None = None,
     ) -> MetricsDict:
         """生成 MA20 策略通用诊断指标。"""
         return {
@@ -530,6 +531,7 @@ class MA20PullbackShortStrategy(Strategy):
             "ma": ma20,
             # 保留 ma20 字段名兼容前端；即使 ma_period 不是 20，这里仍沿用原字段。
             "ma20": ma20,
+            "ma60": ma60,
             "touch_open": state.touch_open,
             "touch_high": state.touch_high,
             "touch_ma20": state.touch_ma20,
@@ -559,6 +561,7 @@ class MA20PullbackShortStrategy(Strategy):
         checks: list[CheckDict],
         ma20: float | None = None,
         ma_period: int = 20,
+        ma60: float | None = None,
     ) -> TraceDict:
         """构造 bar 事件的 trace。"""
         return _trace(
@@ -570,7 +573,7 @@ class MA20PullbackShortStrategy(Strategy):
             status,
             reason,
             checks,
-            self._base_metrics(state, ma20, ma_period),
+            self._base_metrics(state, ma20, ma_period, ma60),
         )
 
     def _core_bar(self, ctx: PullbackBarContext) -> PullbackKLine:
@@ -802,7 +805,7 @@ class MA20PullbackShortStrategy(Strategy):
         decision = self._entry_decision(ctx)
         checks = self._setup_checks(ctx, decision)
         if decision.action == "enter_short":
-            metrics = self._signal_metrics(ctx.state, ctx.ma20, ctx.ma_period)
+            metrics = self._signal_metrics(ctx.state, ctx.ma20, ctx.ma_period, ctx.ma60)
             metrics.update({
                 "signal": "SHORT",
                 "touch_open": touch_open,
@@ -841,7 +844,7 @@ class MA20PullbackShortStrategy(Strategy):
         回测中用下一根开盘价作为持仓上下文，能更接近实际下单延迟，也让止盈/止损观察从持仓后开始。
         """
         self._entry_decision(ctx)
-        metrics = self._signal_metrics(ctx.state, ctx.ma20, ctx.ma_period)
+        metrics = self._signal_metrics(ctx.state, ctx.ma20, ctx.ma_period, ctx.ma60)
         metrics["signal"] = "SHORT"
         checks = [_check("下一根K线开盘确认持仓", True, ctx.open_price, "entry open")]
         trace = self._bar_trace(ctx.request, ctx.state, DONE, "已持仓，等待止盈/止损", 5, "passed", "short position confirmed at next bar open", checks, ctx.ma20, ctx.ma_period)
