@@ -21,7 +21,7 @@ import {
   normalizeReversalSettings,
 } from "./analysis/reversalDetector";
 import { buildInitialVisibleLogicalRange, shouldRenderReversal } from "./lightweightMode";
-import { mergeRealtimeBarUpdate } from "./realtimeBars";
+import { mergeRealtimeBarUpdate, normalizeRealtimeBar } from "./realtimeBars";
 import { getComposedBar, initKlineComposer, pushComposeTick } from "./klineComposeBridge";
 import { KLINE_REPLAY_PANEL_PREF_KEY } from "./chartPrefs";
 
@@ -236,8 +236,11 @@ const rightValueOverlay = reactive({
   volumeValue: 0,
 });
 const viewVersion = ref(0);
+const barDataVersion = ref(0);
+const projectionVersion = ref(0);
 const composeTicketRef = ref(null);
 const negativeVolumeLogged = new Set();
+let barTimeIndexMap = new Map();
 
 const chartRefs = { candle: null, macd: null, volume: null };
 const seriesRefs = {
@@ -629,6 +632,7 @@ function applyChartSizes() {
     height: Math.max(50, paneHeights.volume),
   });
   refreshOverlayMetrics();
+  projectionVersion.value += 1;
   viewVersion.value += 1;
 }
 
@@ -712,6 +716,7 @@ function initCharts() {
       syncGuard = false;
       scheduleChannelRecalc();
       scheduleReversalRecalc();
+      projectionVersion.value += 1;
       viewVersion.value += 1;
       if (range.from < 30) void loadOlderChunk();
       refreshKlineReplayViewportLockFromRange(range);
@@ -936,6 +941,27 @@ function normalizeBarsAscendingUnique(rawBars, source = "unknown") {
   return times.map((t) => byTime.get(t));
 }
 
+function rebuildBarTimeIndex(bars = state.bars) {
+  const next = new Map();
+  for (let i = 0; i < (Array.isArray(bars) ? bars.length : 0); i += 1) {
+    const bar = bars[i];
+    const displayTime = Number(getDisplayTime(bar) || 0);
+    if (Number.isFinite(displayTime) && displayTime > 0) next.set(displayTime, i);
+  }
+  barTimeIndexMap = next;
+}
+
+function markBarDataChanged(options = {}) {
+  barDataVersion.value += 1;
+  if (options.projection !== false) projectionVersion.value += 1;
+}
+
+function setChartBars(nextBars, options = {}) {
+  state.bars = Array.isArray(nextBars) ? nextBars : [];
+  rebuildBarTimeIndex(state.bars);
+  if (options.mark !== false) markBarDataChanged({ projection: options.projection !== false });
+}
+
 function publishLatestBar() {
   const bars = Array.isArray(state.bars) ? state.bars : [];
   const bar = bars.length ? bars[bars.length - 1] : null;
@@ -1001,7 +1027,7 @@ function renderSeries() {
 
 function renderDerivedSeries(bars, options = {}) {
   const restoreRange = options.preserveViewport ? currentVisibleLogicalRangeRaw() : null;
-  const normalizedBars = Array.isArray(bars) ? bars : normalizeBarsAscendingUnique(state.bars, "derived_render");
+  const normalizedBars = Array.isArray(bars) ? bars : (Array.isArray(state.bars) ? state.bars : []);
   const ma20Data = buildMAData(normalizedBars, 20);
   const ma60Data = buildMAData(normalizedBars, 60);
   const m = calcMACD(normalizedBars);
@@ -1024,11 +1050,11 @@ function renderDerivedSeries(bars, options = {}) {
   scheduleChannelRecalc();
   scheduleReversalRecalc();
   if (restoreRange) applyVisibleLogicalRange(restoreRange);
-  viewVersion.value += 1;
+  projectionVersion.value += 1;
 }
 
 function updatePrimarySeriesForRealtime() {
-  const bars = normalizeBarsAscendingUnique(state.bars, "realtime_primary");
+  const bars = Array.isArray(state.bars) ? state.bars : [];
   if (!seriesRefs.candle || !bars.length) return;
   const last = bars[bars.length - 1];
   const candlePoint = {
@@ -1091,6 +1117,7 @@ function applyVisibleLogicalRange(range, options = {}) {
     chartRefs.candle?.timeScale?.().setVisibleLogicalRange?.(range);
     chartRefs.macd?.timeScale?.().setVisibleLogicalRange?.(range);
     chartRefs.volume?.timeScale?.().setVisibleLogicalRange?.(range);
+    projectionVersion.value += 1;
   } catch {
     // ignore
   } finally {
@@ -1750,7 +1777,7 @@ async function loadChunkWindow(endParam) {
   const reqSeq = ++loadRequestSeq;
   state.loading = true;
   state.error = "";
-  state.bars = [];
+  setChartBars([]);
   state.macdDif = [];
   state.macdDea = [];
   state.macdHist = [];
@@ -1761,7 +1788,7 @@ async function loadChunkWindow(endParam) {
   try {
     const chunk = await fetchChunk(endParam);
     if (reqSeq !== loadRequestSeq) return;
-    state.bars = normalizeBarsAscendingUnique(chunk.bars, "initial_chunk");
+    setChartBars(normalizeBarsAscendingUnique(chunk.bars, "initial_chunk"));
     state.hasMore = chunk.bars.length >= CHUNK_SIZE;
     const metaSymbol = String(chunk.meta?.symbol || "")
       .trim()
@@ -1817,7 +1844,7 @@ async function loadOlderChunk() {
       state.hasMore = false;
       return;
     }
-    state.bars = normalizeBarsAscendingUnique([...toPrepend, ...state.bars], "merge_older");
+    setChartBars(normalizeBarsAscendingUnique([...toPrepend, ...state.bars], "merge_older"));
     state.hasMore = olderBars.length >= CHUNK_SIZE;
     renderSeries();
     if (previousRange && toPrepend.length > 0) {
@@ -2185,7 +2212,7 @@ function applyChannelAction(action) {
   }
   if (type === "load-sample") {
     const sample = String(action.sample || "parallel");
-    state.bars = generateChannelSampleBars(sample);
+    setChartBars(generateChannelSampleBars(sample));
     state.hasMore = false;
     state.channelDecisions = [];
     state.channelDetail = null;
@@ -2293,11 +2320,11 @@ async function reloadRecentWindow() {
     const chunk = await fetchChunk(endParam);
     const latest = normalizeBarsAscendingUnique(chunk.bars, "recent_window");
     if (!latest.length) return;
-    const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+    const previousBars = Array.isArray(state.bars) ? state.bars : [];
     const previousRange = currentVisibleLogicalRangeRaw();
     const latestTimes = new Set(latest.map((x) => Number(x.adjusted_time || 0)));
     const historical = (Array.isArray(state.bars) ? state.bars : []).filter((x) => !latestTimes.has(Number(x?.adjusted_time || 0)));
-    state.bars = normalizeBarsAscendingUnique([...historical, ...latest], "recent_window_merge");
+    setChartBars(normalizeBarsAscendingUnique([...historical, ...latest], "recent_window_merge"));
     renderSeries();
     restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
     scheduleDerivedSeriesRender();
@@ -2307,9 +2334,51 @@ async function reloadRecentWindow() {
   }
 }
 
+function tagRealtimeBar(bar, update) {
+  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
+  const displayTime = getDisplayTime(bar);
+  return {
+    ...bar,
+    adjusted_time: getAdjustedTime(bar),
+    data_time: getActualDataTime(bar),
+    plot_time: displayTime,
+    __source: "server",
+    __phase: phase,
+  };
+}
+
+function mergeRealtimeBarUpdateFallback(update) {
+  const merged = mergeRealtimeBarUpdate(state.bars, update);
+  const barTs = Number(update?.bar?.adjusted_time || 0);
+  if (Number.isFinite(barTs) && barTs > 0) {
+    const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
+    if (idx >= 0) merged[idx] = tagRealtimeBar(merged[idx], update);
+  }
+  return normalizeBarsAscendingUnique(merged, "realtime_update");
+}
+
+function mergeRealtimeBarUpdateFast(update) {
+  const incoming = tagRealtimeBar(normalizeRealtimeBar(update?.bar || {}), update);
+  const ts = Number(incoming.adjusted_time || 0);
+  if (!Number.isFinite(ts) || ts <= 0) {
+    return Array.isArray(state.bars) ? state.bars : [];
+  }
+  const bars = Array.isArray(state.bars) ? state.bars : [];
+  if (!bars.length) return [incoming];
+  const last = bars[bars.length - 1];
+  const lastTs = Number(getAdjustedTime(last) || 0);
+  if (ts === lastTs) {
+    return [...bars.slice(0, -1), { ...last, ...incoming }];
+  }
+  if (ts > lastTs && !barTimeIndexMap.has(Number(getDisplayTime(incoming) || ts))) {
+    return [...bars, incoming];
+  }
+  return mergeRealtimeBarUpdateFallback(update);
+}
+
 function applyRealtimeBarUpdate(update) {
   realtimeApplyCount += 1;
-  const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+  const previousBars = Array.isArray(state.bars) ? state.bars : [];
   const previousRange = currentVisibleLogicalRangeRaw();
   const sub = update?.subscription || {};
   const subDataMode = String(sub.data_mode || sub.dataMode || "").trim().toLowerCase();
@@ -2324,16 +2393,7 @@ function applyRealtimeBarUpdate(update) {
   ) {
     return;
   }
-  const merged = mergeRealtimeBarUpdate(state.bars, update);
-  const barTs = Number(update?.bar?.adjusted_time || 0);
-  const phase = String(update?.phase || "").trim().toLowerCase() || "partial";
-  if (Number.isFinite(barTs) && barTs > 0) {
-    const idx = merged.findIndex((x) => Number(x?.adjusted_time) === barTs);
-    if (idx >= 0) {
-      merged[idx] = { ...merged[idx], __source: "server", __phase: phase };
-    }
-  }
-  state.bars = normalizeBarsAscendingUnique(merged, "realtime_update");
+  setChartBars(mergeRealtimeBarUpdateFast(update), { projection: true });
   updatePrimarySeriesForRealtime();
   restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
   scheduleDerivedSeriesRender();
@@ -2350,7 +2410,7 @@ function resetComposeSession(ticketID) {
   if (ticketID) {
     composeTicketRef.value.ticket_id = ticketID;
   }
-  state.bars = [];
+  setChartBars([]);
   renderSeries();
   publishLatestBar();
   viewVersion.value += 1;
@@ -2370,7 +2430,7 @@ function applyQuoteSynthesis(update, ticketPayload) {
   ) {
     return;
   }
-  const previousBars = Array.isArray(state.bars) ? state.bars.slice() : [];
+  const previousBars = Array.isArray(state.bars) ? state.bars : [];
   const previousRange = currentVisibleLogicalRangeRaw();
   const synthesized = synthesizeBarFromQuote(update, ticketPayload || composeTicketRef.value);
   if (!synthesized) return;
@@ -2389,7 +2449,7 @@ function applyQuoteSynthesis(update, ticketPayload) {
   } else {
     merged.push({ ...synthesized.bar, __source: "client", __phase: "partial" });
   }
-  state.bars = normalizeBarsAscendingUnique(merged, "quote_synthesis");
+  setChartBars(normalizeBarsAscendingUnique(merged, "quote_synthesis"));
   updatePrimarySeriesForRealtime();
   restoreViewportAfterBarsChange(previousBars, state.bars, previousRange, { preserveUnshifted: true });
   scheduleDerivedSeriesRender();
@@ -3212,7 +3272,7 @@ defineExpose({
 });
 
 const channelOverlayShapes = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
   if (allChannelDisplayOff(state.channelSettings) || !state.channelSegments.length || !seriesRefs.candle) return [];
   const w = overlaySize.value?.width || 0;
   const h = overlaySize.value?.height || 0;
@@ -3284,7 +3344,8 @@ const channelOverlayShapes = computed(() => {
 });
 
 const reversalOverlayData = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
+  void barDataVersion.value;
   if (!isReversalDetectionEnabled()) return { lines: [], events: [] };
   if (!seriesRefs.candle) return { lines: [], events: [] };
   const lines = Array.isArray(state.reversalResults?.lines) ? state.reversalResults.lines : [];
@@ -3341,7 +3402,8 @@ const reversalOverlayData = computed(() => {
 });
 
 const zigzagOverlayData = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
+  void barDataVersion.value;
   if (!props.replayKlineMode || !seriesRefs.candle) return [];
   const bars = Array.isArray(state.bars) ? state.bars : [];
   if (bars.length < 2) return [];
@@ -3370,7 +3432,7 @@ const zigzagOverlayData = computed(() => {
       if (seen.has(dedupeKey)) return null;
       seen.add(dedupeKey);
       const bar = findNearestBarByDisplayTime(t);
-      const barIndex = bar ? bars.findIndex((item) => Number(getDisplayTime(item)) === Number(getDisplayTime(bar))) : -1;
+      const barIndex = bar ? findBarIndexByTime(Number(getDisplayTime(bar))) : -1;
       const x = mapTimeToXWithFallback(t);
       const price = Number(metrics.pivot_price ?? (typ === "PEAK" ? bar?.high : bar?.low));
       const y = Number(seriesRefs.candle.priceToCoordinate(price));
@@ -3395,7 +3457,8 @@ const zigzagOverlayData = computed(() => {
 });
 
 const strategyOverlayData = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
+  void barDataVersion.value;
   if (!seriesRefs.candle) return [];
   const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
   const traces = Array.isArray(props.strategyTraces) ? props.strategyTraces : [];
@@ -3681,7 +3744,7 @@ function buildReplayStrategyTradeRow(entry, exit, idx) {
 }
 
 const replayStrategyTradeRows = computed(() => {
-  void viewVersion.value;
+  void barDataVersion.value;
   if (!props.replayKlineMode) return [];
   const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
   if (!activeInstanceID) return [];
@@ -3774,7 +3837,7 @@ function formatStrategyQuantity(value) {
 }
 
 const replayStrategySignalRows = computed(() => {
-  void viewVersion.value;
+  void barDataVersion.value;
   if (!props.replayKlineMode) return [];
   const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
   if (!activeInstanceID) return [];
@@ -3887,17 +3950,26 @@ function parseStrategyMetricTime(value) {
 function findNearestBarByDisplayTime(time) {
   const ts = Number(time || 0);
   if (!Number.isFinite(ts) || ts <= 0) return null;
-  let best = null;
-  let bestDelta = Number.POSITIVE_INFINITY;
-  for (const bar of state.bars || []) {
-    const t = Number(getDisplayTime(bar) || 0);
-    const delta = Math.abs(t - ts);
-    if (delta < bestDelta) {
-      best = bar;
-      bestDelta = delta;
-    }
+  const bars = Array.isArray(state.bars) ? state.bars : [];
+  if (!bars.length) return null;
+  const exact = barTimeIndexMap.get(ts);
+  if (Number.isInteger(exact) && exact >= 0 && exact < bars.length) return bars[exact];
+  let lo = 0;
+  let hi = bars.length - 1;
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1;
+    const mt = Number(getDisplayTime(bars[mid]) || 0);
+    if (mt === ts) return bars[mid];
+    if (mt < ts) lo = mid + 1;
+    else hi = mid - 1;
   }
-  return best;
+  const left = hi >= 0 ? bars[hi] : null;
+  const right = lo < bars.length ? bars[lo] : null;
+  if (!left) return right;
+  if (!right) return left;
+  return Math.abs(Number(getDisplayTime(left) || 0) - ts) <= Math.abs(Number(getDisplayTime(right) || 0) - ts)
+    ? left
+    : right;
 }
 
 function strategyTraceMetric(row, names) {
@@ -4090,7 +4162,7 @@ function candleBodyGeometryCss(centerX, barSpacing, pixelRatio) {
 }
 
 const macdStemLines = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
   if (!chartRefs.macd || !chartRefs.candle || !seriesRefs.hist) return [];
   const hostW = macdRef.value?.clientWidth || 0;
   const hostH = macdRef.value?.clientHeight || 0;
@@ -4116,7 +4188,8 @@ const macdStemLines = computed(() => {
 });
 
 const volumeBars = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
+  void barDataVersion.value;
   if (!chartRefs.volume || !chartRefs.candle || !seriesRefs.volume) return [];
   const hostW = volumeRef.value?.clientWidth || 0;
   const hostH = volumeRef.value?.clientHeight || 0;
@@ -4163,6 +4236,8 @@ const syncTimeLabelStyle = computed(() => {
 
 function findBarIndexByTime(ts) {
   if (!Number.isFinite(ts) || state.bars.length === 0) return -1;
+  const exact = barTimeIndexMap.get(Number(ts));
+  if (Number.isInteger(exact) && exact >= 0 && exact < state.bars.length) return exact;
   let lo = 0;
   let hi = state.bars.length - 1;
   let best = -1;
@@ -4256,22 +4331,23 @@ function buildRightAxisTicks(chart, hostEl, mode = "price") {
 }
 
 const candleAxisTicks = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
   return buildRightAxisTicks(chartRefs.candle, candleRef.value, "price");
 });
 
 const macdAxisTicks = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
   return buildRightAxisTicks(chartRefs.macd, macdRef.value, "macd");
 });
 
 const volumeAxisTicks = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
   return buildRightAxisTicks(chartRefs.volume, volumeRef.value, "volume");
 });
 
 const latestPriceTag = computed(() => {
-  void viewVersion.value;
+  void projectionVersion.value;
+  void barDataVersion.value;
   if (!seriesRefs.candle) return null;
   if (!state.bars.length) return null;
   const price = Number(state.bars[state.bars.length - 1]?.close);
