@@ -1335,6 +1335,7 @@ function normalizeMethodName(method) {
     .trim()
     .toLowerCase();
   if (m === "extrema") return "extrema";
+  if (m === "box") return "box";
   if (m === "ransac") return "ransac";
   if (m === "regression") return "regression";
   return m;
@@ -1342,6 +1343,7 @@ function normalizeMethodName(method) {
 
 function methodDisplayName(method) {
   const m = normalizeMethodName(method);
+  if (m === "box") return "箱体(box)";
   if (m === "extrema") return "鏋佸€?extrema)";
   if (m === "ransac") return "RANSAC(ransac)";
   if (m === "regression") return "鍥炲綊(regression)";
@@ -1350,7 +1352,7 @@ function methodDisplayName(method) {
 
 function allChannelDisplayOff(settings) {
   const d = settings?.display || {};
-  return !d.showExtrema && !d.showRansac && !d.showRegression;
+  return !d.showBox && !d.showExtrema && !d.showRansac && !d.showRegression;
 }
 
 function isChannelDetectionEnabled(settings = state.channelSettings) {
@@ -1364,6 +1366,7 @@ function isReversalDetectionEnabled(settings = state.reversalSettings) {
 function isMethodEnabled(method) {
   const m = normalizeMethodName(method);
   const d = state.channelSettings?.display || {};
+  if (m === "box") return !!d.showBox;
   if (m === "extrema") return !!d.showExtrema;
   if (m === "ransac") return !!d.showRansac;
   if (m === "regression") return !!d.showRegression;
@@ -3308,6 +3311,8 @@ const channelOverlayShapes = computed(() => {
           ? "#ffd166"
           : status === "accepted"
           ? "#ff9f43"
+          : seg.method === "box"
+          ? "#22c55e"
           : seg.method === "ransac"
           ? "#ff6d3a"
           : seg.method === "regression"
@@ -3451,6 +3456,87 @@ const zigzagOverlayData = computed(() => {
         id: `zigzag-${typ}-${t}-${String(row?.trace_id || idx)}`,
         type: typ.toLowerCase(),
         d: `M ${x0} ${baseY} Q ${x} ${controlY} ${x1} ${baseY}`,
+      };
+    })
+    .filter((x) => !!x);
+});
+
+const detectBoxOverlayData = computed(() => {
+  void projectionVersion.value;
+  void barDataVersion.value;
+  if (!seriesRefs.candle) return [];
+  const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
+  const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
+  const seen = new Set();
+  const parsed = (Array.isArray(props.strategyTraces) ? props.strategyTraces : [])
+    .filter((row) => {
+      if (String(row?.strategy_id || "") !== "indicator.detect_box") return false;
+      const symbol = String(row?.symbol || "").trim().toLowerCase();
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false;
+      const timeframe = String(row?.timeframe || "").trim().toLowerCase();
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false;
+      return String(row?.step_key || "") === "BOX_DETECTED";
+    })
+    .map((row, idx) => {
+      const metrics = row?.metrics && typeof row.metrics === "object" ? row.metrics : {};
+      const support = Number(metrics.box_support ?? metrics?.feature_payload?.support);
+      const resistance = Number(metrics.box_resistance ?? metrics?.feature_payload?.resistance);
+      const startTime = parseStrategyMetricTime(metrics.box_start_time ?? metrics?.feature_payload?.start_time);
+      const endTime = parseStrategyMetricTime(metrics.box_end_time ?? metrics?.feature_payload?.end_time) || strategyTraceTime(row);
+      if (!Number.isFinite(support) || !Number.isFinite(resistance) || resistance <= support) return null;
+      if (!Number.isFinite(startTime) || startTime <= 0 || !Number.isFinite(endTime) || endTime <= 0) return null;
+      return { row, idx, metrics, support, resistance, startTime, endTime };
+    })
+    .filter((x) => !!x)
+    .sort((a, b) => a.startTime - b.startTime || a.endTime - b.endTime);
+  const selected = [];
+  for (const item of parsed) {
+    const height = item.resistance - item.support;
+    const barCount = Number(item.metrics.box_optimized_bar_count ?? item.metrics?.feature_payload?.optimized_bar_count ?? 0);
+    const score = [Number.isFinite(barCount) ? barCount : 0, -height, item.endTime];
+    const last = selected[selected.length - 1];
+    if (last && item.startTime <= last.groupEnd) {
+      const lastScore = last.score || [0, 0, 0];
+      const groupEnd = Math.max(item.endTime, last.groupEnd);
+      if (
+        score[0] > lastScore[0]
+        || (score[0] === lastScore[0] && score[1] > lastScore[1])
+        || (score[0] === lastScore[0] && score[1] === lastScore[1] && score[2] > lastScore[2])
+      ) {
+        selected[selected.length - 1] = { ...item, score, groupEnd };
+      } else {
+        last.groupEnd = groupEnd;
+      }
+      continue;
+    }
+    selected.push({ ...item, score, groupEnd: item.endTime });
+  }
+  return selected
+    .map((item) => {
+      const { row, idx, support, resistance, startTime, endTime } = item;
+      const dedupeKey = `${startTime}-${endTime}-${support}-${resistance}`;
+      if (seen.has(dedupeKey)) return null;
+      seen.add(dedupeKey);
+      const x0 = mapTimeToXWithFallback(startTime);
+      const x1 = mapTimeToXWithFallback(endTime);
+      const y0 = Number(seriesRefs.candle.priceToCoordinate(resistance));
+      const y1 = Number(seriesRefs.candle.priceToCoordinate(support));
+      if (x0 === null || x1 === null || !Number.isFinite(y0) || !Number.isFinite(y1)) return null;
+      const left = Math.min(x0, x1);
+      const right = Math.max(x0, x1);
+      const top = Math.min(y0, y1);
+      const bottom = Math.max(y0, y1);
+      if (right - left < 2 || bottom - top < 2) return null;
+      return {
+        id: `detect-box-${String(row?.trace_id || idx)}-${dedupeKey}`,
+        x: left,
+        y: top,
+        width: right - left,
+        height: bottom - top,
+        resistanceY: y0,
+        supportY: y1,
+        resistance,
+        support,
       };
     })
     .filter((x) => !!x);
@@ -5124,6 +5210,29 @@ onUnmounted(() => {
         </div>
         <div class="strategy-overlay-layer">
           <svg :width="overlaySize.width" :height="overlaySize.height">
+            <g v-for="item in detectBoxOverlayData" :key="item.id" class="detect-box-overlay">
+              <rect
+                class="detect-box-rect"
+                :x="item.x"
+                :y="item.y"
+                :width="item.width"
+                :height="item.height"
+              />
+              <line
+                class="detect-box-boundary"
+                :x1="item.x"
+                :y1="item.resistanceY"
+                :x2="item.x + item.width"
+                :y2="item.resistanceY"
+              />
+              <line
+                class="detect-box-boundary"
+                :x1="item.x"
+                :y1="item.supportY"
+                :x2="item.x + item.width"
+                :y2="item.supportY"
+              />
+            </g>
             <template v-for="item in strategyOverlayData" :key="item.id">
               <rect
                 v-if="item.shape === 'trade-shade'"
@@ -5840,6 +5949,18 @@ onUnmounted(() => {
 .strategy-trade-shade.loss {
   fill: rgba(34, 197, 94, 0.36);
   stroke: rgba(74, 222, 128, 0.88);
+}
+
+.detect-box-rect {
+  fill: rgba(34, 197, 94, 0.035);
+  stroke: rgba(34, 197, 94, 0.62);
+  stroke-width: 1;
+  stroke-dasharray: 6 4;
+}
+
+.detect-box-boundary {
+  stroke: rgba(34, 197, 94, 0.86);
+  stroke-width: 1;
 }
 
 .strategy-exit-circle {

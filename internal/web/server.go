@@ -388,6 +388,7 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/strategy/start", s.handleStrategyStart)
 	mux.HandleFunc("/api/strategy/stop", s.handleStrategyStop)
 	mux.HandleFunc("/api/strategy/restart", s.handleStrategyRestart)
+	mux.HandleFunc("/api/strategy/compositions", s.handleStrategyCompositions)
 	mux.HandleFunc("/api/strategy/definitions", s.handleStrategyDefinitions)
 	mux.HandleFunc("/api/strategy/instances", s.handleStrategyInstances)
 	mux.HandleFunc("/api/strategy/instances/", s.handleStrategyInstanceAction)
@@ -2217,6 +2218,60 @@ func (s *Server) handleStrategyDefinitions(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"items": items})
+}
+
+func (s *Server) handleStrategyCompositions(w http.ResponseWriter, r *http.Request) {
+	if s.userConfig == nil {
+		http.Error(w, "user config store unavailable", http.StatusInternalServerError)
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		items, ok, err := s.userConfig.LoadStrategyCompositions(s.currentOwner())
+		if err != nil {
+			http.Error(w, "load strategy compositions failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !ok || len(items) == 0 {
+			items = defaultStrategyCompositions()
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"items": items})
+	case http.MethodPut:
+		var req struct {
+			Items []userconfig.StrategyComposition `json:"items"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "invalid json body", http.StatusBadRequest)
+			return
+		}
+		if err := s.userConfig.SaveStrategyCompositions(s.currentOwner(), req.Items); err != nil {
+			http.Error(w, "save strategy compositions failed: "+err.Error(), http.StatusInternalServerError)
+			return
+		}
+		items, _, _ := s.userConfig.LoadStrategyCompositions(s.currentOwner())
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
+	default:
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+	}
+}
+
+func defaultStrategyCompositions() []userconfig.StrategyComposition {
+	now := time.Now()
+	return []userconfig.StrategyComposition{
+		{
+			CompositionID:     "ma20_state_zigzag",
+			DisplayName:       "MA20状态图 + ZigZag指标",
+			PrimaryStrategyID: "ma20.state_diagram_short",
+			HelperStrategyIDs: []string{"indicator.zigzag_atr26"},
+			PrimaryParams: map[string]any{
+				"feature_dependencies": []string{"zigzag_atr26"},
+			},
+			HelperParamsByStrategy: map[string]map[string]any{
+				"indicator.zigzag_atr26": {},
+			},
+			UpdatedAt: now,
+		},
+	}
 }
 
 func (s *Server) handleStrategyInstances(w http.ResponseWriter, r *http.Request) {

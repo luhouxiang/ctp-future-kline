@@ -77,6 +77,9 @@ class ATRZigZagIndicatorStrategyTest(unittest.TestCase):
         self.assertEqual(peak_metrics["confirmed_index"], 33)
         self.assertGreaterEqual(peak_metrics["pivot_bars_since_previous"], 5)
         self.assertAlmostEqual(peak_metrics["reversal_value"], peak_metrics["atr"] * 2.0)
+        self.assertEqual(peak_metrics["feature_key"], "zigzag_atr26")
+        self.assertEqual(peak_metrics["feature_payload"]["pivot_index"], 28)
+        self.assertEqual(peak_metrics["feature_payload"]["zigzag_type"], "PEAK")
 
         trough = outs[38]
         self.assertTrue(trough["no_signal"])

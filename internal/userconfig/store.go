@@ -18,15 +18,31 @@ const (
 	scopeTrade            = "trade"
 	scopeAppMode          = "app_mode"
 	scopeKlineGeneration  = "kline_generation"
+	scopeStrategy         = "strategy"
 	keyEnabled            = "enabled"
 	keyCurrentMode        = "current_mode"
 	keyReplayResumeCursor = "replay_resume_cursor"
 	keyKlineSettings      = "settings"
+	keyCompositions       = "compositions"
 )
 
 // Store 管理用户级配置覆盖项的持久化读写。
 type Store struct {
 	db *sql.DB
+}
+
+// StrategyComposition 描述前端编排的一组策略实例模板。
+//
+// 运行时仍落到普通 strategy_instances：helper 策略先启动并产生只读 features，
+// primary 策略最后启动并根据 features 裁决最终开平仓信号。
+type StrategyComposition struct {
+	CompositionID          string                    `json:"composition_id"`
+	DisplayName            string                    `json:"display_name"`
+	PrimaryStrategyID      string                    `json:"primary_strategy_id"`
+	HelperStrategyIDs      []string                  `json:"helper_strategy_ids"`
+	PrimaryParams          map[string]any            `json:"primary_params"`
+	HelperParamsByStrategy map[string]map[string]any `json:"helper_params_by_strategy"`
+	UpdatedAt              time.Time                 `json:"updated_at"`
 }
 
 // TradeOverrides 描述当前支持的实盘交易覆盖项。
@@ -163,6 +179,50 @@ func (s *Store) LoadKlineGenerationSettings(owner string) (klinesettings.Setting
 		return klinesettings.Default(), false, err
 	}
 	return klinesettings.Normalize(settings), true, nil
+}
+
+func (s *Store) SaveStrategyCompositions(owner string, items []StrategyComposition) error {
+	return s.saveValue(owner, scopeStrategy, keyCompositions, normalizeStrategyCompositions(items))
+}
+
+func (s *Store) LoadStrategyCompositions(owner string) ([]StrategyComposition, bool, error) {
+	raw, ok, err := s.LoadRawValue(owner, scopeStrategy, keyCompositions)
+	if !ok || err != nil {
+		return nil, ok, err
+	}
+	var items []StrategyComposition
+	if err := json.Unmarshal(raw, &items); err != nil {
+		return nil, false, err
+	}
+	return normalizeStrategyCompositions(items), true, nil
+}
+
+func normalizeStrategyCompositions(items []StrategyComposition) []StrategyComposition {
+	out := make([]StrategyComposition, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if item.CompositionID == "" || item.PrimaryStrategyID == "" {
+			continue
+		}
+		if _, exists := seen[item.CompositionID]; exists {
+			continue
+		}
+		seen[item.CompositionID] = struct{}{}
+		if item.DisplayName == "" {
+			item.DisplayName = item.CompositionID
+		}
+		if item.PrimaryParams == nil {
+			item.PrimaryParams = map[string]any{}
+		}
+		if item.HelperParamsByStrategy == nil {
+			item.HelperParamsByStrategy = map[string]map[string]any{}
+		}
+		if item.UpdatedAt.IsZero() {
+			item.UpdatedAt = time.Now()
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func (s *Store) saveValue(owner, scopeName, itemKey string, value any) error {

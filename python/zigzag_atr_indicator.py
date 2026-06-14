@@ -274,7 +274,7 @@ class ATRZigZagIndicatorStrategy(Strategy):
         previous_index = int(previous["index"])
         price = pivot["high"] if typ == "PEAK" else pivot["low"]
         bars_since_previous = int(locked["index"]) - previous_index
-        return {
+        payload = {
             "indicator": "zigzag_atr26",
             "signal": "ZIGZAG",
             "zigzag_type": typ,
@@ -291,6 +291,16 @@ class ATRZigZagIndicatorStrategy(Strategy):
             "confirmed_low": confirmed["low"],
             "reversal_value": atr,
         }
+        payload["feature_key"] = "zigzag_atr26"
+        payload["feature_payload"] = {
+            "pivot_index": payload["pivot_index"],
+            "pivot_time": payload["pivot_time"],
+            "pivot_price": payload["pivot_price"],
+            "confirmed_time": payload["confirmed_time"],
+            "confirmed_index": payload["confirmed_index"],
+            "zigzag_type": payload["zigzag_type"],
+        }
+        return payload
 
     def _metrics(self, state: ZigZagState, params: dict[str, Any]) -> dict[str, Any]:
         atr_period = max(1, int(_float(params.get("atr_period"), 26)))

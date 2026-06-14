@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { detectChannelsInVisibleRange, normalizeChannelSettingsV2 } from '../src/chart/analysis/channelDetector.js'
+import { DetectBox, detectChannelsInVisibleRange, normalizeChannelSettingsV2 } from '../src/chart/analysis/channelDetector.js'
 
 function makeChannelBars(count, opts = {}) {
   const slope = Number(opts.slope ?? 0.12)
@@ -56,6 +56,23 @@ function makeWedgeBars(count) {
   return bars
 }
 
+function makeBoxBars(count) {
+  const bars = []
+  for (let i = 0; i < count; i += 1) {
+    const wave = Math.sin((i / 8) * Math.PI)
+    const center = 100 + wave * 2
+    bars.push({
+      adjusted_time: 1_700_200_000 + i * 60,
+      open: center + Math.sin(i * 0.33) * 0.12,
+      high: center + 0.35 + Math.sin(i * 0.11) * 0.04,
+      low: center - 0.35 - Math.cos(i * 0.13) * 0.04,
+      close: center + Math.cos(i * 0.29) * 0.12,
+      volume: 300 + i,
+    })
+  }
+  return bars
+}
+
 function detectWith(settings, bars = makeChannelBars(260)) {
   return detectChannelsInVisibleRange({
     bars,
@@ -90,6 +107,33 @@ test('display switch: only regression', () => {
   assert.ok(segments.every((x) => x.method === 'regression'))
 })
 
+test('display switch: only DetectBox', () => {
+  const bars = makeBoxBars(120)
+  const settings = {
+    display: { showBox: true, showExtrema: false, showRansac: false, showRegression: false },
+    algorithms: { box: { maxHeightAtr: 20, minInsideRatio: 0.8 } },
+  }
+  const segments = detectWith(settings, bars)
+  assert.ok(segments.length >= 1)
+  assert.ok(segments.every((x) => x.method === 'box'))
+  assert.ok(segments[0].boxResistance > segments[0].boxSupport)
+})
+
+test('DetectBox returns a horizontal rectangle candidate', () => {
+  const bars = makeBoxBars(120)
+  const box = DetectBox({
+    bars,
+    visibleStartIndex: 0,
+    visibleEndIndex: bars.length - 1,
+    timeframe: '1m',
+    settings: { maxHeightAtr: 20, minInsideRatio: 0.8 },
+  })
+  assert.ok(box)
+  assert.equal(box.method, 'box')
+  assert.equal(box.upperStart, box.upperEnd)
+  assert.equal(box.lowerStart, box.lowerEnd)
+})
+
 test('display switch: all enabled can coexist', () => {
   const settings = {
     display: { showExtrema: true, showRansac: true, showRegression: true },
@@ -117,6 +161,7 @@ test('legacy flat settings are migrated to grouped structure', () => {
   assert.equal(out.algorithms.ransac.slopeTolAtrFactor, 0.2)
   assert.equal(out.common.hideAuto, true)
   assert.equal(out.display.showExtrema, false)
+  assert.equal(out.display.showBox, false)
   assert.equal(out.display.showRansac, false)
   assert.equal(out.display.showRegression, false)
 })

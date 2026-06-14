@@ -189,6 +189,77 @@ func TestZigZagFeatureCacheInjectsRecentPeaksByScope(t *testing.T) {
 	}
 }
 
+func TestFeatureCacheInjectsDeclaredGenericFeatureOnly(t *testing.T) {
+	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
+	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
+		StrategyID: "indicator.custom",
+		Symbol:     "rb2601",
+		Timeframe:  "1m",
+		Mode:       RunTypeRealtime,
+		Metrics: map[string]any{
+			"feature_key":     "custom_feature",
+			"feature_payload": map[string]any{"score": 0.7, "state": "ready"},
+		},
+	})
+	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
+		StrategyID: "indicator.other",
+		Symbol:     "rb2601",
+		Timeframe:  "1m",
+		Mode:       RunTypeRealtime,
+		Metrics: map[string]any{
+			"feature_key":     "other_feature",
+			"feature_payload": map[string]any{"score": 0.1},
+		},
+	})
+
+	features := m.featuresFor(StrategyInstance{
+		Timeframe: "1m",
+		Params: map[string]any{
+			"feature_dependencies": []any{"custom_feature"},
+		},
+	}, "rb2601", RunTypeRealtime)
+
+	custom, ok := features["custom_feature"].(map[string]any)
+	if !ok {
+		t.Fatalf("custom feature missing: %+v", features)
+	}
+	if custom["score"] != 0.7 || custom["state"] != "ready" {
+		t.Fatalf("custom feature = %+v, want latest payload", custom)
+	}
+	if _, exists := features["other_feature"]; exists {
+		t.Fatalf("other_feature injected despite dependencies: %+v", features)
+	}
+}
+
+func TestFeatureDependenciesFallbackKeepsLegacyZigZag(t *testing.T) {
+	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
+	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
+		StrategyID: "indicator.zigzag_atr26",
+		Symbol:     "rb2601",
+		Timeframe:  "1m",
+		Mode:       RunTypeRealtime,
+		EventTime:  time.Date(2026, 1, 2, 9, 40, 0, 0, time.Local),
+		Metrics: map[string]any{
+			"indicator":       "zigzag_atr26",
+			"feature_key":     "zigzag_atr26",
+			"feature_payload": map[string]any{"pivot_index": 12},
+			"zigzag_type":     "PEAK",
+			"pivot_index":     12,
+			"confirmed_index": 20,
+		},
+	})
+
+	features := m.featuresFor(StrategyInstance{Timeframe: "1m"}, "rb2601", RunTypeRealtime)
+	zigzag, ok := features[zigzagATR26FeatureID].(map[string]any)
+	if !ok {
+		t.Fatalf("legacy zigzag missing: %+v", features)
+	}
+	peaks, ok := zigzag["peaks"].([]map[string]any)
+	if !ok || len(peaks) != 1 {
+		t.Fatalf("peaks = %#v, want one legacy peak", zigzag["peaks"])
+	}
+}
+
 func TestHandleBarRunsIndicatorBeforeTradingAndInjectsFeature(t *testing.T) {
 	type capturedRequest struct {
 		StrategyID string

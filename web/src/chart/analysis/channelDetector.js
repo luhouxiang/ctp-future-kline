@@ -1,5 +1,6 @@
 export const DEFAULT_CHANNEL_SETTINGS = {
   display: {
+    showBox: false,
     showExtrema: false,
     showRansac: false,
     showRegression: false,
@@ -47,6 +48,18 @@ export const DEFAULT_CHANNEL_SETTINGS = {
     },
     regression: {
       residualAtrFactor: 0.8,
+    },
+    box: {
+      pivotKMinute: 3,
+      pivotKHour: 5,
+      pivotKDay: 8,
+      errorPct: 0.015,
+      boundaryAtrFactor: 0.6,
+      minPivots: 2,
+      minInsideRatio: 0.85,
+      minAlternations: 3,
+      minHeightAtr: 0.6,
+      maxHeightAtr: 8,
     },
   },
 }
@@ -129,6 +142,7 @@ export function normalizeChannelSettingsV2(raw) {
   const extRaw = toObj(algRaw.extrema)
   const ranRaw = toObj(algRaw.ransac)
   const regRaw = toObj(algRaw.regression)
+  const boxRaw = toObj(algRaw.box)
 
   if (!hasGrouped) {
     mergeCommonFromLegacy(out.common, source)
@@ -148,6 +162,7 @@ export function normalizeChannelSettingsV2(raw) {
       0.1,
       5,
     )
+    out.display.showBox = readBool(pick(source, ['showBox', 'show_box', 'useBoxChannel', 'use_box_channel'], out.display.showBox), out.display.showBox)
     out.display.showExtrema = readBool(pick(source, ['showExtrema', 'show_extrema', 'useExtremaChannel', 'use_extrema_channel'], out.display.showExtrema), out.display.showExtrema)
     out.display.showRansac = readBool(pick(source, ['showRansac', 'show_ransac', 'useRansacChannel', 'use_ransac_channel'], out.display.showRansac), out.display.showRansac)
     out.display.showRegression = readBool(
@@ -157,6 +172,7 @@ export function normalizeChannelSettingsV2(raw) {
     return out
   }
 
+  out.display.showBox = readBool(pick(displayRaw, ['showBox', 'show_box'], out.display.showBox), out.display.showBox)
   out.display.showExtrema = readBool(pick(displayRaw, ['showExtrema', 'show_extrema'], out.display.showExtrema), out.display.showExtrema)
   out.display.showRansac = readBool(pick(displayRaw, ['showRansac', 'show_ransac'], out.display.showRansac), out.display.showRansac)
   out.display.showRegression = readBool(pick(displayRaw, ['showRegression', 'show_regression'], out.display.showRegression), out.display.showRegression)
@@ -193,6 +209,17 @@ export function normalizeChannelSettingsV2(raw) {
     0.1,
     5,
   )
+
+  out.algorithms.box.pivotKMinute = Math.round(clamp(pick(boxRaw, ['pivotKMinute', 'pivot_k_minute'], out.algorithms.box.pivotKMinute), 2, 20))
+  out.algorithms.box.pivotKHour = Math.round(clamp(pick(boxRaw, ['pivotKHour', 'pivot_k_hour'], out.algorithms.box.pivotKHour), 2, 24))
+  out.algorithms.box.pivotKDay = Math.round(clamp(pick(boxRaw, ['pivotKDay', 'pivot_k_day'], out.algorithms.box.pivotKDay), 2, 30))
+  out.algorithms.box.errorPct = clamp(pick(boxRaw, ['errorPct', 'error_pct'], out.algorithms.box.errorPct), 0.001, 0.1)
+  out.algorithms.box.boundaryAtrFactor = clamp(pick(boxRaw, ['boundaryAtrFactor', 'boundary_atr_factor'], out.algorithms.box.boundaryAtrFactor), 0, 5)
+  out.algorithms.box.minPivots = Math.round(clamp(pick(boxRaw, ['minPivots', 'min_pivots'], out.algorithms.box.minPivots), 2, 12))
+  out.algorithms.box.minInsideRatio = clamp(pick(boxRaw, ['minInsideRatio', 'min_inside_ratio'], out.algorithms.box.minInsideRatio), 0.5, 1)
+  out.algorithms.box.minAlternations = Math.round(clamp(pick(boxRaw, ['minAlternations', 'min_alternations'], out.algorithms.box.minAlternations), 1, 20))
+  out.algorithms.box.minHeightAtr = clamp(pick(boxRaw, ['minHeightAtr', 'min_height_atr'], out.algorithms.box.minHeightAtr), 0, 20)
+  out.algorithms.box.maxHeightAtr = clamp(pick(boxRaw, ['maxHeightAtr', 'max_height_atr'], out.algorithms.box.maxHeightAtr), out.algorithms.box.minHeightAtr, 100)
 
   return out
 }
@@ -540,7 +567,6 @@ function extremaChannelCandidate(args) {
   const pivots = findPivots(bars, pivotK, startIndex)
   const len = endIndex - startIndex + 1
   const out = []
-  console.log('[extrema] pivots:', { 'startIndex':startIndex, 'highs': pivots.highs, 'lows': pivots.lows })
 
   // 第二步（上升通道）：在 lows 中选两点锚定支撑线斜率。
   const upPair = pickExtremaPair(pivots.lows, 'up', atr, settings, len - 1)
@@ -625,6 +651,152 @@ function extremaChannelCandidate(args) {
   return out.sort((a, b) => Number(b.score) - Number(a.score))[0]
 }
 
+function meanAbsError(points, level) {
+  if (!Array.isArray(points) || !points.length || !Number.isFinite(level)) return Number.POSITIVE_INFINITY
+  let sum = 0
+  let n = 0
+  for (const p of points) {
+    const y = Number(p?.y)
+    if (!Number.isFinite(y)) continue
+    sum += Math.abs(y - level)
+    n += 1
+  }
+  return n > 0 ? sum / n : Number.POSITIVE_INFINITY
+}
+
+function maxAbsError(points, level) {
+  if (!Array.isArray(points) || !points.length || !Number.isFinite(level)) return Number.POSITIVE_INFINITY
+  let out = 0
+  for (const p of points) {
+    const y = Number(p?.y)
+    if (!Number.isFinite(y)) continue
+    out = Math.max(out, Math.abs(y - level))
+  }
+  return out
+}
+
+function pivotAlternations(highs, lows) {
+  const seq = [
+    ...(highs || []).map((p) => ({ x: Number(p.x), type: 'H' })),
+    ...(lows || []).map((p) => ({ x: Number(p.x), type: 'L' })),
+  ]
+    .filter((p) => Number.isFinite(p.x))
+    .sort((a, b) => a.x - b.x)
+  let alternations = 0
+  let prev = ''
+  for (const item of seq) {
+    if (prev && item.type !== prev) alternations += 1
+    prev = item.type
+  }
+  return alternations
+}
+
+function boxCandidate(args) {
+  const { settings, bars, startIndex, endIndex, atr, pivotK } = args
+  const pivots = findPivots(bars, pivotK, startIndex)
+  if (pivots.highs.length < settings.minPivots || pivots.lows.length < settings.minPivots) return null
+
+  const resistance = quantile(pivots.highs.map((p) => Number(p.y)).filter(Number.isFinite), 0.5)
+  const support = quantile(pivots.lows.map((p) => Number(p.y)).filter(Number.isFinite), 0.5)
+  if (!Number.isFinite(resistance) || !Number.isFinite(support) || resistance <= support) return null
+
+  const height = resistance - support
+  const heightAtr = height / Math.max(atr, 1e-6)
+  if (heightAtr < settings.minHeightAtr || heightAtr > settings.maxHeightAtr) return null
+
+  const upperTol = Math.max(Math.abs(resistance) * settings.errorPct, atr * settings.boundaryAtrFactor)
+  const lowerTol = Math.max(Math.abs(support) * settings.errorPct, atr * settings.boundaryAtrFactor)
+  const peakMaxErr = maxAbsError(pivots.highs, resistance)
+  const troughMaxErr = maxAbsError(pivots.lows, support)
+  if (peakMaxErr > upperTol || troughMaxErr > lowerTol) return null
+
+  const closeTol = Math.max(atr * settings.boundaryAtrFactor, height * settings.errorPct)
+  let inside = 0
+  let valid = 0
+  for (const bar of bars) {
+    const close = Number(bar?.close)
+    if (!Number.isFinite(close)) continue
+    valid += 1
+    if (close >= support - closeTol && close <= resistance + closeTol) inside += 1
+  }
+  if (!valid) return null
+  const insideRatio = inside / valid
+  if (insideRatio < settings.minInsideRatio) return null
+
+  const alternations = pivotAlternations(pivots.highs, pivots.lows)
+  if (alternations < settings.minAlternations) return null
+
+  let breakout = 'none'
+  const lastClose = Number(bars[bars.length - 1]?.close)
+  if (Number.isFinite(lastClose) && lastClose > resistance + closeTol) breakout = 'up'
+  else if (Number.isFinite(lastClose) && lastClose < support - closeTol) breakout = 'down'
+
+  const pivotXs = pivots.highs.concat(pivots.lows).map((p) => Number(p.x)).filter(Number.isFinite)
+  const segStartIndex = Math.max(startIndex, Math.floor(Math.min(...pivotXs)))
+  const segEndIndex = Math.min(endIndex, Math.ceil(Math.max(...pivotXs)))
+  const startBar = bars[Math.max(0, segStartIndex - startIndex)] || bars[0]
+  const endBar = bars[Math.max(0, segEndIndex - startIndex)] || bars[bars.length - 1]
+  const peakMeanErr = meanAbsError(pivots.highs, resistance)
+  const troughMeanErr = meanAbsError(pivots.lows, support)
+  const flatScore = clamp(1 - ((peakMeanErr / Math.max(upperTol, 1e-6)) + (troughMeanErr / Math.max(lowerTol, 1e-6))) * 0.5, 0, 1)
+  const altScore = clamp(alternations / Math.max(settings.minAlternations + 2, 1), 0, 1)
+  const pivotScore = clamp((pivots.highs.length + pivots.lows.length) / Math.max(settings.minPivots * 3, 1), 0, 1)
+  const score = 0.45 * insideRatio + 0.25 * flatScore + 0.18 * altScore + 0.12 * pivotScore
+
+  return segmentFromRaw({
+    id: `box-${safeTime(startBar)}-${safeTime(endBar)}-${Math.round(resistance * 100)}-${Math.round(support * 100)}`,
+    baseId: `box-${safeTime(startBar)}-${safeTime(endBar)}`,
+    method: 'box',
+    startTime: safeTime(startBar),
+    endTime: safeTime(endBar),
+    upperStart: resistance,
+    upperEnd: resistance,
+    lowerStart: support,
+    lowerEnd: support,
+    slope: 0,
+    slopeDelta: 0,
+    insideRatio,
+    touchCount: pivots.highs.length + pivots.lows.length,
+    score,
+    windowStartIndex: segStartIndex,
+    windowEndIndex: segEndIndex,
+    _slopeTol: Math.max(atr / Math.max(1, endIndex - startIndex + 1), 1e-6),
+    boxResistance: resistance,
+    boxSupport: support,
+    boxHeightPct: height / Math.max(Math.abs(support), 1e-6),
+    boxHeightAtr: heightAtr,
+    boxPeakCount: pivots.highs.length,
+    boxTroughCount: pivots.lows.length,
+    boxAlternations: alternations,
+    boxBreakout: breakout,
+  })
+}
+
+export function DetectBox(input) {
+  const bars = Array.isArray(input?.bars) ? input.bars : []
+  if (bars.length < 20) return null
+  const rawStart = Number(input?.visibleStartIndex ?? 0)
+  const rawEnd = Number(input?.visibleEndIndex ?? (bars.length - 1))
+  const start = clamp(Math.floor(Math.min(rawStart, rawEnd)), 0, bars.length - 1)
+  const end = clamp(Math.ceil(Math.max(rawStart, rawEnd)), 0, bars.length - 1)
+  const winBars = bars.slice(start, end + 1)
+  if (winBars.length < 20) return null
+  const settings = normalizeChannelSettingsV2({
+    display: { showBox: true },
+    algorithms: { box: toObj(input?.settings) },
+  }).algorithms.box
+  const bucket = timeframeBucket(input?.timeframe || '1m')
+  const atr = Math.max(1e-6, calcAtr(winBars, 14))
+  return boxCandidate({
+    settings,
+    bars: winBars,
+    startIndex: start,
+    endIndex: end,
+    atr,
+    pivotK: pivotByBucket(bucket, settings),
+  })
+}
+
 function intervalIoU(a0, a1, b0, b1) {
   const left = Math.max(a0, b0)
   const right = Math.min(a1, b1)
@@ -691,8 +863,8 @@ export function detectChannelsInVisibleRange(input) {
   const settings = normalizeChannelSettingsV2(input?.settings)
   const display = settings.display
   const common = settings.common
-  // 三类算法都关闭时直接返回空结果。
-  if (!display.showExtrema && !display.showRansac && !display.showRegression) return []
+  // 所有算法都关闭时直接返回空结果。
+  if (!display.showBox && !display.showExtrema && !display.showRansac && !display.showRegression) return []
 
   // 3) 可见区索引规范化：
   // - 支持 start/end 颠倒；
@@ -713,6 +885,7 @@ export function detectChannelsInVisibleRange(input) {
   const slopeBase = Math.max(1, windowSize)
   // 按算法分桶收集候选，后续各自 NMS。
   const byMethod = {
+    box: [],
     extrema: [],
     ransac: [],
     regression: [],
@@ -731,6 +904,18 @@ export function detectChannelsInVisibleRange(input) {
     const ransacSlopeTol = Math.max(1e-6, (settings.algorithms.ransac.slopeTolAtrFactor * Math.max(atr, 1e-6)) / slopeBase)
     // 稳定随机种子：保证同一窗口在同一数据下结果可复现。
     const seed = safeTime(winBars[0]) + winStart * 31
+
+    if (display.showBox) {
+      const box = boxCandidate({
+        settings: settings.algorithms.box,
+        bars: winBars,
+        startIndex: winStart,
+        endIndex: winEnd,
+        atr,
+        pivotK: pivotByBucket(bucket, settings.algorithms.box),
+      })
+      if (box) byMethod.box.push(box)
+    }
 
     // 5.1 回归通道候选
     if (display.showRegression) {
@@ -783,6 +968,7 @@ export function detectChannelsInVisibleRange(input) {
 
   // 6) 先做“算法内”NMS，去除同类高度重叠候选，保留高质量代表。
   const merged = []
+  if (display.showBox) merged.push(...nmsSegments(byMethod.box, common))
   if (display.showExtrema) merged.push(...nmsSegments(byMethod.extrema, common))
   if (display.showRansac) merged.push(...nmsSegments(byMethod.ransac, common))
   if (display.showRegression) merged.push(...nmsSegments(byMethod.regression, common))

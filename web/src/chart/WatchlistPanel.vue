@@ -306,6 +306,21 @@ const strategyInstances = computed(() => (
     .sort((a, b) => Date.parse(String(b?.updated_at || b?.created_at || '')) - Date.parse(String(a?.updated_at || a?.created_at || '')))
 ))
 
+const strategyInstanceDisplayRows = computed(() => {
+  const rows = []
+  const seenGroups = new Set()
+  for (const item of strategyInstances.value) {
+    const params = item?.params && typeof item.params === 'object' ? item.params : {}
+    const compositionID = String(params.composition_id || '').trim()
+    if (compositionID && !seenGroups.has(compositionID)) {
+      seenGroups.add(compositionID)
+      rows.push({ kind: 'group', id: compositionID, label: `组合 ${compositionID}` })
+    }
+    rows.push({ kind: 'instance', id: item.instance_id, item })
+  }
+  return rows
+})
+
 const activeStrategyInstanceId = computed(() => {
   const selected = String(props.selectedStrategyInstanceId || '').trim()
   if (selected && strategyInstances.value.some((item) => String(item?.instance_id || '') === selected)) return selected
@@ -449,6 +464,14 @@ function strategyInstanceName(item) {
   const timeframe = String(item?.timeframe || '').trim()
   if (!timeframe) return base || '--'
   return base.includes(`-${timeframe}`) || base.includes(`· ${timeframe}`) ? base : `${base} · ${timeframe}`
+}
+
+function compositionRoleLabel(item) {
+  const params = item?.params && typeof item.params === 'object' ? item.params : {}
+  const role = String(params.composition_role || '').trim()
+  if (role === 'primary') return '主策略'
+  if (role === 'helper') return '辅助指标'
+  return ''
 }
 
 function instanceStatusLabel(value) {
@@ -700,27 +723,29 @@ function compactText(value, fallback = '--') {
       <div class="tv-quote-card">
         <div class="tv-channel-settings-head">运行实例</div>
         <div class="tv-strategy-instance-list">
-          <div
-            v-for="item in strategyInstances"
-            :key="item.instance_id"
-            class="tv-strategy-instance-row"
-            :class="{ active: String(item.instance_id || '') === activeStrategyInstanceId }"
-            @click="emit('strategy-instance-select', item.instance_id)"
-          >
-            <div class="tv-strategy-instance-main">
-              <strong>{{ strategyInstanceName(item) }}</strong>
-              <small>{{ item.strategy_id }} · {{ (item.symbols || []).join(',') || '--' }} · {{ formatInstanceAnchor(item) }}</small>
-            </div>
-            <span class="tv-strategy-instance-status">{{ instanceStatusLabel(item.status) }}</span>
-            <button
-              v-if="String(item.status || '') === 'running'"
-              type="button"
-              class="tv-strategy-stop-btn"
-              @click.stop="emit('strategy-instance-stop', item.instance_id)"
+          <template v-for="row in strategyInstanceDisplayRows" :key="`${row.kind}-${row.id}`">
+            <div v-if="row.kind === 'group'" class="tv-strategy-instance-group">{{ row.label }}</div>
+            <div
+              v-else
+              class="tv-strategy-instance-row"
+              :class="{ active: String(row.item.instance_id || '') === activeStrategyInstanceId }"
+              @click="emit('strategy-instance-select', row.item.instance_id)"
             >
-              停止
-            </button>
-          </div>
+              <div class="tv-strategy-instance-main">
+                <strong>{{ strategyInstanceName(row.item) }}</strong>
+                <small>{{ [compositionRoleLabel(row.item), row.item.strategy_id, (row.item.symbols || []).join(',') || '--', formatInstanceAnchor(row.item)].filter(Boolean).join(' · ') }}</small>
+              </div>
+              <span class="tv-strategy-instance-status">{{ instanceStatusLabel(row.item.status) }}</span>
+              <button
+                v-if="String(row.item.status || '') === 'running'"
+                type="button"
+                class="tv-strategy-stop-btn"
+                @click.stop="emit('strategy-instance-stop', row.item.instance_id)"
+              >
+                停止
+              </button>
+            </div>
+          </template>
         </div>
         <div v-if="!strategyInstances.length" class="tv-object-empty">暂无策略实例</div>
       </div>
@@ -871,6 +896,7 @@ function compactText(value, fallback = '--') {
         <summary>参数说明与操作语义</summary>
         <div class="tv-channel-help-content">
           <div class="help-item"><b>通用参数</b>：window/步长/inside/minTouches/NMS 等对三种算法共用。</div>
+          <div class="help-item"><b>箱体 DetectBox</b>：用局部波峰/波谷的中位数拟合水平压力/支撑，并校验箱内收盘比例与高低点交替。</div>
           <div class="help-item"><b>极值通道</b>：按低点与次低点/高点与次高点连线，再平行复制对侧边界。</div>
           <div class="help-item"><b>RANSAC 通道</b>：在枢轴点上做鲁棒拟合，适合离群较多场景。</div>
           <div class="help-item"><b>Regression 通道</b>：对收盘中心线回归并估计包络宽度，响应更平滑。</div>
@@ -899,6 +925,22 @@ function compactText(value, fallback = '--') {
           <label><input type="checkbox" :checked="draftSettings.common.showLabels" @change="onCommonBoolInput('showLabels', $event)" />显示标签</label>
         </div>
       </div>
+
+      <details class="tv-channel-help" open>
+        <summary><label><input type="checkbox" :checked="draftSettings.display.showBox" @change="onDisplayBoolInput('showBox', $event)" /> 箱体 DetectBox</label></summary>
+        <div class="tv-channel-grid">
+          <label>pivot_m<input type="number" :value="draftSettings.algorithms.box.pivotKMinute" @change="onAlgoNumberInput('box', 'pivotKMinute', $event)" /></label>
+          <label>pivot_h<input type="number" :value="draftSettings.algorithms.box.pivotKHour" @change="onAlgoNumberInput('box', 'pivotKHour', $event)" /></label>
+          <label>pivot_d<input type="number" :value="draftSettings.algorithms.box.pivotKDay" @change="onAlgoNumberInput('box', 'pivotKDay', $event)" /></label>
+          <label>边界误差%<input type="number" step="0.001" :value="draftSettings.algorithms.box.errorPct" @change="onAlgoNumberInput('box', 'errorPct', $event)" /></label>
+          <label>边界ATR<input type="number" step="0.01" :value="draftSettings.algorithms.box.boundaryAtrFactor" @change="onAlgoNumberInput('box', 'boundaryAtrFactor', $event)" /></label>
+          <label>极值最少<input type="number" :value="draftSettings.algorithms.box.minPivots" @change="onAlgoNumberInput('box', 'minPivots', $event)" /></label>
+          <label>箱内比例<input type="number" step="0.01" :value="draftSettings.algorithms.box.minInsideRatio" @change="onAlgoNumberInput('box', 'minInsideRatio', $event)" /></label>
+          <label>交替最少<input type="number" :value="draftSettings.algorithms.box.minAlternations" @change="onAlgoNumberInput('box', 'minAlternations', $event)" /></label>
+          <label>最小高度ATR<input type="number" step="0.1" :value="draftSettings.algorithms.box.minHeightAtr" @change="onAlgoNumberInput('box', 'minHeightAtr', $event)" /></label>
+          <label>最大高度ATR<input type="number" step="0.1" :value="draftSettings.algorithms.box.maxHeightAtr" @change="onAlgoNumberInput('box', 'maxHeightAtr', $event)" /></label>
+        </div>
+      </details>
 
       <details class="tv-channel-help" open>
         <summary><label><input type="checkbox" :checked="draftSettings.display.showExtrema" @change="onDisplayBoolInput('showExtrema', $event)" /> 极值通道</label></summary>
@@ -1179,6 +1221,12 @@ function compactText(value, fallback = '--') {
   border-bottom: 1px solid rgba(130, 156, 188, 0.14);
   font-size: 12px;
   cursor: pointer;
+}
+
+.tv-strategy-instance-group {
+  padding: 8px 2px 2px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
 .tv-strategy-instance-row.active {

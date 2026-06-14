@@ -12,7 +12,9 @@ import { DEFAULT_REVERSAL_SETTINGS, normalizeReversalSettings } from './analysis
 import { TRADE_WINDOW_PREF_KEY, readLastChartSessionPrefs, writeLastChartSessionPrefs } from './chartPrefs'
 import {
   buildChartStrategyInstance,
+  fetchStrategyCompositions,
   formatStrategyAnchorTime,
+  saveAndStartStrategyComposition,
   saveAndStartStrategyInstance,
   strategyDefaultParamsText,
 } from './strategyRuntime'
@@ -49,6 +51,7 @@ const quoteSnapshot = ref({})
 const quoteTicks = ref([])
 const lineOrders = ref([])
 const strategyDefinitions = ref([])
+const strategyCompositions = ref([])
 const strategyInstances = ref([])
 const strategyStatus = ref({})
 const strategyTraces = ref([])
@@ -58,6 +61,7 @@ const selectedStrategyBacktestRunId = ref('')
 const strategyBacktestResult = ref(null)
 const selectedStrategyInstanceId = ref('')
 const strategyStarting = ref(false)
+const strategyDetectBoxRestartTried = ref(false)
 const STRATEGY_RUNTIME_REFRESH_TIMEOUT_MS = 8_000
 const ma20ReplayReportRunning = ref(false)
 const ma20ReplayReportTaskID = ref("")
@@ -68,8 +72,12 @@ const strategyContextMenu = reactive({
   anchor: null,
   loading: false,
   selectedDefinition: null,
+  selectedComposition: null,
   startingStrategyID: '',
+  startingCompositionID: '',
   paramsText: '',
+  compositionPrimaryParamsText: '',
+  compositionHelperParamsText: '',
   error: '',
 })
 const latestReplayBarAnchor = ref(null)
@@ -688,6 +696,40 @@ async function fetchStrategyDefinitions(options = {}) {
   }
 }
 
+function hasDetectBoxStrategyDefinition(items = strategyDefinitions.value) {
+  return (Array.isArray(items) ? items : []).some((item) => String(item?.strategy_id || '') === 'indicator.detect_box')
+}
+
+function hasCurrentDetectBoxStrategyDefinition(items = strategyDefinitions.value) {
+  return (Array.isArray(items) ? items : []).some((item) => (
+    String(item?.strategy_id || '') === 'indicator.detect_box' && String(item?.version || '') === '1.0.9'
+  ))
+}
+
+async function ensureDetectBoxStrategyDefinition() {
+  if (hasCurrentDetectBoxStrategyDefinition() || strategyDetectBoxRestartTried.value) return
+  strategyDetectBoxRestartTried.value = true
+  const resp = await fetch('/api/strategy/restart', { method: 'POST' })
+  if (!resp.ok) throw new Error(await resp.text())
+  const items = await fetchStrategyDefinitions({ strict: true })
+  if (!hasDetectBoxStrategyDefinition(items)) {
+    throw new Error('策略服务已刷新，但未返回 indicator.detect_box；请确认 Python 策略注册表已加载最新代码')
+  }
+  if (!hasCurrentDetectBoxStrategyDefinition(items)) {
+    throw new Error('策略服务已刷新，但 DetectBox 版本不是 1.0.9；请确认 Python 策略服务使用当前工作区代码')
+  }
+}
+
+async function fetchStrategyCompositionTemplates(options = {}) {
+  const strict = !!options.strict
+  try {
+    strategyCompositions.value = await fetchStrategyCompositions()
+    return strategyCompositions.value
+  } catch (err) {
+    if (strict) throw err
+  }
+}
+
 async function fetchStrategyRuntime() {
   const traceQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '100' }).toString()
   const signalQuery = new URLSearchParams({ symbol: currentTradeSymbol(), limit: '1000' }).toString()
@@ -1003,14 +1045,18 @@ function closeStrategyContextMenu() {
   strategyContextMenu.anchor = null
   strategyContextMenu.loading = false
   strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.selectedComposition = null
   strategyContextMenu.startingStrategyID = ''
+  strategyContextMenu.startingCompositionID = ''
   strategyContextMenu.paramsText = ''
+  strategyContextMenu.compositionPrimaryParamsText = ''
+  strategyContextMenu.compositionHelperParamsText = ''
   strategyContextMenu.error = ''
 }
 
 function strategyContextMenuStyle() {
-  const width = 320
-  const height = 560
+  const width = 380
+  const height = 680
   const maxX = Math.max(8, window.innerWidth - width - 8)
   const maxY = Math.max(8, window.innerHeight - height - 8)
   return {
@@ -1029,11 +1075,19 @@ async function onChartContextMenu(payload) {
   strategyContextMenu.open = true
   strategyContextMenu.loading = true
   strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.selectedComposition = null
   strategyContextMenu.startingStrategyID = ''
+  strategyContextMenu.startingCompositionID = ''
   strategyContextMenu.paramsText = ''
+  strategyContextMenu.compositionPrimaryParamsText = ''
+  strategyContextMenu.compositionHelperParamsText = ''
   strategyContextMenu.error = ''
   try {
-    await fetchStrategyDefinitions({ strict: true })
+    await Promise.all([
+      fetchStrategyDefinitions({ strict: true }),
+      fetchStrategyCompositionTemplates({ strict: true }),
+    ])
+    await ensureDetectBoxStrategyDefinition()
   } catch (err) {
     strategyContextMenu.error = err instanceof Error ? err.message : String(err)
   } finally {
@@ -1060,18 +1114,44 @@ async function openStrategyRunMenu(evt) {
 
 function selectStrategyDefinition(definition) {
   strategyContextMenu.selectedDefinition = definition || null
+  strategyContextMenu.selectedComposition = null
   strategyContextMenu.paramsText = strategyDefaultParamsText(definition)
+  strategyContextMenu.compositionPrimaryParamsText = ''
+  strategyContextMenu.compositionHelperParamsText = ''
+  strategyContextMenu.error = ''
+}
+
+function selectStrategyComposition(composition) {
+  strategyContextMenu.selectedComposition = composition || null
+  strategyContextMenu.selectedDefinition = null
+  strategyContextMenu.paramsText = ''
+  strategyContextMenu.compositionPrimaryParamsText = JSON.stringify(composition?.primary_params || {}, null, 2)
+  strategyContextMenu.compositionHelperParamsText = JSON.stringify(composition?.helper_params_by_strategy || {}, null, 2)
   strategyContextMenu.error = ''
 }
 
 async function runStrategyDefinitionFromMenu(definition) {
   if (strategyStarting.value) return
-  selectStrategyDefinition(definition)
-  strategyContextMenu.startingStrategyID = String(definition?.strategy_id || '')
+  if (definition) selectStrategyDefinition(definition)
+  const selected = definition || strategyContextMenu.selectedDefinition
+  strategyContextMenu.startingStrategyID = String(selected?.strategy_id || '')
   try {
-    await startStrategyFromAnchor(strategyContextMenu.anchor, definition)
+    await startStrategyFromAnchor(strategyContextMenu.anchor, selected)
   } finally {
     strategyContextMenu.startingStrategyID = ''
+  }
+}
+
+async function runStrategyCompositionFromMenu(composition) {
+  if (strategyStarting.value) return
+  if (composition) selectStrategyComposition(composition)
+  const selected = composition || strategyContextMenu.selectedComposition
+  strategyContextMenu.startingCompositionID = String(selected?.composition_id || '')
+  strategyContextMenu.error = ''
+  try {
+    await startStrategyCompositionFromAnchor(strategyContextMenu.anchor, selected)
+  } finally {
+    strategyContextMenu.startingCompositionID = ''
   }
 }
 
@@ -1153,6 +1233,8 @@ async function startStrategyFromAnchor(anchor, definition) {
       paramsText: strategyContextMenu.paramsText,
       accountID: tradeForm.account_id,
       fallbackAccountID: tradeTerminal.order_entry_defaults?.account_id,
+      primaryParamsText: strategyContextMenu.compositionPrimaryParamsText,
+      helperParamsText: strategyContextMenu.compositionHelperParamsText,
       replayKlineMode: replayKlineMode.value,
       dataMode: dataMode.value,
       klineReplayRunning: !!paneRef.value?.isKlineReplayRunning?.(),
@@ -1180,18 +1262,63 @@ async function startStrategyFromAnchor(anchor, definition) {
   }
 }
 
+async function startStrategyCompositionFromAnchor(anchor, composition) {
+  if (strategyStarting.value) return
+  if (!anchor) {
+    window.alert('右键位置没有可用K线')
+    return
+  }
+  const compositionID = String(composition?.composition_id || '').trim()
+  if (!compositionID) return
+  strategyStarting.value = true
+  try {
+    const result = await saveAndStartStrategyComposition({
+      anchor,
+      composition,
+      definitions: strategyDefinitions.value,
+      scope,
+      accountID: tradeForm.account_id,
+      fallbackAccountID: tradeTerminal.order_entry_defaults?.account_id,
+      replayKlineMode: replayKlineMode.value,
+      dataMode: dataMode.value,
+      klineReplayRunning: !!paneRef.value?.isKlineReplayRunning?.(),
+    })
+    selectedStrategyInstanceId.value = result.primaryInstanceID
+    strategySignals.value = strategySignals.value.filter((item) => !result.startedInstanceIDs.includes(String(item?.instance_id || '')))
+    strategyStarting.value = false
+    activeRightTab.value = 'strategy'
+    layout.panes.right_watchlist_open = true
+    closeStrategyContextMenu()
+    void fetchStrategyRuntime()
+      .then(() => syncSelectedStrategyInstance(result.primaryInstanceID))
+      .catch((err) => console.warn('[strategy] refresh after composition start failed', err))
+  } catch (err) {
+    strategyContextMenu.error = err instanceof Error ? err.message : String(err)
+    strategyStarting.value = false
+    await nextTick()
+    showTradeError('图表启动策略组合', err)
+  } finally {
+    strategyStarting.value = false
+  }
+}
+
 async function stopStrategyInstance(instanceID) {
   const id = String(instanceID || '').trim()
   if (!id) return
   try {
-    const resp = await fetchWithTimeout(`/api/strategy/instances/${encodeURIComponent(id)}/stop`, {
-      method: 'POST',
-    })
-    if (!resp.ok) throw new Error(await resp.text())
+    const current = strategyInstances.value.find((item) => String(item?.instance_id || '') === id) || null
+    const helperIDs = Array.isArray(current?.params?.helper_instance_ids) ? current.params.helper_instance_ids.map((v) => String(v || '').trim()).filter(Boolean) : []
+    const ids = [id, ...helperIDs.filter((helperID) => helperID !== id)]
+    for (const stopID of ids) {
+      const resp = await fetchWithTimeout(`/api/strategy/instances/${encodeURIComponent(stopID)}/stop`, {
+        method: 'POST',
+      })
+      if (!resp.ok) throw new Error(await resp.text())
+    }
     // 停止按钮是用户纠错路径，不能等全量运行态刷新完成后才反馈。
     // 先本地改状态，再后台拉取权威状态，避免大实例列表或慢接口让用户误以为点击无效。
     strategyInstances.value = strategyInstances.value.map((item) => (
-      String(item?.instance_id || '') === id ? { ...item, status: 'stopped', last_error: '' } : item
+      ids.includes(String(item?.instance_id || '')) ? { ...item, status: 'stopped', last_error: '' } : item
     ))
     syncSelectedStrategyInstance()
     void fetchStrategyRuntime().catch((err) => console.warn('[strategy] refresh after stop failed', err))
@@ -2387,20 +2514,59 @@ onUnmounted(() => {
       </div>
       <div v-if="strategyContextMenu.loading" class="tv-strategy-context-empty">加载策略...</div>
       <template v-else>
+        <div v-if="strategyCompositions.length" class="tv-strategy-context-section">组合模板</div>
+        <button
+          v-for="item in strategyCompositions"
+          :key="`composition-${item.composition_id}`"
+          class="tv-strategy-context-item"
+          :class="{ active: strategyContextMenu.selectedComposition?.composition_id === item.composition_id }"
+          :disabled="strategyStarting"
+          @click="selectStrategyComposition(item)"
+        >
+          <span>{{ item.display_name || item.composition_id }}</span>
+          <small>{{ item.primary_strategy_id }} + {{ (item.helper_strategy_ids || []).length }}</small>
+        </button>
+        <div v-if="strategyContextMenu.selectedComposition" class="tv-strategy-param-editor">
+          <label>主策略参数 JSON</label>
+          <textarea v-model="strategyContextMenu.compositionPrimaryParamsText" spellcheck="false" />
+          <label>辅助策略参数 JSON</label>
+          <textarea v-model="strategyContextMenu.compositionHelperParamsText" spellcheck="false" />
+          <button
+            type="button"
+            class="tv-strategy-context-start"
+            :disabled="strategyStarting"
+            @click="runStrategyCompositionFromMenu()"
+          >
+            {{ strategyContextMenu.startingCompositionID ? '启动中...' : '启动此组合' }}
+          </button>
+        </div>
+        <div v-if="strategyDefinitions.length" class="tv-strategy-context-section">单策略</div>
         <button
           v-for="def in strategyDefinitions"
           :key="def.strategy_id"
           class="tv-strategy-context-item"
           :class="{ active: strategyContextMenu.selectedDefinition?.strategy_id === def.strategy_id }"
           :disabled="strategyStarting"
-          @click="runStrategyDefinitionFromMenu(def)"
+          @click="selectStrategyDefinition(def)"
         >
           <span>{{ def.display_name || def.strategy_id }}</span>
-          <small>{{ strategyContextMenu.startingStrategyID === def.strategy_id ? '启动中...' : def.strategy_id }}</small>
+          <small>{{ def.strategy_id }}</small>
         </button>
+        <div v-if="strategyContextMenu.selectedDefinition" class="tv-strategy-param-editor">
+          <label>实例参数 JSON</label>
+          <textarea v-model="strategyContextMenu.paramsText" spellcheck="false" />
+          <button
+            type="button"
+            class="tv-strategy-context-start"
+            :disabled="strategyStarting"
+            @click="runStrategyDefinitionFromMenu()"
+          >
+            {{ strategyContextMenu.startingStrategyID ? '启动中...' : '启动此策略' }}
+          </button>
+        </div>
         <p v-if="strategyContextMenu.error" class="tv-strategy-context-error">{{ strategyContextMenu.error }}</p>
       </template>
-      <div v-if="!strategyContextMenu.loading && !strategyDefinitions.length" class="tv-strategy-context-empty">暂无可用策略</div>
+      <div v-if="!strategyContextMenu.loading && !strategyDefinitions.length && !strategyCompositions.length" class="tv-strategy-context-empty">暂无可用策略</div>
     </div>
   </div>
 </template>
@@ -2409,7 +2575,7 @@ onUnmounted(() => {
 .tv-strategy-context-menu {
   position: fixed;
   z-index: 80;
-  width: 320px;
+  width: 380px;
   max-height: min(680px, calc(100vh - 16px));
   overflow: auto;
   display: grid;
@@ -2434,6 +2600,12 @@ onUnmounted(() => {
 .tv-strategy-context-item small {
   color: rgba(203, 213, 225, 0.62);
   font-weight: 400;
+}
+
+.tv-strategy-context-section {
+  padding: 6px 4px 2px;
+  color: rgba(203, 213, 225, 0.72);
+  font-size: 12px;
 }
 
 .tv-strategy-context-item {
@@ -2466,7 +2638,7 @@ onUnmounted(() => {
 
 .tv-strategy-param-editor textarea {
   width: 100%;
-  min-height: 152px;
+  min-height: 116px;
   resize: vertical;
   border: 1px solid rgba(100, 116, 139, 0.36);
   background: rgba(2, 6, 23, 0.72);

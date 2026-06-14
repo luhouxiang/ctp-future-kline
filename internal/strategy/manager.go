@@ -673,11 +673,7 @@ func (m *Manager) ListDefinitions() ([]StrategyDefinition, error) {
 	if m.store == nil {
 		return []StrategyDefinition{}, nil
 	}
-	items, err := m.store.ListDefinitions()
-	if err == nil && len(items) > 0 {
-		return items, nil
-	}
-	items, err = m.syncDefinitions()
+	items, err := m.syncDefinitions()
 	if err != nil {
 		logger.Warn("strategy definitions unavailable; reconnecting before returning list", "error", err)
 		if connectErr := m.connect(); connectErr == nil {
@@ -1498,7 +1494,16 @@ func (m *Manager) updateFeatureCacheFromTrace(trace StrategyTraceRecord) {
 	if m == nil || !isIndicatorStrategyID(trace.StrategyID) || trace.Metrics == nil {
 		return
 	}
-	indicator := strings.ToLower(strings.TrimSpace(fmt.Sprint(trace.Metrics["indicator"])))
+	if featureKeyName := normalizeFeatureName(trace.Metrics["feature_key"]); featureKeyName != "" {
+		if payload := featurePayloadMap(trace.Metrics["feature_payload"]); featureKeyName != zigzagATR26FeatureID && len(payload) > 0 {
+			m.appendFeaturePayload(trace.Mode, trace.Symbol, trace.Timeframe, featureKeyName, payload, 64)
+		}
+	}
+	m.updateLegacyZigZagFeatureCache(trace)
+}
+
+func (m *Manager) updateLegacyZigZagFeatureCache(trace StrategyTraceRecord) {
+	indicator := normalizeFeatureName(trace.Metrics["indicator"])
 	if indicator != zigzagATR26FeatureID {
 		return
 	}
@@ -1523,13 +1528,23 @@ func (m *Manager) updateFeatureCacheFromTrace(trace StrategyTraceRecord) {
 	if confirmedIndex, ok := metricInt(trace.Metrics["confirmed_index"]); ok {
 		pivot["confirmed_index"] = confirmedIndex
 	}
-	key := featureKey(trace.Mode, trace.Symbol, trace.Timeframe, indicator)
+	m.appendFeaturePayload(trace.Mode, trace.Symbol, trace.Timeframe, indicator, pivot, 64)
+}
+
+func (m *Manager) appendFeaturePayload(mode string, symbol string, timeframe string, name string, payload map[string]any, keep int) {
+	if m == nil || strings.TrimSpace(name) == "" || len(payload) == 0 {
+		return
+	}
+	if keep <= 0 {
+		keep = 64
+	}
+	key := featureKey(mode, symbol, timeframe, name)
+	item := cloneFeaturePayload(payload)
 	m.featureMu.Lock()
 	if m.features == nil {
 		m.features = make(map[strategyFeatureKey][]map[string]any)
 	}
-	items := append(m.features[key], pivot)
-	const keep = 64
+	items := append(m.features[key], item)
 	if len(items) > keep {
 		items = items[len(items)-keep:]
 	}
@@ -1541,10 +1556,30 @@ func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string)
 	if m == nil {
 		return nil
 	}
-	key := featureKey(mode, symbol, inst.Timeframe, zigzagATR26FeatureID)
-	m.featureMu.RLock()
-	items := m.features[key]
-	m.featureMu.RUnlock()
+	dependencies := featureDependencies(inst)
+	if len(dependencies) == 0 {
+		return m.legacyZigZagFeatures(symbol, inst.Timeframe, mode)
+	}
+	out := make(map[string]any, len(dependencies))
+	for _, name := range dependencies {
+		if name == zigzagATR26FeatureID {
+			if features := m.legacyZigZagFeatures(symbol, inst.Timeframe, mode); features != nil {
+				out[name] = features[name]
+				continue
+			}
+		}
+		if payload, ok := m.latestFeaturePayload(symbol, inst.Timeframe, mode, name); ok {
+			out[name] = payload
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func (m *Manager) legacyZigZagFeatures(symbol string, timeframe string, mode string) map[string]any {
+	items := m.featurePayloads(symbol, timeframe, mode, zigzagATR26FeatureID)
 	if len(items) == 0 {
 		return nil
 	}
@@ -1565,6 +1600,97 @@ func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string)
 			"peaks": peaks,
 		},
 	}
+}
+
+func (m *Manager) latestFeaturePayload(symbol string, timeframe string, mode string, name string) (map[string]any, bool) {
+	items := m.featurePayloads(symbol, timeframe, mode, name)
+	if len(items) == 0 {
+		return nil, false
+	}
+	return cloneFeaturePayload(items[len(items)-1]), true
+}
+
+func (m *Manager) featurePayloads(symbol string, timeframe string, mode string, name string) []map[string]any {
+	key := featureKey(mode, symbol, timeframe, name)
+	m.featureMu.RLock()
+	items := m.features[key]
+	m.featureMu.RUnlock()
+	if len(items) == 0 {
+		return nil
+	}
+	out := make([]map[string]any, len(items))
+	for i, item := range items {
+		out[i] = cloneFeaturePayload(item)
+	}
+	return out
+}
+
+func featureDependencies(inst StrategyInstance) []string {
+	params := inst.Params
+	if len(params) == 0 {
+		return nil
+	}
+	raw, ok := params["feature_dependencies"]
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]string, 0, 4)
+	appendName := func(value any) {
+		name := normalizeFeatureName(value)
+		if name == "" {
+			return
+		}
+		if _, exists := seen[name]; exists {
+			return
+		}
+		seen[name] = struct{}{}
+		out = append(out, name)
+	}
+	switch v := raw.(type) {
+	case []string:
+		for _, item := range v {
+			appendName(item)
+		}
+	case []any:
+		for _, item := range v {
+			appendName(item)
+		}
+	case string:
+		for _, item := range strings.Split(v, ",") {
+			appendName(item)
+		}
+	default:
+		appendName(v)
+	}
+	return out
+}
+
+func normalizeFeatureName(value any) string {
+	return strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+}
+
+func featurePayloadMap(value any) map[string]any {
+	switch v := value.(type) {
+	case map[string]any:
+		return cloneFeaturePayload(v)
+	default:
+		if value == nil {
+			return nil
+		}
+		return map[string]any{"value": value}
+	}
+}
+
+func cloneFeaturePayload(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return map[string]any{}
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
 }
 
 func metricInt(value any) (int, bool) {

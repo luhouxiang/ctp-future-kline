@@ -149,6 +149,7 @@ const strategyStatus = reactive({
 
 const strategyState = reactive({
   definitions: [],
+  compositions: [],
   instances: [],
   signals: [],
   backtests: [],
@@ -165,6 +166,15 @@ const strategyForm = reactive({
   symbols_text: '',
   timeframe: '1m',
   params_text: '{}',
+})
+
+const strategyCompositionForm = reactive({
+  composition_id: 'ma20_state_zigzag',
+  display_name: 'MA20状态图 + ZigZag指标',
+  primary_strategy_id: 'ma20.state_diagram_short',
+  helper_strategy_ids_text: 'indicator.zigzag_atr26',
+  primary_params_text: '{\n  "feature_dependencies": ["zigzag_atr26"]\n}',
+  helper_params_text: '{}',
 })
 
 const tradeStatus = reactive({
@@ -711,6 +721,7 @@ async function fetchStrategyBundle() {
   const endpoints = [
     ['/api/strategy/status', (data) => applyStrategyStatus(data.status || {})],
     ['/api/strategy/definitions', (data) => { strategyState.definitions = data.items || [] }],
+    ['/api/strategy/compositions', (data) => { strategyState.compositions = data.items || [] }],
     ['/api/strategy/instances', (data) => { strategyState.instances = data.items || [] }],
     ['/api/strategy/signals?limit=20', (data) => { strategyState.signals = data.items || [] }],
     ['/api/strategy/backtests?limit=20', (data) => { strategyState.backtests = data.items || [] }],
@@ -878,6 +889,70 @@ async function saveStrategyInstance() {
   await fetchStrategyBundle()
 }
 
+function editStrategyComposition(item) {
+  strategyCompositionForm.composition_id = item.composition_id || ''
+  strategyCompositionForm.display_name = item.display_name || ''
+  strategyCompositionForm.primary_strategy_id = item.primary_strategy_id || ''
+  strategyCompositionForm.helper_strategy_ids_text = (item.helper_strategy_ids || []).join(',')
+  strategyCompositionForm.primary_params_text = JSON.stringify(item.primary_params || {}, null, 2)
+  strategyCompositionForm.helper_params_text = JSON.stringify(item.helper_params_by_strategy || {}, null, 2)
+}
+
+async function saveStrategyComposition() {
+  let primaryParams = {}
+  let helperParams = {}
+  try {
+    primaryParams = JSON.parse(strategyCompositionForm.primary_params_text || '{}')
+    helperParams = JSON.parse(strategyCompositionForm.helper_params_text || '{}')
+  } catch {
+    addLog('策略组合保存失败: 参数 JSON 无效')
+    return
+  }
+  const item = {
+    composition_id: strategyCompositionForm.composition_id.trim(),
+    display_name: strategyCompositionForm.display_name.trim(),
+    primary_strategy_id: strategyCompositionForm.primary_strategy_id.trim(),
+    helper_strategy_ids: parseCSVInput(strategyCompositionForm.helper_strategy_ids_text),
+    primary_params: primaryParams,
+    helper_params_by_strategy: helperParams,
+    updated_at: new Date().toISOString(),
+  }
+  const next = [
+    item,
+    ...strategyState.compositions.filter((row) => row.composition_id !== item.composition_id),
+  ]
+  const resp = await fetch('/api/strategy/compositions', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: next }),
+  })
+  if (!resp.ok) {
+    addLog(`策略组合保存失败: ${await resp.text()}`)
+    return
+  }
+  const data = await resp.json()
+  strategyState.compositions = data.items || next
+  addLog(`策略组合已保存: ${item.composition_id}`)
+}
+
+async function deleteStrategyComposition(compositionID) {
+  const id = String(compositionID || '').trim()
+  if (!id) return
+  const next = strategyState.compositions.filter((row) => row.composition_id !== id)
+  const resp = await fetch('/api/strategy/compositions', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ items: next }),
+  })
+  if (!resp.ok) {
+    addLog(`策略组合删除失败: ${await resp.text()}`)
+    return
+  }
+  const data = await resp.json()
+  strategyState.compositions = data.items || next
+  addLog(`策略组合已删除: ${id}`)
+}
+
 async function startStrategyInstance(instanceId) {
   const resp = await fetch(`/api/strategy/instances/${instanceId}/start`, { method: 'POST' })
   if (!resp.ok) {
@@ -889,12 +964,18 @@ async function startStrategyInstance(instanceId) {
 }
 
 async function stopStrategyInstance(instanceId) {
-  const resp = await fetch(`/api/strategy/instances/${instanceId}/stop`, { method: 'POST' })
-  if (!resp.ok) {
-    addLog(`策略实例停止失败: ${await resp.text()}`)
-    return
+  const id = String(instanceId || '').trim()
+  const current = strategyState.instances.find((item) => String(item?.instance_id || '') === id) || null
+  const helperIds = Array.isArray(current?.params?.helper_instance_ids) ? current.params.helper_instance_ids.map((v) => String(v || '').trim()).filter(Boolean) : []
+  const ids = [id, ...helperIds.filter((helperID) => helperID !== id)]
+  for (const stopID of ids) {
+    const resp = await fetch(`/api/strategy/instances/${encodeURIComponent(stopID)}/stop`, { method: 'POST' })
+    if (!resp.ok) {
+      addLog(`策略实例停止失败: ${await resp.text()}`)
+      return
+    }
   }
-  addLog(`策略实例已停止: ${instanceId}`)
+  addLog(`策略实例已停止: ${ids.join(',')}`)
   await fetchStrategyBundle()
 }
 
@@ -2037,6 +2118,56 @@ onUnmounted(() => {
       <div class="row">
         <button @click="saveStrategyInstance">保存实例</button>
       </div>
+
+      <h4>策略组合模板</h4>
+      <div class="replay-form-grid">
+        <label>组合 ID</label>
+        <input v-model="strategyCompositionForm.composition_id" placeholder="ma20_state_zigzag" />
+        <label>组合名称</label>
+        <input v-model="strategyCompositionForm.display_name" placeholder="MA20状态图 + ZigZag指标" />
+        <label>主策略</label>
+        <select v-model="strategyCompositionForm.primary_strategy_id">
+          <option value="">请选择</option>
+          <option v-for="item in strategyState.definitions" :key="`primary-${item.strategy_id}`" :value="item.strategy_id">
+            {{ item.display_name }} ({{ item.strategy_id }})
+          </option>
+        </select>
+        <label>辅助策略(逗号分隔)</label>
+        <input v-model="strategyCompositionForm.helper_strategy_ids_text" placeholder="indicator.zigzag_atr26" />
+        <label>主策略参数 JSON</label>
+        <textarea v-model="strategyCompositionForm.primary_params_text" rows="4" />
+        <label>辅助参数 JSON</label>
+        <textarea v-model="strategyCompositionForm.helper_params_text" rows="4" placeholder='{"indicator.zigzag_atr26": {}}' />
+      </div>
+      <div class="row">
+        <button @click="saveStrategyComposition">保存组合模板</button>
+      </div>
+      <table class="table query-table">
+        <thead>
+          <tr>
+            <th>组合</th>
+            <th>主策略</th>
+            <th>辅助策略</th>
+            <th>更新时间</th>
+            <th>操作</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr v-for="item in strategyState.compositions" :key="item.composition_id">
+            <td>{{ item.display_name || item.composition_id }}</td>
+            <td>{{ item.primary_strategy_id }}</td>
+            <td>{{ (item.helper_strategy_ids || []).join(', ') || '--' }}</td>
+            <td>{{ formatDisplayDateTime(item.updated_at) }}</td>
+            <td class="strategy-instance-actions">
+              <button class="secondary" @click="editStrategyComposition(item)">编辑</button>
+              <button class="danger" @click="deleteStrategyComposition(item.composition_id)">删除</button>
+            </td>
+          </tr>
+          <tr v-if="!strategyState.compositions.length">
+            <td colspan="5">无策略组合模板</td>
+          </tr>
+        </tbody>
+      </table>
 
       <table class="table query-table">
         <thead>

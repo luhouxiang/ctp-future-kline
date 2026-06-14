@@ -19,6 +19,7 @@ from dataclasses import dataclass
 from threading import RLock
 from typing import Any
 
+from detect_box_indicator import DetectBoxIndicatorStrategy
 from ma20_pullback_short import MA20PullbackShortStrategy, MA20WeakPullbackBaselineStrategy
 from ma20_state_diagram_short import MA20StateDiagramShortStrategy
 from ma20_weak_pullback import (
@@ -52,6 +53,7 @@ def _builtin_strategies() -> tuple[Strategy, ...]:
         MA20WeakPullbackBaselineStrategy(),
         MA20StateDiagramShortStrategy(),
         ATRZigZagIndicatorStrategy(),
+        DetectBoxIndicatorStrategy(),
         # MA20WeakPullbackHardFilterStrategy(),
         # MA20WeakPullbackScoreFilterStrategy(),
     )
@@ -80,6 +82,8 @@ def _clone_strategy_template(strategy: Strategy) -> Strategy:
     if isinstance(strategy, MA20StateDiagramShortStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, ATRZigZagIndicatorStrategy):
+        return strategy.__class__(definition=definition)
+    if isinstance(strategy, DetectBoxIndicatorStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, SampleMomentumStrategy):
         return SampleMomentumStrategy()
