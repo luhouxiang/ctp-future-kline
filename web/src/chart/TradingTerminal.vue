@@ -1327,6 +1327,21 @@ async function stopStrategyInstance(instanceID) {
   }
 }
 
+async function toggleStrategyAutoExecution(paused) {
+  const endpoint = paused ? '/api/orders/pause' : '/api/orders/resume'
+  try {
+    const resp = await fetchWithTimeout(endpoint, { method: 'POST' })
+    if (!resp.ok) throw new Error(await resp.text())
+    strategyStatus.value = {
+      ...strategyStatus.value,
+      auto_execution_paused: !!paused,
+    }
+    void fetchStrategyRuntime().catch((err) => console.warn('[strategy] refresh after auto execution toggle failed', err))
+  } catch (err) {
+    showTradeError(paused ? '暂停自动执行' : '继续自动执行', err)
+  }
+}
+
 async function adjustPaperAccount(payload, actionLabel) {
   try {
     const resp = await fetch('/api/trade/account/adjust', {
@@ -2454,6 +2469,7 @@ onUnmounted(() => {
           @strategy-trace-focus="onStrategyTraceFocus"
           @strategy-instance-select="onStrategyInstanceSelect"
           @strategy-instance-stop="stopStrategyInstance"
+          @strategy-auto-execution-toggle="toggleStrategyAutoExecution"
           @strategy-run-click="openStrategyRunMenu"
           @strategy-backtest-select="onStrategyBacktestSelect"
           @channel-action="onChannelAction"

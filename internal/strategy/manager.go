@@ -42,9 +42,10 @@ type strategyFeatureKey struct {
 }
 
 type Manager struct {
-	cfg   config.StrategyConfig
-	store *Store
-	exec  *ExecutionEngine
+	cfg           config.StrategyConfig
+	store         *Store
+	exec          *ExecutionEngine
+	orderExecutor StrategyOrderExecutor
 
 	featureMu              sync.RWMutex
 	features               map[strategyFeatureKey][]map[string]any
@@ -122,6 +123,12 @@ func (m *Manager) SetMarketDataDSNs(realtimeDSN string, replayDSN string, shared
 	m.marketRealtimeDSN = strings.TrimSpace(realtimeDSN)
 	m.marketReplayDSN = strings.TrimSpace(replayDSN)
 	m.sharedMetaDSN = strings.TrimSpace(sharedMetaDSN)
+	m.mu.Unlock()
+}
+
+func (m *Manager) SetOrderExecutor(executor StrategyOrderExecutor) {
+	m.mu.Lock()
+	m.orderExecutor = executor
 	m.mu.Unlock()
 }
 
@@ -649,23 +656,24 @@ func (m *Manager) Status() ManagerStatus {
 		}
 	}
 	return ManagerStatus{
-		Enabled:            m.cfg.IsEnabled(),
-		ProcessRunning:     m.cmd != nil || m.connReady,
-		Connected:          m.connReady,
-		HTTPAddr:           httpAddr,
-		PythonExecutable:   m.cfg.PythonExecutable,
-		PythonCondaEnvPath: m.cfg.PythonCondaEnvPath,
-		PythonEntry:        m.cfg.PythonEntry,
-		LastError:          m.lastError,
-		LastHealthAt:       m.lastHealth,
-		LastRestartAt:      m.lastRestart,
-		UpdatedAt:          time.Now(),
-		Definitions:        defs,
-		Instances:          insts,
-		RunningCount:       running,
-		SignalCount:        sigs,
-		AuditCount:         audits,
-		BacktestRunCount:   runs,
+		Enabled:             m.cfg.IsEnabled(),
+		ProcessRunning:      m.cmd != nil || m.connReady,
+		Connected:           m.connReady,
+		HTTPAddr:            httpAddr,
+		PythonExecutable:    m.cfg.PythonExecutable,
+		PythonCondaEnvPath:  m.cfg.PythonCondaEnvPath,
+		PythonEntry:         m.cfg.PythonEntry,
+		LastError:           m.lastError,
+		LastHealthAt:        m.lastHealth,
+		LastRestartAt:       m.lastRestart,
+		UpdatedAt:           time.Now(),
+		Definitions:         defs,
+		Instances:           insts,
+		RunningCount:        running,
+		SignalCount:         sigs,
+		AuditCount:          audits,
+		BacktestRunCount:    runs,
+		AutoExecutionPaused: m.exec != nil && m.exec.Paused(),
 	}
 }
 
@@ -893,6 +901,28 @@ func (m *Manager) ListOrderAudits(limit int) ([]OrderAuditRecord, error) {
 	return m.store.ListOrderAudits(limit)
 }
 
+func (m *Manager) PauseAutoExecution() OrdersStatus {
+	if m == nil || m.exec == nil {
+		return OrdersStatus{Mode: "simulated", UpdatedAt: time.Now()}
+	}
+	m.exec.SetPaused(true)
+	status := m.exec.Status()
+	m.broadcast("strategy_status_update", m.Status())
+	m.broadcast("orders_status_update", status)
+	return status
+}
+
+func (m *Manager) ResumeAutoExecution() OrdersStatus {
+	if m == nil || m.exec == nil {
+		return OrdersStatus{Mode: "simulated", UpdatedAt: time.Now()}
+	}
+	m.exec.SetPaused(false)
+	status := m.exec.Status()
+	m.broadcast("strategy_status_update", m.Status())
+	m.broadcast("orders_status_update", status)
+	return status
+}
+
 func (m *Manager) ListTraces(instanceID string, symbol string, limit int) ([]StrategyTraceRecord, error) {
 	return m.store.ListTraces(strings.TrimSpace(instanceID), strings.TrimSpace(symbol), limit)
 }
@@ -1102,6 +1132,7 @@ func runLocalMA20BacktestWithDB(ctx context.Context, db *sql.DB, req BacktestReq
 	cfg.Period = firstNonEmpty(req.Timeframe, cfg.Period)
 	cfg.Tables = ma20BacktestTablesFromRequest(req)
 	cfg.Algorithms = ma20ParamStringList(req.Parameters, "algorithms", cfg.Algorithms)
+	cfg.Instruments = ma20BacktestInstrumentsFromRequest(req)
 	if _, ok := req.Parameters["algorithms"]; !ok {
 		if algo := MA20AlgorithmForStrategyID(req.Instance.StrategyID); algo != "" {
 			cfg.Algorithms = []string{algo}
@@ -1150,12 +1181,32 @@ func ma20BacktestTablesFromRequest(req BacktestRequest) []string {
 	if strings.HasSuffix(variety, "l9") {
 		variety = strings.TrimSuffix(variety, "l9")
 	} else if extracted := leadingLetters(variety); extracted != "" {
+		if extracted != variety {
+			return []string{"future_kline_instrument_mm_" + extracted}
+		}
 		variety = extracted
 	}
 	if variety == "" {
 		return append([]string(nil), DefaultMA20BacktestTables...)
 	}
 	return []string{"future_kline_l9_mm_" + variety}
+}
+
+func ma20BacktestInstrumentsFromRequest(req BacktestRequest) []string {
+	if items := ma20ParamStringList(req.Parameters, "instruments", nil); len(items) > 0 {
+		return items
+	}
+	symbol := strings.TrimSpace(req.Symbol)
+	if symbol == "" || symbol == "all" || symbol == "*" {
+		return nil
+	}
+	if strings.HasPrefix(strings.ToLower(symbol), "future_kline_l9_mm_") || strings.HasSuffix(strings.ToLower(symbol), "l9") {
+		return nil
+	}
+	if leadingLetters(symbol) == strings.ToLower(symbol) {
+		return nil
+	}
+	return []string{symbol}
 }
 
 func leadingLetters(value string) string {
@@ -1398,6 +1449,23 @@ func (m *Manager) matchingInstances(symbol string, timeframe string, mode string
 	return out
 }
 
+func (m *Manager) currentExecutionPosition(symbol string) float64 {
+	m.mu.RLock()
+	executor := m.orderExecutor
+	m.mu.RUnlock()
+	if executor != nil {
+		if pos, err := executor.CurrentPosition(symbol); err == nil {
+			return pos
+		} else {
+			logger.Warn("strategy external position unavailable; fallback to in-memory position", "symbol", symbol, "error", err)
+		}
+	}
+	if m.exec == nil {
+		return 0
+	}
+	return m.exec.CurrentPosition(symbol)
+}
+
 func splitMatchingInstances(items []StrategyInstance) ([]StrategyInstance, []StrategyInstance) {
 	indicators := make([]StrategyInstance, 0, len(items))
 	trading := make([]StrategyInstance, 0, len(items))
@@ -1431,7 +1499,7 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		Symbol:          symbol,
 		EventTime:       eventTime.Format(time.RFC3339Nano),
 		Mode:            mode,
-		CurrentPosition: m.exec.CurrentPosition(symbol),
+		CurrentPosition: m.currentExecutionPosition(symbol),
 		Account:         map[string]any{"account_id": inst.AccountID},
 		Features:        m.featuresFor(inst, symbol, mode),
 		Tick:            tick,
@@ -1893,7 +1961,8 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 			"signal_id":       id,
 		},
 	})
-	plan := m.exec.Plan(inst, symbol, decision.TargetPosition, mode)
+	plan := m.exec.PlanWithCurrent(inst, m.currentExecutionPosition(symbol), decision.TargetPosition, mode)
+	externalResult := m.submitExternalOrderIfNeeded(inst, symbol, mode, eventTime, decision, &plan)
 	m.appendSignalEventLog(inst, symbol, mode, eventTime, decision, plan, bar)
 	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
 		EventType: "order_plan",
@@ -1908,6 +1977,7 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 			"target_position":  plan.TargetPosition,
 			"planned_delta":    plan.PlannedDelta,
 			"order_status":     plan.OrderStatus,
+			"external_order":   externalResult,
 		},
 	})
 	m.exec.Apply(symbol, plan)
@@ -1924,9 +1994,10 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		RiskReason:      plan.RiskReason,
 		OrderStatus:     plan.OrderStatus,
 		Audit: map[string]any{
-			"reason":     decision.Reason,
-			"confidence": decision.Confidence,
-			"metrics":    decision.Metrics,
+			"reason":         decision.Reason,
+			"confidence":     decision.Confidence,
+			"metrics":        decision.Metrics,
+			"external_order": externalResult,
 		},
 		CreatedAt: time.Now(),
 	}
@@ -1947,6 +2018,7 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 			"current_position": plan.CurrentPosition,
 			"target_position":  plan.TargetPosition,
 			"planned_delta":    plan.PlannedDelta,
+			"external_order":   externalResult,
 		},
 	})
 	now := time.Now()
@@ -1963,6 +2035,53 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 	m.broadcast("strategy_signal", sig)
 	m.broadcast("order_audit_update", audit)
 	m.appendReplayReport(replayTaskID, inst, sig, audit)
+}
+
+func (m *Manager) submitExternalOrderIfNeeded(inst StrategyInstance, symbol string, mode string, eventTime time.Time, decision SignalDecision, plan *ExecutionPlan) map[string]any {
+	if plan == nil || plan.RiskStatus != RiskStatusAllowed || plan.OrderStatus != OrderStatusSimulated {
+		return nil
+	}
+	if plan.PlannedDelta == 0 {
+		return nil
+	}
+	m.mu.RLock()
+	executor := m.orderExecutor
+	m.mu.RUnlock()
+	if executor == nil {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), m.requestTimeout())
+	defer cancel()
+	result, err := executor.SubmitStrategyOrder(ctx, StrategyOrderRequest{
+		Instance:        inst,
+		Symbol:          symbol,
+		Mode:            mode,
+		EventTime:       eventTime,
+		CurrentPosition: plan.CurrentPosition,
+		TargetPosition:  plan.TargetPosition,
+		PlannedDelta:    plan.PlannedDelta,
+		Reason:          decision.Reason,
+		Confidence:      decision.Confidence,
+		Metrics:         decision.Metrics,
+	})
+	out := map[string]any{
+		"status": result.Status,
+		"reason": result.Reason,
+	}
+	if strings.TrimSpace(result.OrderID) != "" {
+		out["order_id"] = result.OrderID
+	}
+	if len(result.Details) > 0 {
+		out["details"] = result.Details
+	}
+	if err != nil {
+		plan.RiskStatus = RiskStatusBlocked
+		plan.RiskReason = err.Error()
+		plan.OrderStatus = OrderStatusBlocked
+		out["status"] = OrderStatusBlocked
+		out["error"] = err.Error()
+	}
+	return out
 }
 
 type strategySignalEventLogRecord struct {

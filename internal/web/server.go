@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -253,6 +254,9 @@ func NewServer(cfg config.AppConfig) *Server {
 	if s.replay != nil {
 		s.replay.RegisterKlineReplayHandler(s)
 	}
+	if s.strategy != nil {
+		s.strategy.SetOrderExecutor(s)
+	}
 	return s
 }
 
@@ -398,6 +402,8 @@ func (s *Server) Handler() http.Handler {
 	mux.HandleFunc("/api/strategy/backtests/", s.handleStrategyBacktestByID)
 	mux.HandleFunc("/api/strategy/optimize", s.handleStrategyOptimize)
 	mux.HandleFunc("/api/orders/status", s.handleOrdersStatus)
+	mux.HandleFunc("/api/orders/pause", s.handleOrdersPause)
+	mux.HandleFunc("/api/orders/resume", s.handleOrdersResume)
 	mux.HandleFunc("/api/orders/audit", s.handleOrdersAudit)
 	mux.HandleFunc("/api/trade/status", s.handleTradeStatus)
 	mux.HandleFunc("/api/trade/config", s.handleTradeConfig)
@@ -2501,6 +2507,30 @@ func (s *Server) handleOrdersStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, manager.OrdersStatus())
 }
 
+func (s *Server) handleOrdersPause(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": manager.PauseAutoExecution()})
+}
+
+func (s *Server) handleOrdersResume(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	manager := s.requireStrategy(w)
+	if manager == nil {
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": manager.ResumeAutoExecution()})
+}
+
 func (s *Server) handleOrdersAudit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -2973,6 +3003,208 @@ func (s *Server) contractVolumeMultiple(symbol string, exchangeID string) float6
 		return 1
 	}
 	return float64(resolved.Product.VolumeMultiple)
+}
+
+func (s *Server) CurrentPosition(symbol string) (float64, error) {
+	svc := s.strategyOrderTradeService()
+	if svc == nil {
+		return 0, fmt.Errorf("strategy order trade service unavailable for mode=%s", s.currentAppMode())
+	}
+	positions, err := svc.Positions()
+	if err != nil {
+		return 0, err
+	}
+	return netStrategyPosition(positions, symbol), nil
+}
+
+func (s *Server) SubmitStrategyOrder(ctx context.Context, req strategy.StrategyOrderRequest) (strategy.StrategyOrderResult, error) {
+	mode := appmode.Normalize(s.currentAppMode())
+	switch mode {
+	case appmode.LivePaper:
+	case appmode.LiveReal:
+		if s.cfg.Trade.IsBlockStrategyLiveOrder() {
+			return strategy.StrategyOrderResult{Status: strategy.OrderStatusBlocked, Reason: "strategy live order is blocked by trade.block_strategy_live_order"}, fmt.Errorf("strategy live order is blocked by trade.block_strategy_live_order")
+		}
+	default:
+		return strategy.StrategyOrderResult{Status: strategy.OrderStatusBlocked, Reason: "strategy auto order only runs in live_paper/live_real"}, fmt.Errorf("strategy auto order only runs in live_paper/live_real, current mode=%s", mode)
+	}
+	svc := s.strategyOrderTradeService()
+	if svc == nil {
+		return strategy.StrategyOrderResult{Status: strategy.OrderStatusBlocked, Reason: "trade service unavailable"}, fmt.Errorf("trade service unavailable")
+	}
+	submit, err := s.buildStrategySubmitOrder(req)
+	if err != nil {
+		return strategy.StrategyOrderResult{Status: strategy.OrderStatusBlocked, Reason: err.Error()}, err
+	}
+	if err := s.validateStrategyAccountGuard(svc, submit); err != nil {
+		return strategy.StrategyOrderResult{Status: strategy.OrderStatusBlocked, Reason: err.Error()}, err
+	}
+	rec, err := svc.SubmitOrder(ctx, submit)
+	if err != nil {
+		return strategy.StrategyOrderResult{Status: strategy.OrderStatusBlocked, Reason: err.Error()}, err
+	}
+	return strategy.StrategyOrderResult{
+		OrderID: rec.CommandID,
+		Status:  rec.OrderStatus,
+		Reason:  rec.StatusMsg,
+		Details: map[string]any{
+			"direction":   rec.Direction,
+			"offset_flag": rec.OffsetFlag,
+			"limit_price": rec.LimitPrice,
+			"volume":      rec.VolumeTotalOriginal,
+			"account_id":  rec.AccountID,
+			"exchange_id": rec.ExchangeID,
+		},
+	}, nil
+}
+
+func (s *Server) validateStrategyAccountGuard(svc *trade.Service, req trade.SubmitOrderRequest) error {
+	if svc == nil {
+		return fmt.Errorf("trade service unavailable")
+	}
+	if strings.TrimSpace(req.Reason) != "strategy" || strings.TrimSpace(req.OffsetFlag) != "open" {
+		return nil
+	}
+	account, err := svc.Account()
+	if err != nil {
+		return err
+	}
+	staticBalance := account.StaticBalance
+	if staticBalance <= 0 {
+		staticBalance = s.terminalStaticBalance(s.currentAppMode(), account)
+	}
+	if staticBalance <= 0 {
+		return nil
+	}
+	if account.Balance < staticBalance {
+		return fmt.Errorf("strategy open blocked: account below static balance %.2f < %.2f", account.Balance, staticBalance)
+	}
+	return nil
+}
+
+func (s *Server) strategyOrderTradeService() *trade.Service {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch appmode.Normalize(s.currentMode) {
+	case appmode.LivePaper:
+		return s.tradePaperLive
+	case appmode.LiveReal:
+		return s.tradeLive
+	default:
+		return nil
+	}
+}
+
+func (s *Server) buildStrategySubmitOrder(req strategy.StrategyOrderRequest) (trade.SubmitOrderRequest, error) {
+	symbol := strings.TrimSpace(req.Symbol)
+	quote := s.chartQuoteSnapshotForSymbol(symbol)
+	exchangeID := s.inferExchangeIDForSymbol(symbol, nil, nil)
+	return buildStrategySubmitOrderRequest(req, quote, exchangeID, s.tradeAccountIDForMode(s.currentAppMode()))
+}
+
+func buildStrategySubmitOrderRequest(req strategy.StrategyOrderRequest, quote quotes.ChartQuoteSnapshot, exchangeID string, accountID string) (trade.SubmitOrderRequest, error) {
+	symbol := strings.TrimSpace(req.Symbol)
+	if symbol == "" {
+		return trade.SubmitOrderRequest{}, fmt.Errorf("symbol is required")
+	}
+	delta := req.TargetPosition - req.CurrentPosition
+	if math.Abs(delta-req.PlannedDelta) > 1e-9 {
+		delta = req.PlannedDelta
+	}
+	volumeFloat := math.Abs(delta)
+	volume := int(math.Round(volumeFloat))
+	if volume <= 0 || math.Abs(volumeFloat-float64(volume)) > 1e-9 {
+		return trade.SubmitOrderRequest{}, fmt.Errorf("strategy planned_delta %.4f is not an integer volume", req.PlannedDelta)
+	}
+	if crossesZero(req.CurrentPosition, req.TargetPosition) {
+		return trade.SubmitOrderRequest{}, fmt.Errorf("strategy reversal across zero must be split into close then open")
+	}
+	direction, offsetFlag := strategyOrderDirection(req.CurrentPosition, req.TargetPosition)
+	if direction == "" || offsetFlag == "" {
+		return trade.SubmitOrderRequest{}, fmt.Errorf("cannot derive order direction from current=%.4f target=%.4f", req.CurrentPosition, req.TargetPosition)
+	}
+	limitPrice := strategyOrderLimitPrice(direction, quote)
+	if limitPrice <= 0 {
+		return trade.SubmitOrderRequest{}, fmt.Errorf("no valid quote price for strategy order: symbol=%s", symbol)
+	}
+	exchangeID = strings.TrimSpace(exchangeID)
+	if exchangeID == "" {
+		return trade.SubmitOrderRequest{}, fmt.Errorf("cannot infer exchange_id for symbol=%s", symbol)
+	}
+	return trade.SubmitOrderRequest{
+		AccountID:  strings.TrimSpace(accountID),
+		Symbol:     symbol,
+		ExchangeID: exchangeID,
+		Direction:  direction,
+		OffsetFlag: offsetFlag,
+		LimitPrice: limitPrice,
+		Volume:     volume,
+		Reason:     "strategy",
+		ClientTag:  "strategy-auto-" + strings.TrimSpace(req.Instance.InstanceID),
+	}, nil
+}
+
+func netStrategyPosition(items []trade.PositionSnapshot, symbol string) float64 {
+	symbol = strings.TrimSpace(symbol)
+	total := 0.0
+	for _, item := range items {
+		if !strings.EqualFold(strings.TrimSpace(item.Symbol), symbol) {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(item.Direction)) {
+		case "long":
+			total += float64(item.Position)
+		case "short":
+			total -= float64(item.Position)
+		}
+	}
+	return total
+}
+
+func crossesZero(current float64, target float64) bool {
+	return (current < 0 && target > 0) || (current > 0 && target < 0)
+}
+
+func strategyOrderDirection(current float64, target float64) (string, string) {
+	delta := target - current
+	if delta > 0 {
+		if current < 0 {
+			return "buy", "close"
+		}
+		return "buy", "open"
+	}
+	if delta < 0 {
+		if current > 0 {
+			return "sell", "close"
+		}
+		return "sell", "open"
+	}
+	return "", ""
+}
+
+func strategyOrderLimitPrice(direction string, quote quotes.ChartQuoteSnapshot) float64 {
+	if strings.EqualFold(direction, "buy") {
+		if quote.AskPrice1 != nil && *quote.AskPrice1 > 0 {
+			return *quote.AskPrice1
+		}
+		if quote.LatestPrice != nil && *quote.LatestPrice > 0 {
+			return *quote.LatestPrice
+		}
+		if quote.BidPrice1 != nil && *quote.BidPrice1 > 0 {
+			return *quote.BidPrice1
+		}
+		return 0
+	}
+	if quote.BidPrice1 != nil && *quote.BidPrice1 > 0 {
+		return *quote.BidPrice1
+	}
+	if quote.LatestPrice != nil && *quote.LatestPrice > 0 {
+		return *quote.LatestPrice
+	}
+	if quote.AskPrice1 != nil && *quote.AskPrice1 > 0 {
+		return *quote.AskPrice1
+	}
+	return 0
 }
 
 func (s *Server) terminalStaticBalance(mode string, account trade.TradingAccountSnapshot) float64 {

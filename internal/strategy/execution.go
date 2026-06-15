@@ -10,6 +10,7 @@ type ExecutionEngine struct {
 	mu          sync.Mutex
 	positions   map[string]float64
 	lastAuditAt *time.Time
+	paused      bool
 }
 
 func NewExecutionEngine() *ExecutionEngine {
@@ -22,8 +23,29 @@ func (e *ExecutionEngine) CurrentPosition(symbol string) float64 {
 	return e.positions[symbol]
 }
 
+func (e *ExecutionEngine) SetPaused(paused bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.paused = paused
+}
+
+func (e *ExecutionEngine) Paused() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.paused
+}
+
 func (e *ExecutionEngine) Plan(instance StrategyInstance, symbol string, target float64, mode string) ExecutionPlan {
-	current := e.CurrentPosition(symbol)
+	e.mu.Lock()
+	current := e.positions[symbol]
+	e.mu.Unlock()
+	return e.PlanWithCurrent(instance, current, target, mode)
+}
+
+func (e *ExecutionEngine) PlanWithCurrent(instance StrategyInstance, current float64, target float64, mode string) ExecutionPlan {
+	e.mu.Lock()
+	paused := e.paused
+	e.mu.Unlock()
 	delta := target - current
 	plan := ExecutionPlan{
 		CurrentPosition: current,
@@ -36,6 +58,12 @@ func (e *ExecutionEngine) Plan(instance StrategyInstance, symbol string, target 
 		plan.RiskStatus = RiskStatusBlocked
 		plan.RiskReason = "replay mode blocks live execution"
 		plan.OrderStatus = OrderStatusBlocked
+		return plan
+	}
+	if paused {
+		plan.RiskStatus = RiskStatusBlocked
+		plan.RiskReason = "auto execution is paused"
+		plan.OrderStatus = OrderStatusPaused
 		return plan
 	}
 	if math.Abs(delta) < 1e-9 {
@@ -69,9 +97,10 @@ func (e *ExecutionEngine) Status() OrdersStatus {
 		positions[k] = v
 	}
 	return OrdersStatus{
-		Mode:        "simulated",
-		Positions:   positions,
-		LastAuditAt: e.lastAuditAt,
-		UpdatedAt:   time.Now(),
+		Mode:                "simulated",
+		AutoExecutionPaused: e.paused,
+		Positions:           positions,
+		LastAuditAt:         e.lastAuditAt,
+		UpdatedAt:           time.Now(),
 	}
 }

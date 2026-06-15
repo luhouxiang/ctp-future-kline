@@ -1,6 +1,7 @@
 package strategy
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -19,6 +20,7 @@ const (
 
 	OrderStatusSimulated = "simulated_submitted"
 	OrderStatusBlocked   = "blocked"
+	OrderStatusPaused    = "paused"
 	OrderStatusNoop      = "noop"
 	RiskStatusAllowed    = "allowed"
 	RiskStatusBlocked    = "blocked"
@@ -59,6 +61,8 @@ type ManagerStatus struct {
 	AuditCount int64 `json:"audit_count"`
 	// BacktestRunCount 是累计回测或优化运行记录数。
 	BacktestRunCount int64 `json:"backtest_run_count"`
+	// AutoExecutionPaused 表示策略信号到订单执行这一步是否被人工暂停。
+	AutoExecutionPaused bool `json:"auto_execution_paused"`
 }
 
 type StrategyDefinition struct {
@@ -230,9 +234,36 @@ type ExecutionPlan struct {
 	OrderStatus     string  `json:"order_status"`
 }
 
+type StrategyOrderRequest struct {
+	Instance        StrategyInstance `json:"instance"`
+	Symbol          string           `json:"symbol"`
+	Mode            string           `json:"mode"`
+	EventTime       time.Time        `json:"event_time"`
+	CurrentPosition float64          `json:"current_position"`
+	TargetPosition  float64          `json:"target_position"`
+	PlannedDelta    float64          `json:"planned_delta"`
+	Reason          string           `json:"reason"`
+	Confidence      float64          `json:"confidence"`
+	Metrics         map[string]any   `json:"metrics"`
+}
+
+type StrategyOrderResult struct {
+	OrderID string         `json:"order_id,omitempty"`
+	Status  string         `json:"status"`
+	Reason  string         `json:"reason,omitempty"`
+	Details map[string]any `json:"details,omitempty"`
+}
+
+type StrategyOrderExecutor interface {
+	CurrentPosition(symbol string) (float64, error)
+	SubmitStrategyOrder(context.Context, StrategyOrderRequest) (StrategyOrderResult, error)
+}
+
 type OrdersStatus struct {
 	// Mode 表示当前订单执行模式，例如 simulated。
 	Mode string `json:"mode"`
+	// AutoExecutionPaused 表示策略信号到订单执行这一步是否被人工暂停。
+	AutoExecutionPaused bool `json:"auto_execution_paused"`
 	// Positions 是按 symbol 汇总的目标或模拟持仓。
 	Positions map[string]float64 `json:"positions"`
 	// LastAuditAt 是最近一次订单审计时间。

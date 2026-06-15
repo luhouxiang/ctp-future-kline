@@ -33,6 +33,7 @@ const emit = defineEmits([
   'strategy-trace-focus',
   'strategy-instance-select',
   'strategy-instance-stop',
+  'strategy-auto-execution-toggle',
   'strategy-run-click',
   'strategy-backtest-select',
   'channel-action',
@@ -289,6 +290,8 @@ const runningStrategyInstances = computed(() => (
     .filter((item) => String(item?.status || '') === 'running')
 ))
 
+const autoExecutionPaused = computed(() => !!props.strategy?.status?.auto_execution_paused)
+
 const strategyInstances = computed(() => (
   (Array.isArray(props.strategy?.instances) ? props.strategy.instances : [])
     .filter((item) => {
@@ -496,6 +499,7 @@ function traceStatusLabel(value) {
   const v = String(value || '')
   if (v === 'passed' || v === 'allowed' || v === 'simulated_submitted') return '满足'
   if (v === 'failed' || v === 'blocked') return '阻断'
+  if (v === 'paused') return '暂停'
   if (v === 'done') return '完成'
   if (v === 'waiting') return '等待'
   return v || '--'
@@ -506,6 +510,7 @@ function stepStateLabel(value) {
   if (v === 'done') return '完成'
   if (v === 'passed' || v === 'allowed' || v === 'simulated_submitted') return '满足'
   if (v === 'failed' || v === 'blocked') return '阻断'
+  if (v === 'paused') return '暂停'
   return '等待'
 }
 
@@ -650,13 +655,22 @@ function compactText(value, fallback = '--') {
       <div class="tv-quote-card">
         <div class="tv-channel-settings-head">
           <span>策略运行</span>
-          <button type="button" class="tv-strategy-run-btn" @click.stop="emit('strategy-run-click', $event)">运行此策略</button>
+          <div class="tv-strategy-head-actions">
+            <button type="button" class="tv-strategy-run-btn" @click.stop="emit('strategy-auto-execution-toggle', !autoExecutionPaused)">
+              {{ autoExecutionPaused ? '继续自动' : '暂停自动' }}
+            </button>
+            <button type="button" class="tv-strategy-run-btn" @click.stop="emit('strategy-run-click', $event)">运行此策略</button>
+          </div>
         </div>
         <div class="tv-quote-strip">
           <span class="tv-quote-strip-label">连接</span>
           <span class="tv-quote-strip-value">{{ props.strategy?.status?.connected ? '已连接' : '未连接' }}</span>
           <span class="tv-quote-strip-label">运行</span>
           <span class="tv-quote-strip-value">{{ runningStrategyInstances.length }}</span>
+          <span class="tv-quote-strip-label">执行</span>
+          <span class="tv-quote-strip-value">{{ autoExecutionPaused ? '暂停' : '自动' }}</span>
+        </div>
+        <div class="tv-quote-strip">
           <span class="tv-quote-strip-label">最近</span>
           <span class="tv-quote-strip-value">{{ latestStrategyTimeText }}</span>
         </div>
@@ -1327,6 +1341,12 @@ function compactText(value, fallback = '--') {
   background: transparent;
   color: #ff7a73;
   cursor: pointer;
+}
+
+.tv-strategy-head-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tv-strategy-run-btn {

@@ -18,6 +18,7 @@ import (
 func main() {
 	configPath := flag.String("config", filepath.Join("config", "config.json"), "config file path")
 	tablesRaw := flag.String("tables", "", "comma separated kline table names")
+	instrumentsRaw := flag.String("instruments", "", "comma separated instrument ids")
 	algorithmsRaw := flag.String("algorithms", "", "comma separated algorithms: baseline,hard_filter,score_filter")
 	startRaw := flag.String("start", "", "start time, RFC3339 or yyyy-mm-dd HH:MM:SS")
 	endRaw := flag.String("end", "", "end time, RFC3339 or yyyy-mm-dd HH:MM:SS")
@@ -38,6 +39,9 @@ func main() {
 	btCfg := strategy.DefaultMA20BacktestConfig()
 	if strings.TrimSpace(*tablesRaw) != "" {
 		btCfg.Tables = strings.Split(*tablesRaw, ",")
+	}
+	if strings.TrimSpace(*instrumentsRaw) != "" {
+		btCfg.Instruments = strings.Split(*instrumentsRaw, ",")
 	}
 	if strings.TrimSpace(*algorithmsRaw) != "" {
 		btCfg.Algorithms = strings.Split(*algorithmsRaw, ",")
@@ -110,7 +114,7 @@ func printSummary(resp strategy.BacktestResponse) {
 			continue
 		}
 		fmt.Printf(
-			"%s attempts=%d filtered=%d signals=%d success=%d failure=%d unresolved=%d attempt_rate=%.4f signal_rate=%.4f formation=%.4f\n",
+			"%s attempts=%d filtered=%d signals=%d success=%d failure=%d unresolved=%d attempt_rate=%.4f signal_rate=%.4f formation=%.4f net_points=%.2f avg_points=%.2f profit_factor=%.4f\n",
 			algo,
 			s.AttemptsStarted,
 			s.Filtered,
@@ -121,6 +125,9 @@ func printSummary(resp strategy.BacktestResponse) {
 			s.AttemptSuccessRate,
 			s.SignalSuccessRate,
 			s.SignalFormationRate,
+			s.NetProfitPoints,
+			s.AverageProfitPoints,
+			s.ProfitFactor,
 		)
 	}
 }

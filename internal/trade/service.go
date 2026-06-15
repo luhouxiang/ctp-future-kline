@@ -1901,9 +1901,13 @@ func (s *Service) estimateMargin(symbol string, exchangeID string, direction str
 	if price <= 0 || volume <= 0 {
 		return 0
 	}
-	volumeMultiple := 1
+	volumeMultiple, hasVolumeMultiple := s.marginVolumeMultiple(symbol, exchangeID)
 	ratioByMoney := defaultPaperMarginRatio
 	ratioByVolume := 0.0
+	if !hasVolumeMultiple {
+		// Without instrument metadata, reserve full notional instead of underestimating margin.
+		ratioByMoney = 1
+	}
 
 	if s != nil && s.rateCatalog != nil {
 		if params, err := s.rateCatalog.marginCalcParams(symbol, exchangeID, direction); err != nil {
@@ -1916,7 +1920,7 @@ func (s *Service) estimateMargin(symbol string, exchangeID string, direction str
 			)
 		} else {
 			if params.VolumeMultiple > 0 {
-				volumeMultiple = params.VolumeMultiple
+				volumeMultiple = float64(params.VolumeMultiple)
 			}
 			if params.RatioByMoney > 0 {
 				ratioByMoney = params.RatioByMoney
@@ -1926,11 +1930,28 @@ func (s *Service) estimateMargin(symbol string, exchangeID string, direction str
 			}
 		}
 	}
-	perLot := price*float64(volumeMultiple)*ratioByMoney + ratioByVolume
+	perLot := price*volumeMultiple*ratioByMoney + ratioByVolume
 	if perLot < 0 {
 		perLot = 0
 	}
 	return perLot * float64(volume)
+}
+
+func (s *Service) marginVolumeMultiple(symbol string, exchangeID string) (float64, bool) {
+	if s != nil && s.rateCatalog != nil {
+		if vm, err := s.rateCatalog.instrumentVolumeMultiple(symbol, exchangeID); err == nil && vm > 0 {
+			return float64(vm), true
+		}
+	}
+	if s != nil && s.resolver != nil {
+		if s.resolver.Count() == 0 && strings.TrimSpace(s.ctpCfg.SharedMetaDSN) != "" {
+			_, _ = s.resolver.EnsureLoadedFromDSN(strings.TrimSpace(s.ctpCfg.SharedMetaDSN))
+		}
+		if resolved, err := s.resolver.Resolve(symbol, exchangeID); err == nil && resolved.Product.VolumeMultiple > 0 {
+			return float64(resolved.Product.VolumeMultiple), true
+		}
+	}
+	return 1, false
 }
 
 func paperCommission(tr TradeRecord) float64 {

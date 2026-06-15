@@ -224,9 +224,9 @@ func TestReplayPaperMatchingAndCancelLifecycle(t *testing.T) {
 	}
 	assertFloatEqual(t, account.FrozenCash, 0)
 	assertFloatEqual(t, account.Margin, 198)
-	assertFloatEqual(t, account.Balance, replayPaperInitialBalance-0.0198)
-	assertFloatEqual(t, account.Available, replayPaperInitialBalance-0.0198-198)
-	assertFloatEqual(t, account.PositionProfit, 0)
+	assertFloatEqual(t, account.Balance, replayPaperInitialBalance-0.0198-2)
+	assertFloatEqual(t, account.Available, replayPaperInitialBalance-0.0198-2-198)
+	assertFloatEqual(t, account.PositionProfit, -2)
 
 	if err := svc.ConsumeBusEvent(context.Background(), replayTickEvent(t, "rb2505", "SHFE", 105, 106)); err != nil {
 		t.Fatalf("consume mtm tick failed: %v", err)

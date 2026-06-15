@@ -35,6 +35,30 @@ func TestValidateSubmitAllowsManualOrder(t *testing.T) {
 	}
 }
 
+func TestValidateSubmitAllowsStrategyOrder(t *testing.T) {
+	t.Parallel()
+
+	_, err := ValidateSubmit(
+		context.Background(),
+		TradeStatus{TraderFront: true, TraderLogin: true, SettlementConfirmed: true},
+		config.TradeConfig{MaxOrderVolume: 10},
+		TradingAccountSnapshot{Available: 100000},
+		nil,
+		SubmitOrderRequest{
+			ExchangeID: "SHFE",
+			Symbol:     "ag2605",
+			Direction:  "sell",
+			OffsetFlag: "open",
+			LimitPrice: 22847,
+			Volume:     1,
+			Reason:     "strategy",
+		},
+	)
+	if err != nil {
+		t.Fatalf("ValidateSubmit() error = %v", err)
+	}
+}
+
 func TestValidateSubmitBlocksReplayContext(t *testing.T) {
 	t.Parallel()
 

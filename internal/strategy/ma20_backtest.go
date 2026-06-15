@@ -66,6 +66,7 @@ var DefaultMA20BacktestAlgorithms = []string{
 type MA20BacktestConfig struct {
 	Tables               []string
 	Algorithms           []string
+	Instruments          []string
 	Period               string
 	StartTime            time.Time
 	EndTime              time.Time
@@ -116,6 +117,8 @@ type MA20AttemptRecord struct {
 	Reason            string             `json:"reason"`
 	Regime            string             `json:"regime,omitempty"`
 	EntryPrice        float64            `json:"entry_price,omitempty"`
+	ExitPrice         float64            `json:"exit_price,omitempty"`
+	ProfitPoints      float64            `json:"profit_points,omitempty"`
 	ReactionLow       float64            `json:"reaction_low,omitempty"`
 	TouchOpen         float64            `json:"touch_open,omitempty"`
 	TouchHigh         float64            `json:"touch_high,omitempty"`
@@ -152,6 +155,11 @@ type MA20BacktestStats struct {
 	AttemptSuccessRate  float64 `json:"attempt_success_rate"`
 	SignalSuccessRate   float64 `json:"signal_success_rate"`
 	SignalFormationRate float64 `json:"signal_formation_rate"`
+	NetProfitPoints     float64 `json:"net_profit_points"`
+	GrossProfitPoints   float64 `json:"gross_profit_points"`
+	GrossLossPoints     float64 `json:"gross_loss_points"`
+	AverageProfitPoints float64 `json:"average_profit_points"`
+	ProfitFactor        float64 `json:"profit_factor"`
 }
 
 type MA20BacktestResult struct {
@@ -203,6 +211,7 @@ func NormalizeMA20BacktestConfig(cfg MA20BacktestConfig) MA20BacktestConfig {
 	if len(cfg.Algorithms) == 0 {
 		cfg.Algorithms = def.Algorithms
 	}
+	cfg.Instruments = normalizeMA20InstrumentFilter(cfg.Instruments)
 	if strings.TrimSpace(cfg.Period) == "" {
 		cfg.Period = def.Period
 	}
@@ -354,6 +363,14 @@ func queryMA20BacktestBars(ctx context.Context, db *sql.DB, table string, cfg MA
 	}
 	where := []string{`"Period"=?`}
 	args := []any{cfg.Period}
+	if len(cfg.Instruments) > 0 {
+		holders := make([]string, 0, len(cfg.Instruments))
+		for _, instrument := range cfg.Instruments {
+			holders = append(holders, "?")
+			args = append(args, instrument)
+		}
+		where = append(where, `"InstrumentID" IN (`+strings.Join(holders, ",")+`)`)
+	}
 	if !cfg.StartTime.IsZero() {
 		where = append(where, `"AdjustedTime">=?`)
 		args = append(args, cfg.StartTime.Format("2006-01-02 15:04:05"))
@@ -639,6 +656,7 @@ func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, s
 			attempt.Outcome = MA20OutcomeFailure
 			attempt.OutcomeIndex = j
 			attempt.OutcomeTime = &ts
+			setMA20AttemptExit(attempt, attempt.AdverseTarget)
 			attempt.Reason = "adverse target hit before profit target"
 			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "信号失败", "failed", attempt.Reason, attempt.AdverseTarget, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
 			return j
@@ -667,6 +685,7 @@ func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, s
 			attempt.Outcome = MA20OutcomeFailure
 			attempt.OutcomeIndex = j
 			attempt.OutcomeTime = &ts
+			setMA20AttemptExit(attempt, bars[j].Close)
 			attempt.Reason = "market strengthened before short worked"
 			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "盘面转强止损", "failed", attempt.Reason, bars[j].Close, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
 			return j
@@ -680,6 +699,7 @@ func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, s
 			attempt.Outcome = MA20OutcomeSuccess
 			attempt.OutcomeIndex = j
 			attempt.OutcomeTime = &ts
+			setMA20AttemptExit(attempt, bars[j].Close)
 			attempt.Reason = "trend-following profit exit after MA20 reclaim"
 			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "结构止盈", "passed", attempt.Reason, bars[j].Close, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
 			return j
@@ -689,8 +709,21 @@ func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, s
 		}
 	}
 	attempt.Outcome = MA20OutcomeUnresolved
+	if last > signalIndex && last < len(bars) {
+		ts := bars[last].AdjustedTime
+		attempt.OutcomeIndex = last
+		attempt.OutcomeTime = &ts
+		setMA20AttemptExit(attempt, bars[last].Close)
+	}
 	attempt.Reason = "observation window ended without structural exit"
 	return last
+}
+
+func setMA20AttemptExit(attempt *MA20AttemptRecord, exitPrice float64) {
+	attempt.ExitPrice = exitPrice
+	if attempt.EntryPrice > 0 && exitPrice > 0 {
+		attempt.ProfitPoints = attempt.EntryPrice - exitPrice
+	}
 }
 
 func exitMetrics(ind ma20Indicators, i int, lowestLow float64, noNewLowBars int, risingLowBars int, maTouched bool, shortTrendIntact bool) map[string]float64 {
@@ -918,6 +951,14 @@ func applyMA20Stats(stats *MA20BacktestStats, attempt MA20AttemptRecord) {
 		stats.Signals++
 		stats.Unresolved++
 	}
+	if attempt.Outcome == MA20OutcomeSuccess || attempt.Outcome == MA20OutcomeFailure || attempt.Outcome == MA20OutcomeUnresolved {
+		stats.NetProfitPoints += attempt.ProfitPoints
+		if attempt.ProfitPoints > 0 {
+			stats.GrossProfitPoints += attempt.ProfitPoints
+		} else if attempt.ProfitPoints < 0 {
+			stats.GrossLossPoints += -attempt.ProfitPoints
+		}
+	}
 }
 
 func addMA20Stats(dst *MA20BacktestStats, src MA20BacktestStats) {
@@ -928,6 +969,9 @@ func addMA20Stats(dst *MA20BacktestStats, src MA20BacktestStats) {
 	dst.Success += src.Success
 	dst.Failure += src.Failure
 	dst.Unresolved += src.Unresolved
+	dst.NetProfitPoints += src.NetProfitPoints
+	dst.GrossProfitPoints += src.GrossProfitPoints
+	dst.GrossLossPoints += src.GrossLossPoints
 }
 
 func finalizeMA20Stats(stats *MA20BacktestStats) {
@@ -937,6 +981,12 @@ func finalizeMA20Stats(stats *MA20BacktestStats) {
 	}
 	if stats.Signals > 0 {
 		stats.SignalSuccessRate = float64(stats.Success) / float64(stats.Signals)
+		stats.AverageProfitPoints = stats.NetProfitPoints / float64(stats.Signals)
+	}
+	if stats.GrossLossPoints > 0 {
+		stats.ProfitFactor = stats.GrossProfitPoints / stats.GrossLossPoints
+	} else if stats.GrossProfitPoints > 0 {
+		stats.ProfitFactor = math.Inf(1)
 	}
 }
 
@@ -959,6 +1009,24 @@ func sortedInstrumentKeys(items map[string][]MA20BacktestBar) []string {
 	}
 	sort.Strings(keys)
 	return keys
+}
+
+func normalizeMA20InstrumentFilter(items []string) []string {
+	seen := make(map[string]struct{}, len(items))
+	out := make([]string, 0, len(items))
+	for _, item := range items {
+		value := strings.TrimSpace(item)
+		if value == "" {
+			continue
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			continue
+		}
+		seen[key] = struct{}{}
+		out = append(out, value)
+	}
+	return out
 }
 
 func sanitizeMA20List(items []string) []string {

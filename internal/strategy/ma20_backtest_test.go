@@ -115,6 +115,18 @@ func TestMA20QueryRejectsInvalidTableName(t *testing.T) {
 	}
 }
 
+func TestMA20BacktestRequestRoutesConcreteInstrumentToInstrumentTable(t *testing.T) {
+	req := BacktestRequest{Symbol: "ao2609"}
+	tables := ma20BacktestTablesFromRequest(req)
+	if len(tables) != 1 || tables[0] != "future_kline_instrument_mm_ao" {
+		t.Fatalf("tables = %v, want concrete instrument table", tables)
+	}
+	instruments := ma20BacktestInstrumentsFromRequest(req)
+	if len(instruments) != 1 || instruments[0] != "ao2609" {
+		t.Fatalf("instruments = %v, want ao2609 filter", instruments)
+	}
+}
+
 func makeBarsFromCloses(start float64, count int, closeAt func(int) float64) []MA20BacktestBar {
 	out := make([]MA20BacktestBar, 0, count)
 	for i := 0; i < count; i++ {

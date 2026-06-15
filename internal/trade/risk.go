@@ -24,9 +24,9 @@ func ValidateSubmit(ctx context.Context, status TradeStatus, cfg config.TradeCon
 		return commandID, ErrTradeServiceOffline
 	}
 	switch strings.TrimSpace(req.Reason) {
-	case "manual", "line_order":
+	case "manual", "line_order", "strategy":
 	default:
-		return commandID, errors.New("only manual or line_order orders are allowed")
+		return commandID, errors.New("only manual, line_order or strategy orders are allowed")
 	}
 	if !symbolAllowed(cfg.AllowedSymbols, req.Symbol) {
 		return commandID, fmt.Errorf("symbol %s not allowed", req.Symbol)
