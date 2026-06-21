@@ -1133,6 +1133,7 @@ func runLocalMA20BacktestWithDB(ctx context.Context, db *sql.DB, req BacktestReq
 	cfg.Tables = ma20BacktestTablesFromRequest(req)
 	cfg.Algorithms = ma20ParamStringList(req.Parameters, "algorithms", cfg.Algorithms)
 	cfg.Instruments = ma20BacktestInstrumentsFromRequest(req)
+	cfg.ExitMode = ma20ParamString(req.Parameters, "exit_mode", cfg.ExitMode)
 	if _, ok := req.Parameters["algorithms"]; !ok {
 		if algo := MA20AlgorithmForStrategyID(req.Instance.StrategyID); algo != "" {
 			cfg.Algorithms = []string{algo}
@@ -1147,11 +1148,16 @@ func runLocalMA20BacktestWithDB(ctx context.Context, db *sql.DB, req BacktestReq
 	cfg.ProfitRisingLowBars = ma20ParamInt(req.Parameters, "profit_rising_low_bars", cfg.ProfitRisingLowBars)
 	cfg.StrongBullATR = ma20ParamFloat(req.Parameters, "strong_bull_atr_multiple", cfg.StrongBullATR)
 	cfg.StrongBullATR = ma20ParamFloat(req.Parameters, "strong_bull_atr", cfg.StrongBullATR)
+	cfg.ExitMA20DistanceATR = ma20ParamFloat(req.Parameters, "exit_ma20_distance_atr_multiple", cfg.ExitMA20DistanceATR)
+	cfg.ExitMA20DistanceATR = ma20ParamFloat(req.Parameters, "exit_ma20_distance_atr", cfg.ExitMA20DistanceATR)
 	cfg.StructureWaitBars = ma20ParamInt(req.Parameters, "structure_wait_bars", cfg.StructureWaitBars)
 	cfg.TouchWaitBars = ma20ParamInt(req.Parameters, "touch_wait_bars", cfg.TouchWaitBars)
 	cfg.TriggerWaitBars = ma20ParamInt(req.Parameters, "trigger_wait_bars", cfg.TriggerWaitBars)
 	cfg.SwingLookbackBars = ma20ParamInt(req.Parameters, "swing_lookback_bars", cfg.SwingLookbackBars)
 	cfg.SlopeLookbackBars = ma20ParamInt(req.Parameters, "slope_lookback_bars", cfg.SlopeLookbackBars)
+	cfg.ZigZagATRPeriod = ma20ParamInt(req.Parameters, "zigzag_atr_period", cfg.ZigZagATRPeriod)
+	cfg.ZigZagATRMultiple = ma20ParamFloat(req.Parameters, "zigzag_atr_multiple", cfg.ZigZagATRMultiple)
+	cfg.ZigZagMinBars = ma20ParamInt(req.Parameters, "zigzag_min_bars", cfg.ZigZagMinBars)
 	cfg.ReportAttemptLimit = ma20ParamInt(req.Parameters, "report_attempt_limit", cfg.ReportAttemptLimit)
 	if start, ok, err := parseBacktestOptionalTime(req.StartTime); err != nil {
 		return BacktestResponse{}, err
@@ -1576,7 +1582,7 @@ func (m *Manager) updateLegacyZigZagFeatureCache(trace StrategyTraceRecord) {
 		return
 	}
 	typ := strings.ToUpper(strings.TrimSpace(fmt.Sprint(trace.Metrics["zigzag_type"])))
-	if typ != "PEAK" {
+	if typ != "PEAK" && typ != "TROUGH" {
 		return
 	}
 	pivotIndex, ok := metricInt(trace.Metrics["pivot_index"])
@@ -1591,6 +1597,7 @@ func (m *Manager) updateLegacyZigZagFeatureCache(trace StrategyTraceRecord) {
 		"pivot_index":    pivotIndex,
 		"pivot_time":     trace.Metrics["pivot_time"],
 		"pivot_price":    trace.Metrics["pivot_price"],
+		"zigzag_type":    typ,
 		"confirmed_time": confirmedTime,
 	}
 	if confirmedIndex, ok := metricInt(trace.Metrics["confirmed_index"]); ok {
@@ -1656,16 +1663,27 @@ func (m *Manager) legacyZigZagFeatures(symbol string, timeframe string, mode str
 		limit = len(items)
 	}
 	peaks := make([]map[string]any, 0, limit)
-	for i := len(items) - 1; i >= 0 && len(peaks) < limit; i-- {
+	troughs := make([]map[string]any, 0, limit)
+	for i := len(items) - 1; i >= 0 && (len(peaks) < limit || len(troughs) < limit); i-- {
 		item := make(map[string]any, len(items[i]))
 		for k, v := range items[i] {
 			item[k] = v
 		}
-		peaks = append(peaks, item)
+		switch strings.ToUpper(strings.TrimSpace(fmt.Sprint(item["zigzag_type"]))) {
+		case "TROUGH":
+			if len(troughs) < limit {
+				troughs = append(troughs, item)
+			}
+		default:
+			if len(peaks) < limit {
+				peaks = append(peaks, item)
+			}
+		}
 	}
 	return map[string]any{
 		zigzagATR26FeatureID: map[string]any{
-			"peaks": peaks,
+			"peaks":   peaks,
+			"troughs": troughs,
 		},
 	}
 }

@@ -89,6 +89,37 @@ func TestMA20WeakPullbackProducesSuccessfulSignal(t *testing.T) {
 	}
 }
 
+func TestMA20BacktestContinuesScanningAfterSignal(t *testing.T) {
+	bars := makeBarsFromCloses(100, 120, func(i int) float64 { return 100 })
+	bars = append(bars,
+		barWithOHLC(120, 100.0, 100.2, 98.7, 98.9),
+		barWithOHLC(121, 99.2, 100.1, 98.8, 99.0),
+		barWithOHLC(122, 99.0, 99.2, 98.7, 98.9),
+		barWithOHLC(123, 100.5, 101.0, 100.1, 100.8),
+		barWithOHLC(124, 100.0, 100.2, 98.5, 98.8),
+		barWithOHLC(125, 99.1, 100.0, 98.7, 98.9),
+		barWithOHLC(126, 98.8, 99.0, 98.1, 98.4),
+	)
+	cfg := DefaultMA20BacktestConfig()
+	cfg.ObservationBars = 20
+	cfg.ProfitReboundATR = 100
+	cfg.StrongBullATR = 100
+	cfg.StrengthExitBars = 100
+	out := RunMA20BacktestOnBars("future_kline_l9_mm_y", "yl9", bars, cfg, []string{MA20AlgoBaseline})
+	attempts := out[MA20AlgoBaseline]
+	signals := 0
+	indexes := []int{}
+	for _, attempt := range attempts {
+		if attempt.SignalIndex > 0 {
+			signals++
+			indexes = append(indexes, attempt.SignalIndex)
+		}
+	}
+	if signals != 2 {
+		t.Fatalf("signals=%d indexes=%v attempts=%+v, want two signals while first observation window is active", signals, indexes, attempts)
+	}
+}
+
 func TestMA20OutcomeSameBarProfitAndAdverseCountsFailure(t *testing.T) {
 	bars := []MA20BacktestBar{
 		barWithOHLC(0, 100, 100, 100, 100),

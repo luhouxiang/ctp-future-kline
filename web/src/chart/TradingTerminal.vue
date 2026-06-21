@@ -59,6 +59,9 @@ const strategySignals = ref([])
 const strategyBacktests = ref([])
 const selectedStrategyBacktestRunId = ref('')
 const strategyBacktestResult = ref(null)
+const selectedStrategyAnalysisRunIds = ref([])
+const strategyAnalysisResultCache = reactive({})
+const strategyAnalysisLoading = reactive({})
 const selectedStrategyInstanceId = ref('')
 const strategyStarting = ref(false)
 const strategyDetectBoxRestartTried = ref(false)
@@ -209,7 +212,7 @@ function applyLightweightDefaults(layoutData = {}) {
   reversalState.persistVersion = 0
   reversalState.selected_id = ''
   activeRightTab.value = String(layoutData.panes?.right_active_tab || 'quote')
-  if (!['quote', 'watchlist', 'strategy', 'object_tree', 'channel', 'reversal'].includes(activeRightTab.value)) {
+  if (!['quote', 'watchlist', 'strategy', 'strategy_analysis', 'object_tree', 'channel', 'reversal'].includes(activeRightTab.value)) {
     activeRightTab.value = 'quote'
   }
   drawings.value = (layoutData.drawings || []).map((d) => normalizeDrawingForSave(d))
@@ -772,6 +775,121 @@ async function fetchStrategyRuntime() {
   })
   syncSelectedStrategyInstance()
   syncSelectedStrategyBacktest()
+}
+
+function strategyRunTimeMs(row) {
+  const ts = Date.parse(String(row?.finished_at || row?.started_at || ''))
+  return Number.isFinite(ts) ? ts : 0
+}
+
+function strategyRunSummary(row) {
+  return row?.summary && typeof row.summary === 'object' ? row.summary : {}
+}
+
+const strategyAnalysisRows = computed(() => {
+  const currentSymbol = currentTradeSymbol().toLowerCase()
+  const currentTimeframe = String(scope.timeframe || '').trim().toLowerCase()
+  return (Array.isArray(strategyBacktests.value) ? strategyBacktests.value : [])
+    .filter((row) => String(row?.run_type || '') === 'replay_report')
+    .filter((row) => {
+      const symbol = String(row?.symbol || '').trim().toLowerCase()
+      const timeframe = String(row?.timeframe || '').trim().toLowerCase()
+      if (currentSymbol && symbol && symbol !== currentSymbol) return false
+      if (currentTimeframe && timeframe && timeframe !== currentTimeframe) return false
+      return true
+    })
+    .slice()
+    .sort((a, b) => {
+      const strategyDiff = String(a?.strategy_id || '').localeCompare(String(b?.strategy_id || ''))
+      if (strategyDiff !== 0) return strategyDiff
+      const timeDiff = strategyRunTimeMs(b) - strategyRunTimeMs(a)
+      if (timeDiff !== 0) return timeDiff
+      return String(a?.run_id || '').localeCompare(String(b?.run_id || ''))
+    })
+    .map((row) => {
+      const summary = strategyRunSummary(row)
+      return {
+        ...row,
+        signal_count: Number(summary.signal_count || 0),
+        order_plan_count: Number(summary.order_plan_count || 0),
+        simulated_count: Number(summary.simulated_count || 0),
+        blocked_count: Number(summary.blocked_count || 0),
+        latest_order_status: String(summary.latest_order_status || ''),
+        latest_risk_status: String(summary.latest_risk_status || ''),
+      }
+    })
+})
+
+const selectedStrategyAnalysisInstanceIds = computed(() => {
+  const ids = new Set()
+  for (const runID of selectedStrategyAnalysisRunIds.value) {
+    const row = strategyAnalysisRows.value.find((item) => String(item?.run_id || '') === String(runID || ''))
+    const id = String(row?.instance_id || strategyAnalysisResultCache[runID]?.instance_id || '').trim()
+    if (id) ids.add(id)
+  }
+  return Array.from(ids)
+})
+
+const chartStrategySignals = computed(() => {
+  const out = Array.isArray(strategySignals.value) ? strategySignals.value.slice() : []
+  for (const runID of selectedStrategyAnalysisRunIds.value) {
+    const result = strategyAnalysisResultCache[runID]
+    const row = strategyAnalysisRows.value.find((item) => String(item?.run_id || '') === String(runID || '')) || {}
+    const signals = Array.isArray(result?.signal_table) ? result.signal_table : []
+    for (const sig of signals) {
+      out.push({
+        ...sig,
+        id: `analysis-${runID}-${sig.id || sig.event_time || out.length}`,
+        instance_id: sig.instance_id || result?.instance_id || row.instance_id || '',
+        strategy_id: sig.strategy_id || result?.strategy_id || row.strategy_id || '',
+        symbol: sig.symbol || result?.symbol || row.symbol || '',
+        timeframe: sig.timeframe || result?.timeframe || row.timeframe || '',
+        created_at: row.finished_at || row.started_at || sig.created_at || '',
+        analysis_run_id: runID,
+      })
+    }
+  }
+  return out
+})
+
+const chartActiveStrategyInstanceIds = computed(() => {
+  const ids = new Set(selectedStrategyAnalysisInstanceIds.value)
+  const selected = String(selectedStrategyInstanceId.value || '').trim()
+  if (selected) ids.add(selected)
+  return Array.from(ids)
+})
+
+async function loadStrategyAnalysisResult(runID) {
+  const id = String(runID || '').trim()
+  if (!id || strategyAnalysisResultCache[id] || strategyAnalysisLoading[id]) return
+  strategyAnalysisLoading[id] = true
+  try {
+    const resp = await fetch(`/api/strategy/backtests/${encodeURIComponent(id)}/result`)
+    if (!resp.ok) throw new Error(await resp.text())
+    const data = await resp.json()
+    strategyAnalysisResultCache[id] = data?.result || {}
+  } catch (err) {
+    console.warn('[strategy] load analysis report failed', err)
+    window.alert(`加载策略分析结果失败：${err instanceof Error ? err.message : String(err)}`)
+    selectedStrategyAnalysisRunIds.value = selectedStrategyAnalysisRunIds.value.filter((item) => String(item) !== id)
+  } finally {
+    strategyAnalysisLoading[id] = false
+  }
+}
+
+function toggleStrategyAnalysisRun(runID) {
+  const id = String(runID || '').trim()
+  if (!id) return
+  if (selectedStrategyAnalysisRunIds.value.includes(id)) {
+    selectedStrategyAnalysisRunIds.value = selectedStrategyAnalysisRunIds.value.filter((item) => item !== id)
+    return
+  }
+  selectedStrategyAnalysisRunIds.value = [...selectedStrategyAnalysisRunIds.value, id]
+  void loadStrategyAnalysisResult(id)
+}
+
+function clearStrategyAnalysisRuns() {
+  selectedStrategyAnalysisRunIds.value = []
 }
 
 function syncSelectedStrategyBacktest() {
@@ -2411,8 +2529,9 @@ onUnmounted(() => {
           :channel-state="channelState"
           :reversal-state="reversalState"
           :strategy-traces="strategyTraces"
-          :strategy-signals="strategySignals"
+          :strategy-signals="chartStrategySignals"
           :active-strategy-instance-id="selectedStrategyInstanceId"
+          :active-strategy-instance-ids="chartActiveStrategyInstanceIds"
           @set-drawings="onSetDrawings"
           @select-drawing="onSelectDrawing"
           @channel-view-change="onChannelViewChange"
@@ -2446,7 +2565,10 @@ onUnmounted(() => {
             traces: strategyTraces,
             backtests: strategyBacktests,
             selectedBacktestRunId: selectedStrategyBacktestRunId,
-            backtestResult: strategyBacktestResult
+            backtestResult: strategyBacktestResult,
+            analysisRows: strategyAnalysisRows,
+            selectedAnalysisRunIds: selectedStrategyAnalysisRunIds,
+            loadingAnalysisRunIds: strategyAnalysisLoading
           }"
           :selected-strategy-instance-id="selectedStrategyInstanceId"
           :channels="channelState"
@@ -2472,6 +2594,8 @@ onUnmounted(() => {
           @strategy-auto-execution-toggle="toggleStrategyAutoExecution"
           @strategy-run-click="openStrategyRunMenu"
           @strategy-backtest-select="onStrategyBacktestSelect"
+          @strategy-analysis-toggle="toggleStrategyAnalysisRun"
+          @strategy-analysis-clear="clearStrategyAnalysisRuns"
           @channel-action="onChannelAction"
           @channel-settings="onChannelSettings"
           @reversal-action="onReversalAction"

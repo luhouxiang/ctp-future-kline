@@ -173,8 +173,8 @@ const strategyCompositionForm = reactive({
   display_name: 'MA20状态图 + ZigZag指标',
   primary_strategy_id: 'ma20.state_diagram_short',
   helper_strategy_ids_text: 'indicator.zigzag_atr26',
-  primary_params_text: '{\n  "feature_dependencies": ["zigzag_atr26"]\n}',
-  helper_params_text: '{}',
+  primary_params_text: '{\n  "feature_dependencies": ["zigzag_atr26"],\n  "observation_bars": 360,\n  "strength_exit_bars": 6,\n  "use_zigzag_trough_take_profit": true,\n  "prefer_zigzag_trough_take_profit": true,\n  "entry_ma20_slope_max": 0.0,\n  "entry_ma60_slope_max": 0.5,\n  "entry_zigzag_peak_min_bars": 0,\n  "entry_zigzag_peak_max_bars": 80,\n  "profit_rebound_atr_multiple": 2.5,\n  "profit_rising_low_bars": 3,\n  "strong_bull_atr_multiple": 2.5\n}',
+  helper_params_text: '{\n  "indicator.zigzag_atr26": {\n    "atr_multiple": 3.5,\n    "min_bars": 10\n  }\n}',
 })
 
 const tradeStatus = reactive({
@@ -233,6 +233,22 @@ const searchState = reactive({
 })
 
 const strategyServiceBusy = ref(false)
+const activeConsoleSection = ref('overview')
+
+const consoleSections = [
+  { id: 'overview', label: '首页控制台', desc: '启动、模式与健康检查' },
+  { id: 'market', label: '行情与K线', desc: '连接状态、链路耗时与K线栏' },
+  { id: 'replay', label: '回放控制', desc: 'Replay任务与进度监控' },
+  { id: 'strategy', label: '策略管理', desc: '策略实例、组合与回测' },
+  { id: 'trade', label: '交易管理', desc: '账户、下单、持仓与成交' },
+  { id: 'query', label: 'K线查询', desc: '索引、检索与打开图表' },
+  { id: 'import', label: '数据导入', desc: '历史数据、日历与交易时段' },
+  { id: 'system', label: '系统日志', desc: '事件日志与诊断信息' },
+]
+
+const activeConsoleSectionMeta = computed(() => (
+  consoleSections.find((item) => item.id === activeConsoleSection.value) || consoleSections[0]
+))
 
 const KLINE_TIMEFRAMES = ['1m', '5m', '15m', '30m', '1h', '1d']
 
@@ -1824,8 +1840,44 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div class="container">
-    <div class="panel">
+  <div class="console-shell">
+    <header class="console-topbar">
+      <div>
+        <h1>CTP Kline 控制台</h1>
+        <span>版本号: {{ APP_VERSION }}</span>
+      </div>
+      <div class="console-topbar-status">
+        <span>WebSocket: {{ wsConnected ? '已连接' : '未连接' }}</span>
+        <span :class="marketBadgeClass">{{ marketBadgeText }}</span>
+        <span>模式: {{ appMode.mode }}</span>
+      </div>
+    </header>
+
+    <div class="console-body">
+      <aside class="console-sidebar">
+        <button
+          v-for="item in consoleSections"
+          :key="item.id"
+          type="button"
+          class="console-nav-item"
+          :class="{ active: activeConsoleSection === item.id }"
+          @click="activeConsoleSection = item.id"
+        >
+          <strong>{{ item.label }}</strong>
+          <small>{{ item.desc }}</small>
+        </button>
+      </aside>
+
+      <main class="console-main">
+        <section class="console-section-head">
+          <div>
+            <h2>{{ activeConsoleSectionMeta.label }}</h2>
+            <p>{{ activeConsoleSectionMeta.desc }}</p>
+          </div>
+        </section>
+
+        <div class="container console-content">
+    <div v-if="activeConsoleSection === 'overview'" class="panel">
       <h2>CTP Kline 控制台</h2>
       <p>版本号: {{ APP_VERSION }}</p>
       <div v-if="activeStartupTasks.length" class="startup-task-banner" :class="{ error: activeStartupTasks.some((item) => item.status === 'error') }">
@@ -1849,7 +1901,7 @@ onUnmounted(() => {
       <p v-if="isReplayAppMode" class="error-text">回放模拟模式不需要连接实时行情服务器或真实交易前置，启动服务器按钮已禁用</p>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'overview'" class="panel">
       <div class="row">
         <h3>启动检查</h3>
         <span :class="startupChecks.needs_attention > 0 ? 'badge closed' : 'badge open'">{{ startupAttentionText }}</span>
@@ -1886,7 +1938,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'market'" class="panel">
       <h3>生成K线栏设置</h3>
       <p>对所有K线生成路径生效：实盘生成、回放、K线导入。</p>
       <table class="table">
@@ -1922,7 +1974,7 @@ onUnmounted(() => {
       <p>{{ klineGenerationSaving ? '保存中...' : '勾选变化后自动保存到数据库' }}</p>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'market'" class="panel">
       <h3>连接状态</h3>
       <div class="status-grid">
         <div class="status-item">状态: {{ status.state }}</div>
@@ -1948,7 +2000,7 @@ onUnmounted(() => {
       <p v-if="status.drift_paused" style="color: #b22222">告警: 行情时钟漂移超阈值，已暂停写入</p>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'market'" class="panel">
       <h3>链路耗时</h3>
       <div class="status-grid">
         <div class="status-item">上游时间差: {{ Number(status.upstream_lag_ms || 0).toFixed(1) }} ms</div>
@@ -1971,7 +2023,7 @@ onUnmounted(() => {
       <p>说明: 优先看 1 分钟均值/P95/最大值判断是否持续堆积；“最后一个已写样本”只反映最新写完的那条任务，不代表整体吞吐。</p>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'replay'" class="panel">
       <h3>Replay 控制与监控</h3>
       <p v-if="!isReplayAppMode" class="error-text">当前模式不是回放模拟，回放按钮已禁用</p>
       <p v-else-if="!replayEnabled" class="error-text">Replay 未启用</p>
@@ -2054,7 +2106,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'strategy'" class="panel">
       <h3>策略管理</h3>
       <p v-if="!strategyEnabled" class="error-text">策略子系统未启用</p>
       <div class="row strategy-service-actions">
@@ -2270,7 +2322,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'trade'" class="panel">
       <h3>{{ tradePanelTitle }}</h3>
       <div class="row">
         <button class="secondary" @click="refreshTradeData">刷新查询</button>
@@ -2410,7 +2462,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'query'" class="panel">
       <h3>K线查询</h3>
       <div class="row">
         <input v-model="searchForm.keyword" placeholder="关键字（代码/品种/交易所）" />
@@ -2468,7 +2520,7 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'import'" class="panel">
       <h3>加载历史交易日历</h3>
       <div class="row">
         <input type="file" accept=".txt" @change="onSelectTradingDayFile" />
@@ -2483,7 +2535,7 @@ onUnmounted(() => {
       </p>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'import'" class="panel">
       <h3>更新交易时段</h3>
       <div class="row">
         <input type="file" accept=".txt" webkitdirectory directory multiple @change="onSelectTradingSessionFiles" />
@@ -2504,7 +2556,7 @@ onUnmounted(() => {
       </p>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'import'" class="panel">
       <h3>加载1分钟历史数据</h3>
       <div class="row">
         <input type="file" webkitdirectory directory multiple @change="onSelectFiles" />
@@ -2523,11 +2575,14 @@ onUnmounted(() => {
       </div>
     </div>
 
-    <div class="panel">
+    <div v-if="activeConsoleSection === 'system'" class="panel">
       <h3>事件日志</h3>
       <div class="log-box">
         <div v-for="item in logs" :key="item">{{ item }}</div>
       </div>
+    </div>
+        </div>
+      </main>
     </div>
   </div>
 

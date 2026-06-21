@@ -528,6 +528,7 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         state.trs = [float(v) for v in (trs or [2.0] * len(closes))]
         state.prev_close = state.closes[-1]
         state.signal_entry = entry
+        state.signal_bar_index = 10
         state.signal_trigger_price = entry
         state.signal_atr = 2.0
         state.signal_adverse_target = entry + 2.0
@@ -581,6 +582,27 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(signal["metrics"]["entry_price"], 99.2)
         self.assertEqual(self.state().signal_entry, 99.2)
         self.assertEqual(self.state().state, LOSS_HOLDING)
+
+    def test_second_break_requires_recent_zigzag_peak_when_configured(self):
+        self.setup_to_rebound()
+
+        blocked = self.strategy.on_bar(state_bar_req(
+            idx=24,
+            open_=99.3,
+            high=99.6,
+            low=98.0,
+            close=99.2,
+            params={
+                "ma_period": 20,
+                "max_wait_bars": 6,
+                "entry_zigzag_peak_max_bars": 80,
+            },
+        ))
+
+        self.assertTrue(blocked["no_signal"])
+        self.assertEqual(blocked["reason"], "entry filter blocked short")
+        self.assertEqual(blocked["trace"]["checks"][2]["name"], "入场ZigZag波峰过滤")
+        self.assertFalse(blocked["trace"]["checks"][2]["passed"])
 
     def test_holding_switches_between_profit_and_loss(self):
         self.setup_to_rebound()
@@ -652,7 +674,18 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
     def test_take_profit_outputs_terminal_trace_and_resets(self):
         self.prime_holding_state([200.0] * 70, [2.0] * 70, entry=205.0)
 
-        result = self.strategy.on_bar(state_bar_req(idx=21, open_=200.0, high=202.0, low=199.0, close=201.0))
+        result = self.strategy.on_bar(state_bar_req(
+            idx=21,
+            open_=200.0,
+            high=202.0,
+            low=199.0,
+            close=201.0,
+            params={
+                "ma_period": 20,
+                "max_wait_bars": 6,
+                "prefer_zigzag_trough_take_profit": False,
+            },
+        ))
 
         self.assertFalse(result.get("no_signal", False))
         self.assertEqual(result["target_position"], 0)
@@ -660,6 +693,30 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(result["trace"]["step_index"], 8)
         self.assertEqual(result["metrics"]["signal_result"], "success")
         self.assertEqual(self.state().state, INIT)
+
+    def test_zigzag_trough_after_signal_takes_profit(self):
+        self.prime_holding_state([200.0] * 70, [2.0] * 70, entry=205.0, touched_ma20=False)
+        features = {
+            "zigzag_atr26": {
+                "troughs": [
+                    {
+                        "pivot_index": 18,
+                        "pivot_time": "2026-01-02T09:18:00+08:00",
+                        "pivot_price": 198.0,
+                        "confirmed_time": "2026-01-02T09:21:00+08:00",
+                        "confirmed_index": 21,
+                    }
+                ]
+            }
+        }
+
+        result = self.strategy.on_bar(state_bar_req(idx=21, open_=200.0, high=202.0, low=198.0, close=199.0, features=features))
+
+        self.assertFalse(result.get("no_signal", False))
+        self.assertEqual(result["target_position"], 0)
+        self.assertEqual(result["trace"]["step_key"], TAKE_PROFIT)
+        self.assertEqual(result["reason"], "ATR ZigZag trough confirmed after short profit")
+        self.assertEqual(result["trace"]["checks"][0]["name"], "ZigZag确认盈利波谷")
 
     def test_profit_touch_ma60_intrabar_without_close_above_uses_below_ma60_rules(self):
         self.prime_holding_state([130.0] * 40 + [100.0] * 30, [10.0] * 70, entry=140.0)

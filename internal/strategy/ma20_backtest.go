@@ -67,6 +67,7 @@ type MA20BacktestConfig struct {
 	Tables               []string
 	Algorithms           []string
 	Instruments          []string
+	ExitMode             string
 	Period               string
 	StartTime            time.Time
 	EndTime              time.Time
@@ -83,6 +84,9 @@ type MA20BacktestConfig struct {
 	TriggerWaitBars      int
 	SwingLookbackBars    int
 	SlopeLookbackBars    int
+	ZigZagATRPeriod      int
+	ZigZagATRMultiple    float64
+	ZigZagMinBars        int
 	ReportAttemptLimit   int
 	BacktestStartedAt    time.Time
 	BacktestFinishedAt   time.Time
@@ -174,6 +178,7 @@ type ma20Indicators struct {
 	MA60         []float64
 	MA120        []float64
 	ATR14        []float64
+	ZigZagTrough []bool
 	MA20Slope    []float64
 	MA60Slope    []float64
 	MA120Slope   []float64
@@ -184,6 +189,7 @@ func DefaultMA20BacktestConfig() MA20BacktestConfig {
 	return MA20BacktestConfig{
 		Tables:               append([]string(nil), DefaultMA20BacktestTables...),
 		Algorithms:           append([]string(nil), DefaultMA20BacktestAlgorithms...),
+		ExitMode:             "ma20_reclaim",
 		Period:               "5m",
 		ObservationBars:      240,
 		ProfitATRMultiple:    1.0,
@@ -198,6 +204,9 @@ func DefaultMA20BacktestConfig() MA20BacktestConfig {
 		TriggerWaitBars:      6,
 		SwingLookbackBars:    20,
 		SlopeLookbackBars:    5,
+		ZigZagATRPeriod:      26,
+		ZigZagATRMultiple:    2.0,
+		ZigZagMinBars:        5,
 		ReportAttemptLimit:   2000,
 		IncludeAttemptDetail: true,
 	}
@@ -212,6 +221,10 @@ func NormalizeMA20BacktestConfig(cfg MA20BacktestConfig) MA20BacktestConfig {
 		cfg.Algorithms = def.Algorithms
 	}
 	cfg.Instruments = normalizeMA20InstrumentFilter(cfg.Instruments)
+	cfg.ExitMode = strings.ToLower(strings.TrimSpace(cfg.ExitMode))
+	if cfg.ExitMode == "" {
+		cfg.ExitMode = def.ExitMode
+	}
 	if strings.TrimSpace(cfg.Period) == "" {
 		cfg.Period = def.Period
 	}
@@ -254,6 +267,15 @@ func NormalizeMA20BacktestConfig(cfg MA20BacktestConfig) MA20BacktestConfig {
 	if cfg.SlopeLookbackBars <= 0 {
 		cfg.SlopeLookbackBars = def.SlopeLookbackBars
 	}
+	if cfg.ZigZagATRPeriod <= 0 {
+		cfg.ZigZagATRPeriod = def.ZigZagATRPeriod
+	}
+	if cfg.ZigZagATRMultiple <= 0 {
+		cfg.ZigZagATRMultiple = def.ZigZagATRMultiple
+	}
+	if cfg.ZigZagMinBars <= 0 {
+		cfg.ZigZagMinBars = def.ZigZagMinBars
+	}
 	if cfg.ReportAttemptLimit <= 0 {
 		cfg.ReportAttemptLimit = def.ReportAttemptLimit
 	}
@@ -271,6 +293,7 @@ func RunMA20Backtest(ctx context.Context, db *sql.DB, cfg MA20BacktestConfig) (B
 			"period":                          cfg.Period,
 			"tables":                          cfg.Tables,
 			"algorithms":                      cfg.Algorithms,
+			"exit_mode":                       cfg.ExitMode,
 			"observation_bars":                cfg.ObservationBars,
 			"profit_atr_multiple":             cfg.ProfitATRMultiple,
 			"adverse_atr_multiple":            cfg.AdverseATRMultiple,
@@ -284,6 +307,9 @@ func RunMA20Backtest(ctx context.Context, db *sql.DB, cfg MA20BacktestConfig) (B
 			"trigger_wait_bars":               cfg.TriggerWaitBars,
 			"swing_lookback_bars":             cfg.SwingLookbackBars,
 			"slope_lookback_bars":             cfg.SlopeLookbackBars,
+			"zigzag_atr_period":               cfg.ZigZagATRPeriod,
+			"zigzag_atr_multiple":             cfg.ZigZagATRMultiple,
+			"zigzag_min_bars":                 cfg.ZigZagMinBars,
 			"include_attempt_detail":          cfg.IncludeAttemptDetail,
 		},
 		Stats:      map[string]MA20BacktestStats{},
@@ -424,6 +450,7 @@ func calcMA20Indicators(bars []MA20BacktestBar, cfg MA20BacktestConfig) ma20Indi
 		MA60:         make([]float64, n),
 		MA120:        make([]float64, n),
 		ATR14:        make([]float64, n),
+		ZigZagTrough: calcZigZagTroughConfirmations(bars, cfg),
 		MA20Slope:    make([]float64, n),
 		MA60Slope:    make([]float64, n),
 		MA120Slope:   make([]float64, n),
@@ -466,16 +493,20 @@ func runMA20Algorithm(table string, instrument string, bars []MA20BacktestBar, i
 			continue
 		}
 		attempt := newMA20Attempt(table, instrument, algo, len(attempts)+1, i, bars[i], ind)
+		next := i
 		switch algo {
 		case MA20AlgoBaseline:
-			i = runBaselineAttempt(&attempt, bars, ind, i, cfg)
+			next = runBaselineAttempt(&attempt, bars, ind, i, cfg)
 		case MA20AlgoHardFilter, MA20AlgoScoreFilter:
-			i = runFilteredAttempt(&attempt, bars, ind, i, cfg, algo == MA20AlgoScoreFilter)
+			next = runFilteredAttempt(&attempt, bars, ind, i, cfg, algo == MA20AlgoScoreFilter)
 		default:
 			attempt.Outcome = MA20OutcomeFiltered
 			attempt.Reason = "unknown algorithm"
 		}
 		attempts = append(attempts, attempt)
+		if attempt.SignalIndex <= 0 {
+			i = next
+		}
 	}
 	return attempts
 }
@@ -515,7 +546,7 @@ func runBaselineAttempt(attempt *MA20AttemptRecord, bars []MA20BacktestBar, ind 
 		}
 		if bars[j].Low <= attempt.TouchOpen {
 			addSignal(attempt, bars, ind, j, attempt.TouchOpen, cfg, "SHORT: broke touch bar open")
-			return evaluateSignalOutcome(attempt, bars, j, cfg)
+			return evaluateSignalOutcomeWithIndicators(attempt, bars, ind, j, cfg)
 		}
 	}
 	attempt.Outcome = MA20OutcomeNoSignal
@@ -610,7 +641,7 @@ func runFilteredAttempt(attempt *MA20AttemptRecord, bars []MA20BacktestBar, ind 
 				return j
 			}
 			addSignal(attempt, bars, ind, j, attempt.ReactionLow, cfg, "SHORT: broke weak pullback reaction low")
-			return evaluateSignalOutcome(attempt, bars, j, cfg)
+			return evaluateSignalOutcomeWithIndicators(attempt, bars, ind, j, cfg)
 		}
 	}
 	attempt.Outcome = MA20OutcomeNoSignal
@@ -640,8 +671,12 @@ func addSignal(attempt *MA20AttemptRecord, bars []MA20BacktestBar, ind ma20Indic
 }
 
 func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, signalIndex int, cfg MA20BacktestConfig) int {
-	last := minInt(len(bars)-1, signalIndex+cfg.ObservationBars)
 	ind := calcMA20Indicators(bars, cfg)
+	return evaluateSignalOutcomeWithIndicators(attempt, bars, ind, signalIndex, cfg)
+}
+
+func evaluateSignalOutcomeWithIndicators(attempt *MA20AttemptRecord, bars []MA20BacktestBar, ind ma20Indicators, signalIndex int, cfg MA20BacktestConfig) int {
+	last := minInt(len(bars)-1, signalIndex+cfg.ObservationBars)
 	lowestLow := attempt.EntryPrice
 	prevLow := 0.0
 	noNewLowBars := 0
@@ -694,14 +729,21 @@ func evaluateSignalOutcome(attempt *MA20AttemptRecord, bars []MA20BacktestBar, s
 		reboundOK := maTouched && rebound >= cfg.ProfitReboundATR*attempt.ATR
 		risingLowTake := profitable && trendInvalidated && reboundOK && risingLowBars >= cfg.ProfitRisingLowBars
 		strongBullTake := profitable && trendInvalidated && ind.MA20[j] > 0 && bars[j].Low > ind.MA20[j] && bars[j].Close > bars[j].Open && bars[j].Close-bars[j].Open >= cfg.StrongBullATR*attempt.ATR
-		if risingLowTake || strongBullTake {
+		zigzagTroughTake := profitable && cfg.ExitMode == "zigzag_trough" && j < len(ind.ZigZagTrough) && ind.ZigZagTrough[j]
+		ma20Take := cfg.ExitMode != "zigzag_trough" && (risingLowTake || strongBullTake)
+		if zigzagTroughTake || ma20Take {
 			ts := bars[j].AdjustedTime
 			attempt.Outcome = MA20OutcomeSuccess
 			attempt.OutcomeIndex = j
 			attempt.OutcomeTime = &ts
 			setMA20AttemptExit(attempt, bars[j].Close)
 			attempt.Reason = "trend-following profit exit after MA20 reclaim"
-			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", "结构止盈", "passed", attempt.Reason, bars[j].Close, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
+			stepLabel := "结构止盈"
+			if zigzagTroughTake {
+				attempt.Reason = "ATR ZigZag trough confirmed after short profit"
+				stepLabel = "ZigZag波谷止盈"
+			}
+			addAttemptStep(attempt, bars[j], j, "SIGNAL_RESULT", stepLabel, "passed", attempt.Reason, bars[j].Close, exitMetrics(ind, j, lowestLow, noNewLowBars, risingLowBars, maTouched, trendStillBearish))
 			return j
 		}
 		if j == last && !profitable {
@@ -878,6 +920,144 @@ func scoreMetrics(ind ma20Indicators, i int, bull float64, bear float64) map[str
 	m["bullish_pause_score"] = bull
 	m["bearish_failure_score"] = bear
 	return m
+}
+
+type ma20ZigZagPoint struct {
+	Typ   string
+	Index int
+	High  float64
+	Low   float64
+}
+
+func calcZigZagTroughConfirmations(bars []MA20BacktestBar, cfg MA20BacktestConfig) []bool {
+	out := make([]bool, len(bars))
+	atrPeriod := cfg.ZigZagATRPeriod
+	if atrPeriod <= 0 {
+		atrPeriod = 26
+	}
+	atrMultiple := cfg.ZigZagATRMultiple
+	if atrMultiple <= 0 {
+		atrMultiple = 2
+	}
+	minBars := cfg.ZigZagMinBars
+	if minBars <= 0 {
+		minBars = 5
+	}
+	trs := make([]float64, len(bars))
+	initCache := make([]int, 0, atrPeriod+minBars)
+	stage := "INIT"
+	var lastFixed *ma20ZigZagPoint
+	var curr *ma20ZigZagPoint
+	var next *ma20ZigZagPoint
+	for i, bar := range bars {
+		prevClose := bar.Close
+		if i > 0 {
+			prevClose = bars[i-1].Close
+		}
+		trs[i] = math.Max(bar.High-bar.Low, math.Max(math.Abs(bar.High-prevClose), math.Abs(bar.Low-prevClose)))
+		atr := rollingAvg(trs, i, atrPeriod)
+		if atr <= 0 {
+			continue
+		}
+		reversal := atr * atrMultiple
+		if stage == "INIT" {
+			initCache = append(initCache, i)
+			hiIdx, loIdx := zigZagInitExtremes(bars, initCache)
+			if hiIdx < 0 || loIdx < 0 || bars[hiIdx].High-bars[loIdx].Low < reversal {
+				continue
+			}
+			if loIdx < hiIdx {
+				lastFixed = zigZagPoint("TROUGH", loIdx, bars[loIdx])
+				curr = zigZagPoint("PEAK", hiIdx, bars[hiIdx])
+			} else {
+				lastFixed = zigZagPoint("PEAK", hiIdx, bars[hiIdx])
+				curr = zigZagPoint("TROUGH", loIdx, bars[loIdx])
+			}
+			stage = "RUNNING"
+			continue
+		}
+		if lastFixed == nil || curr == nil {
+			continue
+		}
+		switch lastFixed.Typ {
+		case "TROUGH":
+			if next == nil {
+				if bar.High > curr.High {
+					curr = zigZagPoint("PEAK", i, bar)
+				} else if curr.High-bar.Low >= reversal {
+					next = zigZagPoint("TROUGH", i, bar)
+				}
+				continue
+			}
+			if bar.High > curr.High {
+				curr = zigZagPoint("PEAK", i, bar)
+				next = nil
+				continue
+			}
+			if bar.Low < next.Low {
+				next = zigZagPoint("TROUGH", i, bar)
+			}
+			if bar.High-next.Low >= reversal && zigZagSpacingOK(lastFixed, curr, next, minBars) {
+				lastFixed = curr
+				curr = next
+				next = zigZagPoint("PEAK", i, bar)
+			}
+		case "PEAK":
+			if next == nil {
+				if bar.Low < curr.Low {
+					curr = zigZagPoint("TROUGH", i, bar)
+				} else if bar.High-curr.Low >= reversal {
+					next = zigZagPoint("PEAK", i, bar)
+				}
+				continue
+			}
+			if bar.Low < curr.Low {
+				curr = zigZagPoint("TROUGH", i, bar)
+				next = nil
+				continue
+			}
+			if bar.High > next.High {
+				next = zigZagPoint("PEAK", i, bar)
+			}
+			if next.High-bar.Low >= reversal && zigZagSpacingOK(lastFixed, curr, next, minBars) {
+				if curr.Typ == "TROUGH" {
+					out[i] = true
+				}
+				lastFixed = curr
+				curr = next
+				next = zigZagPoint("TROUGH", i, bar)
+			}
+		}
+	}
+	return out
+}
+
+func zigZagPoint(typ string, index int, bar MA20BacktestBar) *ma20ZigZagPoint {
+	return &ma20ZigZagPoint{Typ: typ, Index: index, High: bar.High, Low: bar.Low}
+}
+
+func zigZagInitExtremes(bars []MA20BacktestBar, indexes []int) (int, int) {
+	if len(indexes) == 0 {
+		return -1, -1
+	}
+	hiIdx := indexes[0]
+	loIdx := indexes[0]
+	for _, idx := range indexes[1:] {
+		if bars[idx].High > bars[hiIdx].High {
+			hiIdx = idx
+		}
+		if bars[idx].Low < bars[loIdx].Low {
+			loIdx = idx
+		}
+	}
+	return hiIdx, loIdx
+}
+
+func zigZagSpacingOK(lastFixed *ma20ZigZagPoint, curr *ma20ZigZagPoint, next *ma20ZigZagPoint, minBars int) bool {
+	if lastFixed == nil || curr == nil || next == nil {
+		return false
+	}
+	return curr.Index-lastFixed.Index >= minBars && next.Index-curr.Index >= minBars
 }
 
 func rollingAvg(values []float64, i int, period int) float64 {

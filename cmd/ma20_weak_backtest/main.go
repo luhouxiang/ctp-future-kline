@@ -20,8 +20,18 @@ func main() {
 	tablesRaw := flag.String("tables", "", "comma separated kline table names")
 	instrumentsRaw := flag.String("instruments", "", "comma separated instrument ids")
 	algorithmsRaw := flag.String("algorithms", "", "comma separated algorithms: baseline,hard_filter,score_filter")
+	exitMode := flag.String("exit-mode", "", "exit mode: ma20_reclaim or zigzag_trough")
 	startRaw := flag.String("start", "", "start time, RFC3339 or yyyy-mm-dd HH:MM:SS")
 	endRaw := flag.String("end", "", "end time, RFC3339 or yyyy-mm-dd HH:MM:SS")
+	observationBars := flag.Int("observation-bars", 0, "bars to observe after entry")
+	profitReboundATR := flag.Float64("profit-rebound-atr", 0, "ATR rebound from lowest low required before profit exit")
+	profitRisingLowBars := flag.Int("profit-rising-low-bars", 0, "rising low bars required before profit exit")
+	strongBullATR := flag.Float64("strong-bull-atr", 0, "strong bullish candle ATR multiple for profit exit")
+	exitMA20DistanceATR := flag.Float64("exit-ma20-distance-atr", 0, "MA20 distance ATR multiple that keeps short trend intact")
+	strengthExitBars := flag.Int("strength-exit-bars", 0, "no-new-low bars before strengthened-market stop")
+	zigZagATRPeriod := flag.Int("zigzag-atr-period", 0, "ATR period for ZigZag exit mode")
+	zigZagATRMultiple := flag.Float64("zigzag-atr-multiple", 0, "ATR multiple for ZigZag exit mode")
+	zigZagMinBars := flag.Int("zigzag-min-bars", 0, "minimum bars between ZigZag pivots")
 	outPath := flag.String("out", "", "optional JSON output path")
 	limit := flag.Int("attempt-limit", 2000, "max detailed attempts in JSON output")
 	flag.Parse()
@@ -45,6 +55,36 @@ func main() {
 	}
 	if strings.TrimSpace(*algorithmsRaw) != "" {
 		btCfg.Algorithms = strings.Split(*algorithmsRaw, ",")
+	}
+	if strings.TrimSpace(*exitMode) != "" {
+		btCfg.ExitMode = *exitMode
+	}
+	if *observationBars > 0 {
+		btCfg.ObservationBars = *observationBars
+	}
+	if *profitReboundATR > 0 {
+		btCfg.ProfitReboundATR = *profitReboundATR
+	}
+	if *profitRisingLowBars > 0 {
+		btCfg.ProfitRisingLowBars = *profitRisingLowBars
+	}
+	if *strongBullATR > 0 {
+		btCfg.StrongBullATR = *strongBullATR
+	}
+	if *exitMA20DistanceATR > 0 {
+		btCfg.ExitMA20DistanceATR = *exitMA20DistanceATR
+	}
+	if *strengthExitBars > 0 {
+		btCfg.StrengthExitBars = *strengthExitBars
+	}
+	if *zigZagATRPeriod > 0 {
+		btCfg.ZigZagATRPeriod = *zigZagATRPeriod
+	}
+	if *zigZagATRMultiple > 0 {
+		btCfg.ZigZagATRMultiple = *zigZagATRMultiple
+	}
+	if *zigZagMinBars > 0 {
+		btCfg.ZigZagMinBars = *zigZagMinBars
 	}
 	btCfg.ReportAttemptLimit = *limit
 	if strings.TrimSpace(*startRaw) != "" {

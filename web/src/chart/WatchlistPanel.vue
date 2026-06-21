@@ -36,6 +36,8 @@ const emit = defineEmits([
   'strategy-auto-execution-toggle',
   'strategy-run-click',
   'strategy-backtest-select',
+  'strategy-analysis-toggle',
+  'strategy-analysis-clear',
   'channel-action',
   'channel-settings',
   'reversal-action',
@@ -415,6 +417,18 @@ const strategyBacktestRows = computed(() => (
   (Array.isArray(props.strategy?.backtests) ? props.strategy.backtests : [])
     .filter((row) => String(row?.run_type || '') === 'replay_report' || String(row?.strategy_id || '').startsWith('ma20.weak_pullback_short'))
     .slice(0, 6)
+))
+const strategyAnalysisRows = computed(() => (
+  (Array.isArray(props.strategy?.analysisRows) ? props.strategy.analysisRows : [])
+    .slice(0, 24)
+))
+const selectedAnalysisRunIds = computed(() => new Set(
+  Array.isArray(props.strategy?.selectedAnalysisRunIds) ? props.strategy.selectedAnalysisRunIds.map((v) => String(v || '')) : [],
+))
+const loadingAnalysisRunIds = computed(() => (
+  props.strategy?.loadingAnalysisRunIds && typeof props.strategy.loadingAnalysisRunIds === 'object'
+    ? props.strategy.loadingAnalysisRunIds
+    : {}
 ))
 const replayBacktestRows = computed(() => strategyBacktestRows.value.filter((row) => String(row?.run_type || '') === 'replay_report'))
 
@@ -848,6 +862,45 @@ function compactText(value, fallback = '--') {
       </div>
     </div>
 
+    <div v-else-if="props.open && props.activeTab === 'strategy_analysis'" class="tv-watchlist-body tv-strategy-analysis-tab">
+      <div class="tv-quote-card">
+        <div class="tv-channel-settings-head">
+          <span>策略分析窗口</span>
+          <button
+            v-if="selectedAnalysisRunIds.size"
+            type="button"
+            class="tv-strategy-mini-btn"
+            @click.stop="emit('strategy-analysis-clear')"
+          >
+            清空
+          </button>
+        </div>
+        <div class="tv-strategy-analysis-list">
+          <button
+            v-for="item in strategyAnalysisRows"
+            :key="`analysis-${item.run_id}`"
+            type="button"
+            class="tv-strategy-analysis-row"
+            :class="{ active: selectedAnalysisRunIds.has(String(item.run_id || '')) }"
+            @click="emit('strategy-analysis-toggle', item.run_id)"
+          >
+            <span class="tv-strategy-analysis-check">
+              {{ selectedAnalysisRunIds.has(String(item.run_id || '')) ? '✓' : (loadingAnalysisRunIds[String(item.run_id || '')] ? '…' : '') }}
+            </span>
+            <span class="tv-strategy-analysis-main">
+              <strong>{{ item.strategy_id || '--' }}</strong>
+              <small>{{ [item.symbol || 'all', item.timeframe || '--', item.instance_id || '--'].join(' · ') }}</small>
+            </span>
+            <span class="tv-strategy-analysis-meta">
+              <em>信号{{ item.signal_count || 0 }}</em>
+              <small>{{ formatTraceTime(item.finished_at || item.started_at) }}</small>
+            </span>
+          </button>
+        </div>
+        <div v-if="!strategyAnalysisRows.length" class="tv-object-empty">暂无当前合约周期的策略分析</div>
+      </div>
+    </div>
+
     <div v-else-if="props.open && props.activeTab === 'object_tree'" class="tv-watchlist-body tv-object-tree">
       <div v-if="armedLineOrderCount > 0" class="tv-object-toolbar">
         <span>画线下单 {{ armedLineOrderCount }}</span>
@@ -1185,6 +1238,88 @@ function compactText(value, fallback = '--') {
 .tv-strategy-backtest-list {
   display: grid;
   gap: 4px;
+}
+
+.tv-strategy-mini-btn {
+  height: 22px;
+  border: 1px solid rgba(130, 156, 188, 0.45);
+  background: rgba(15, 23, 42, 0.35);
+  color: #dce7f5;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.tv-strategy-analysis-list {
+  display: grid;
+  gap: 4px;
+  max-height: 280px;
+  overflow: auto;
+}
+
+.tv-strategy-analysis-row {
+  display: grid;
+  grid-template-columns: 22px minmax(0, 1fr) auto;
+  gap: 6px;
+  align-items: center;
+  min-height: 42px;
+  padding: 5px 6px;
+  border: 0;
+  border-bottom: 1px solid rgba(130, 156, 188, 0.14);
+  background: transparent;
+  color: #dce7f5;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tv-strategy-analysis-row.active,
+.tv-strategy-analysis-row:hover {
+  background: rgba(56, 189, 248, 0.12);
+}
+
+.tv-strategy-analysis-check {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 1px solid rgba(130, 156, 188, 0.5);
+  color: #38bdf8;
+  font-size: 12px;
+}
+
+.tv-strategy-analysis-main,
+.tv-strategy-analysis-meta {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.tv-strategy-analysis-main strong,
+.tv-strategy-analysis-main small,
+.tv-strategy-analysis-meta small {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tv-strategy-analysis-main strong {
+  font-size: 12px;
+}
+
+.tv-strategy-analysis-main small,
+.tv-strategy-analysis-meta small {
+  color: #8aa0ba;
+  font-size: 11px;
+}
+
+.tv-strategy-analysis-meta {
+  justify-items: end;
+  color: #b8c6d8;
+  font-size: 11px;
+}
+
+.tv-strategy-analysis-meta em {
+  font-style: normal;
 }
 
 .tv-strategy-step-row {

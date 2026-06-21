@@ -90,6 +90,7 @@ const props = defineProps({
   strategyTraces: { type: Array, default: () => [] },
   strategySignals: { type: Array, default: () => [] },
   activeStrategyInstanceId: { type: String, default: "" },
+  activeStrategyInstanceIds: { type: Array, default: () => [] },
   reversalState: {
     type: Object,
     default: () => ({ settings: {}, results: { lines: [], events: [] }, persistVersion: 0 }),
@@ -394,6 +395,17 @@ const overlayInteractive = computed(() => props.activeTool !== "cursor");
 const replayTradeTableStyle = computed(() => {
   const width = REPLAY_TRADE_COLUMNS.reduce((sum, col) => sum + replayTradeColumnWidth(col.key), 0);
   return { width: `${width}px` };
+});
+
+const activeStrategyInstanceSet = computed(() => {
+  const ids = new Set();
+  const primary = String(props.activeStrategyInstanceId || "").trim();
+  if (primary) ids.add(primary);
+  for (const item of Array.isArray(props.activeStrategyInstanceIds) ? props.activeStrategyInstanceIds : []) {
+    const id = String(item || "").trim();
+    if (id) ids.add(id);
+  }
+  return ids;
 });
 
 function fmtTime(unixTs) {
@@ -3548,15 +3560,14 @@ const strategyOverlayData = computed(() => {
   if (!seriesRefs.candle) return [];
   const currentSymbol = String(props.scope?.symbol || "").trim().toLowerCase();
   const traces = Array.isArray(props.strategyTraces) ? props.strategyTraces : [];
-  if (props.replayKlineMode) {
-    const activeInstanceID = String(props.activeStrategyInstanceId || "").trim();
-    if (!activeInstanceID) return [];
+  if (activeStrategyInstanceSet.value.size > 0) {
+    const activeInstanceID = activeStrategyInstanceSet.value;
     const signals = Array.isArray(props.strategySignals) ? props.strategySignals : [];
     const trades = buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, currentSymbol);
     const seen = new Set();
     const entries = signals
       .filter((row) => {
-        if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+        if (!matchesActiveStrategyInstance(row, activeInstanceID)) return false;
         const symbol = String(row?.symbol || "").trim().toLowerCase();
         if (currentSymbol && symbol && symbol !== currentSymbol) return false;
         const timeframe = String(row?.timeframe || "").trim().toLowerCase();
@@ -3689,12 +3700,19 @@ function buildReplayStrategyTradeOverlays(signals, traces, activeInstanceID, cur
   return out;
 }
 
+function matchesActiveStrategyInstance(row, activeInstanceID) {
+  const id = String(row?.instance_id || "").trim();
+  if (!id) return false;
+  if (activeInstanceID instanceof Set) return activeInstanceID.has(id);
+  return id === String(activeInstanceID || "").trim();
+}
+
 function buildReplayStrategyTrades(signals, traces, activeInstanceID, currentSymbol) {
   const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
   const signalRows = Array.isArray(signals) ? signals : [];
   const entries = signalRows
     .filter((row) => {
-      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      if (!matchesActiveStrategyInstance(row, activeInstanceID)) return false;
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const timeframe = String(row?.timeframe || "").trim().toLowerCase();
@@ -3720,7 +3738,7 @@ function buildReplayStrategyTrades(signals, traces, activeInstanceID, currentSym
     .sort((a, b) => a.time - b.time || a.idx - b.idx);
   const signalExits = signalRows
     .filter((row) => {
-      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      if (!matchesActiveStrategyInstance(row, activeInstanceID)) return false;
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const timeframe = String(row?.timeframe || "").trim().toLowerCase();
@@ -3745,7 +3763,7 @@ function buildReplayStrategyTrades(signals, traces, activeInstanceID, currentSym
     .filter((x) => !!x);
   const traceExits = (Array.isArray(traces) ? traces : [])
     .filter((row) => {
-      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      if (!matchesActiveStrategyInstance(row, activeInstanceID)) return false;
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const timeframe = String(row?.timeframe || "").trim().toLowerCase();
@@ -3847,7 +3865,7 @@ function buildReplayStrategySignalRows(signals, activeInstanceID, currentSymbol)
   const currentTimeframe = String(props.scope?.timeframe || "").trim().toLowerCase();
   const rows = (Array.isArray(signals) ? signals : [])
     .filter((row) => {
-      if (String(row?.instance_id || "").trim() !== activeInstanceID) return false;
+      if (!matchesActiveStrategyInstance(row, activeInstanceID)) return false;
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const timeframe = String(row?.timeframe || "").trim().toLowerCase();
