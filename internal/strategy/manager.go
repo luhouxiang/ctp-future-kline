@@ -704,6 +704,7 @@ func (m *Manager) ListInstances() ([]StrategyInstance, error) {
 	if err != nil {
 		return nil, err
 	}
+	items = m.filterArchivedInstances(items, 20)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.instances = make(map[string]StrategyInstance, len(items))
@@ -715,6 +716,34 @@ func (m *Manager) ListInstances() ([]StrategyInstance, error) {
 		out[i] = sanitizeStrategyInstanceForList(item)
 	}
 	return out, nil
+}
+
+func (m *Manager) filterArchivedInstances(items []StrategyInstance, limit int) []StrategyInstance {
+	if len(items) == 0 {
+		return items
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	base := m.cfg.BacktestOutputDir
+	hasArchive := false
+	for _, item := range items {
+		if fileExists(strategyArchiveConfigPath(base, item)) {
+			hasArchive = true
+			break
+		}
+	}
+	out := make([]StrategyInstance, 0, minInt(len(items), limit))
+	for _, item := range items {
+		if hasArchive && !fileExists(strategyArchiveConfigPath(base, item)) {
+			continue
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func sanitizeStrategyInstanceForList(inst StrategyInstance) StrategyInstance {
@@ -766,6 +795,9 @@ func (m *Manager) SaveInstance(inst StrategyInstance) error {
 		inst.Status = InstanceStatusStopped
 	}
 	if err := m.store.SaveInstance(inst); err != nil {
+		return err
+	}
+	if _, err := writeStrategyInstanceArchive(m.cfg.BacktestOutputDir, sanitizeStrategyInstanceForList(inst)); err != nil {
 		return err
 	}
 	m.mu.Lock()
@@ -890,11 +922,37 @@ func (m *Manager) clearReplaySignalsForInstanceStart(inst StrategyInstance) (int
 }
 
 func (m *Manager) ListRuns(limit int) ([]StrategyRun, error) {
-	return m.store.ListRuns(limit)
+	if limit <= 0 || limit > 20 {
+		limit = 20
+	}
+	items, err := m.store.ListRuns(200)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]StrategyRun, 0, limit)
+	for _, item := range items {
+		jsonPath, _ := strategyArchiveRunPaths(m.cfg.BacktestOutputDir, item)
+		if !fileExists(jsonPath) {
+			continue
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out, nil
 }
 
 func (m *Manager) GetRun(runID string) (StrategyRun, error) {
-	return m.store.GetRun(runID)
+	run, err := m.store.GetRun(runID)
+	if err != nil {
+		return run, err
+	}
+	jsonPath, _ := strategyArchiveRunPaths(m.cfg.BacktestOutputDir, run)
+	if !fileExists(jsonPath) {
+		return StrategyRun{}, fmt.Errorf("strategy run archive json missing: %s", run.RunID)
+	}
+	return run, nil
 }
 
 func (m *Manager) ListOrderAudits(limit int) ([]OrderAuditRecord, error) {
@@ -1036,15 +1094,15 @@ func (m *Manager) RunBacktest(req BacktestRequest) (StrategyRun, error) {
 		_ = m.store.SaveRun(run)
 		return run, err
 	}
-	outputPath, err := m.writeBacktestOutput(req.RunID, resp)
-	if err != nil {
-		return run, err
-	}
 	run.Status = resp.Status
-	run.OutputPath = outputPath
 	run.Summary = resp.Summary
 	finished := time.Now()
 	run.FinishedAt = &finished
+	outputPath, err := m.writeBacktestOutput(run, req, resp)
+	if err != nil {
+		return run, err
+	}
+	run.OutputPath = outputPath
 	if err := m.store.SaveRun(run); err != nil {
 		return StrategyRun{}, err
 	}
@@ -1111,15 +1169,15 @@ func (m *Manager) runLocalMA20Backtest(req BacktestRequest) (StrategyRun, error)
 		return run, err
 	}
 	resp.RunID = req.RunID
-	outputPath, err := m.writeBacktestOutput(req.RunID, resp)
-	if err != nil {
-		return run, err
-	}
 	run.Status = resp.Status
-	run.OutputPath = outputPath
 	run.Summary = resp.Summary
 	finished := time.Now()
 	run.FinishedAt = &finished
+	outputPath, err := m.writeBacktestOutput(run, req, resp)
+	if err != nil {
+		return run, err
+	}
+	run.OutputPath = outputPath
 	if err := m.store.SaveRun(run); err != nil {
 		return StrategyRun{}, err
 	}
@@ -1377,23 +1435,9 @@ func (m *Manager) RunParameterSweep(req ParameterSweepRequest) (StrategyRun, err
 	return run, nil
 }
 
-func (m *Manager) writeBacktestOutput(runID string, resp BacktestResponse) (string, error) {
-	base := m.cfg.BacktestOutputDir
-	if base == "" {
-		base = filepath.Join("flow", "strategy_backtests")
-	}
-	if err := os.MkdirAll(base, 0o755); err != nil {
-		return "", err
-	}
-	path := filepath.Join(base, runID+".json")
-	body, err := json.MarshalIndent(resp.Result, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	if err := os.WriteFile(path, body, 0o644); err != nil {
-		return "", err
-	}
-	return path, nil
+func (m *Manager) writeBacktestOutput(run StrategyRun, req any, resp BacktestResponse) (string, error) {
+	jsonPath, _, err := writeStrategyRunArchive(m.cfg.BacktestOutputDir, run, req, resp)
+	return jsonPath, err
 }
 
 func (m *Manager) HandleRealtimeTick(ev TickEvent) { m.handleTick(ev, RunTypeRealtime) }

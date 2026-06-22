@@ -231,10 +231,6 @@ func (m *Manager) replayReportLocked(replayTaskID string, inst StrategyInstance)
 }
 
 func (m *Manager) saveReplayReportLocked(report *ReplayReport) error {
-	outputPath, err := m.writeBacktestOutput(report.RunID, BacktestResponse{Result: report.result()})
-	if err != nil {
-		return err
-	}
 	run := StrategyRun{
 		RunID:      report.RunID,
 		InstanceID: report.InstanceID,
@@ -243,11 +239,21 @@ func (m *Manager) saveReplayReportLocked(report *ReplayReport) error {
 		Status:     report.Status,
 		Symbol:     report.Symbol,
 		Timeframe:  report.Timeframe,
-		OutputPath: outputPath,
 		Summary:    report.summary(),
 		StartedAt:  report.StartedAt,
 		FinishedAt: report.FinishedAt,
 	}
+	outputPath, err := m.writeBacktestOutput(run, map[string]any{
+		"replay_task_id": report.ReplayTaskID,
+		"instance_id":    report.InstanceID,
+		"strategy_id":    report.StrategyID,
+		"symbol":         report.Symbol,
+		"timeframe":      report.Timeframe,
+	}, BacktestResponse{RunID: report.RunID, Status: report.Status, Summary: report.summary(), Result: report.result()})
+	if err != nil {
+		return err
+	}
+	run.OutputPath = outputPath
 	if err := m.store.SaveRun(run); err != nil {
 		return err
 	}

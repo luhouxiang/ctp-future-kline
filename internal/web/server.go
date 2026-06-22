@@ -2241,6 +2241,7 @@ func (s *Server) handleStrategyCompositions(w http.ResponseWriter, r *http.Reque
 		if !ok || len(items) == 0 {
 			items = defaultStrategyCompositions()
 		}
+		items = s.filterArchivedStrategyCompositions(items, 20)
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
 	case http.MethodPut:
 		var req struct {
@@ -2254,11 +2255,105 @@ func (s *Server) handleStrategyCompositions(w http.ResponseWriter, r *http.Reque
 			http.Error(w, "save strategy compositions failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
+		for _, item := range req.Items {
+			if err := s.writeStrategyCompositionArchive(item); err != nil {
+				http.Error(w, "archive strategy composition failed: "+err.Error(), http.StatusInternalServerError)
+				return
+			}
+		}
 		items, _, _ := s.userConfig.LoadStrategyCompositions(s.currentOwner())
+		items = s.filterArchivedStrategyCompositions(items, 20)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "items": items})
 	default:
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 	}
+}
+
+func (s *Server) strategyArchiveDir() string {
+	base := strings.TrimSpace(s.cfg.Strategy.BacktestOutputDir)
+	if base == "" {
+		base = filepath.Join("flow", "strategy_backtests")
+	}
+	return base
+}
+
+func safeStrategyArchiveName(id string) string {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		id = "unnamed"
+	}
+	var b strings.Builder
+	for _, r := range id {
+		switch {
+		case r >= 'a' && r <= 'z':
+			b.WriteRune(r)
+		case r >= 'A' && r <= 'Z':
+			b.WriteRune(r)
+		case r >= '0' && r <= '9':
+			b.WriteRune(r)
+		case r == '.', r == '_', r == '-':
+			b.WriteRune(r)
+		default:
+			b.WriteByte('_')
+		}
+	}
+	out := strings.Trim(b.String(), "._-")
+	if out == "" {
+		return "unnamed"
+	}
+	return out
+}
+
+func (s *Server) strategyCompositionArchivePath(compositionID string) string {
+	return filepath.Join(s.strategyArchiveDir(), "composition_"+safeStrategyArchiveName(compositionID)+".json")
+}
+
+func (s *Server) writeStrategyCompositionArchive(item userconfig.StrategyComposition) error {
+	if strings.TrimSpace(item.CompositionID) == "" {
+		return nil
+	}
+	dir := s.strategyArchiveDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	body, err := json.MarshalIndent(map[string]any{
+		"type":        "strategy_composition",
+		"composition": item,
+		"archived_at": time.Now(),
+	}, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(s.strategyCompositionArchivePath(item.CompositionID), body, 0o644)
+}
+
+func (s *Server) filterArchivedStrategyCompositions(items []userconfig.StrategyComposition, limit int) []userconfig.StrategyComposition {
+	if len(items) == 0 {
+		return items
+	}
+	if limit <= 0 {
+		limit = 20
+	}
+	hasArchive := false
+	for _, item := range items {
+		if info, err := os.Stat(s.strategyCompositionArchivePath(item.CompositionID)); err == nil && !info.IsDir() {
+			hasArchive = true
+			break
+		}
+	}
+	out := make([]userconfig.StrategyComposition, 0, min(len(items), limit))
+	for _, item := range items {
+		if hasArchive {
+			if info, err := os.Stat(s.strategyCompositionArchivePath(item.CompositionID)); err != nil || info.IsDir() {
+				continue
+			}
+		}
+		out = append(out, item)
+		if len(out) >= limit {
+			break
+		}
+	}
+	return out
 }
 
 func defaultStrategyCompositions() []userconfig.StrategyComposition {
@@ -2460,7 +2555,7 @@ func (s *Server) handleStrategyBacktestByID(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if wantResult || strings.EqualFold(r.URL.Query().Get("result"), "1") || strings.EqualFold(r.URL.Query().Get("include_result"), "true") {
-		result, err := loadStrategyBacktestResultFile(run.OutputPath)
+		result, err := loadStrategyBacktestResultFile(run.OutputPath, run.RunID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusNotFound)
 			return
@@ -2471,7 +2566,7 @@ func (s *Server) handleStrategyBacktestByID(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, run)
 }
 
-func loadStrategyBacktestResultFile(path string) (map[string]any, error) {
+func loadStrategyBacktestResultFile(path string, runID string) (map[string]any, error) {
 	path = strings.TrimSpace(path)
 	if path == "" {
 		return nil, fmt.Errorf("backtest result path is empty")
@@ -2483,6 +2578,20 @@ func loadStrategyBacktestResultFile(path string) (map[string]any, error) {
 	var out map[string]any
 	if err := json.Unmarshal(body, &out); err != nil {
 		return nil, fmt.Errorf("parse backtest result failed: %w", err)
+	}
+	if rows, ok := out["results"].([]any); ok {
+		for _, row := range rows {
+			item, ok := row.(map[string]any)
+			if !ok || strings.TrimSpace(fmt.Sprint(item["run_id"])) != strings.TrimSpace(runID) {
+				continue
+			}
+			if result, ok := item["result"].(map[string]any); ok {
+				return result, nil
+			}
+		}
+	}
+	if result, ok := out["result"].(map[string]any); ok {
+		return result, nil
 	}
 	return out, nil
 }

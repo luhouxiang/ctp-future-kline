@@ -759,7 +759,7 @@ async function fetchStrategyRuntime() {
     },
     {
       name: 'backtests',
-      url: '/api/strategy/backtests',
+      url: '/api/strategy/backtests?limit=20',
       apply: (data) => { strategyBacktests.value = Array.isArray(data.items) ? data.items : [] },
     },
   ]
