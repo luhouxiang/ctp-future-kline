@@ -33,12 +33,19 @@ type strategyServiceProcessInfo struct {
 
 const minRuntimeStartTimeout = 30 * time.Second
 const zigzagATR26FeatureID = "zigzag_atr26"
+const featureScoreSchema = "feature_score.v1"
+const featureScoresKey = "scores"
 
 type strategyFeatureKey struct {
 	Mode      string
 	Symbol    string
 	Timeframe string
 	Indicator string
+}
+
+type featureScoreDependency struct {
+	Key    string
+	Weight float64
 }
 
 type Manager struct {
@@ -787,6 +794,9 @@ func (m *Manager) SaveInstance(inst StrategyInstance) error {
 	}
 	if strings.TrimSpace(inst.InstanceID) == "" {
 		inst.InstanceID = mustRunID("inst")
+	}
+	if len(inst.Symbols) > 1 {
+		return fmt.Errorf("strategy instance must bind at most one symbol; got %d symbols", len(inst.Symbols))
 	}
 	if strings.TrimSpace(inst.DisplayName) == "" {
 		inst.DisplayName = inst.InstanceID
@@ -1596,6 +1606,10 @@ func (m *Manager) callDecision(inst StrategyInstance, symbol string, mode string
 		}
 		return
 	}
+	if isIndicatorStrategyID(inst.StrategyID) {
+		logger.Warn("indicator strategy returned trading signal; ignoring execution", "instance_id", inst.InstanceID, "strategy_id", inst.StrategyID, "symbol", symbol, "target_position", decision.TargetPosition)
+		return
+	}
 	m.persistDecision(inst, symbol, mode, replayTaskID, eventTime, decision, bar)
 }
 
@@ -1613,7 +1627,10 @@ func (m *Manager) updateFeatureCacheFromTrace(trace StrategyTraceRecord) {
 		return
 	}
 	if featureKeyName := normalizeFeatureName(trace.Metrics["feature_key"]); featureKeyName != "" {
-		if payload := featurePayloadMap(trace.Metrics["feature_payload"]); featureKeyName != zigzagATR26FeatureID && len(payload) > 0 {
+		payload := featurePayloadMap(trace.Metrics["feature_payload"])
+		if scorePayload, ok := normalizeFeatureScorePayload(featureKeyName, trace.Metrics, payload); ok {
+			m.appendFeaturePayload(trace.Mode, trace.Symbol, trace.Timeframe, featureKeyName, scorePayload, 64)
+		} else if featureKeyName != zigzagATR26FeatureID && len(payload) > 0 {
 			m.appendFeaturePayload(trace.Mode, trace.Symbol, trace.Timeframe, featureKeyName, payload, 64)
 		}
 	}
@@ -1676,10 +1693,11 @@ func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string)
 		return nil
 	}
 	dependencies := featureDependencies(inst)
-	if len(dependencies) == 0 {
+	scoreDependencies := featureScoreDependencies(inst)
+	if len(dependencies) == 0 && len(scoreDependencies) == 0 {
 		return m.legacyZigZagFeatures(symbol, inst.Timeframe, mode)
 	}
-	out := make(map[string]any, len(dependencies))
+	out := make(map[string]any, len(dependencies)+1)
 	for _, name := range dependencies {
 		if name == zigzagATR26FeatureID {
 			if features := m.legacyZigZagFeatures(symbol, inst.Timeframe, mode); features != nil {
@@ -1690,6 +1708,17 @@ func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string)
 		if payload, ok := m.latestFeaturePayload(symbol, inst.Timeframe, mode, name); ok {
 			out[name] = payload
 		}
+	}
+	if len(scoreDependencies) > 0 {
+		scores := make(map[string]any, len(scoreDependencies))
+		for _, dep := range scoreDependencies {
+			payload, ok := m.latestFeaturePayload(symbol, inst.Timeframe, mode, dep.Key)
+			if !ok {
+				payload = missingFeatureScorePayload(dep.Key)
+			}
+			scores[dep.Key] = payload
+		}
+		out[featureScoresKey] = scores
 	}
 	if len(out) == 0 {
 		return nil
@@ -1796,8 +1825,93 @@ func featureDependencies(inst StrategyInstance) []string {
 	return out
 }
 
+func featureScoreDependencies(inst StrategyInstance) []featureScoreDependency {
+	params := inst.Params
+	if len(params) == 0 {
+		return nil
+	}
+	raw, ok := params["feature_score_dependencies"]
+	if !ok {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	out := make([]featureScoreDependency, 0, 4)
+	appendDep := func(key string, weight float64) {
+		key = normalizeFeatureName(key)
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		if weight <= 0 {
+			weight = 1
+		}
+		seen[key] = struct{}{}
+		out = append(out, featureScoreDependency{Key: key, Weight: weight})
+	}
+	appendValue := func(value any) {
+		switch v := value.(type) {
+		case map[string]any:
+			key := firstNonEmpty(
+				featureDependencyString(v["key"]),
+				featureDependencyString(v["feature_key"]),
+				featureDependencyString(v["name"]),
+			)
+			weight := 1.0
+			if parsed, ok := metricFloat(v["weight"]); ok {
+				weight = parsed
+			}
+			appendDep(key, weight)
+		case map[string]string:
+			appendDep(firstNonEmpty(v["key"], v["feature_key"], v["name"]), 1)
+		default:
+			appendDep(fmt.Sprint(value), 1)
+		}
+	}
+	switch v := raw.(type) {
+	case []map[string]any:
+		for _, item := range v {
+			appendValue(item)
+		}
+	case []string:
+		for _, item := range v {
+			appendValue(item)
+		}
+	case []any:
+		for _, item := range v {
+			appendValue(item)
+		}
+	case string:
+		for _, item := range strings.Split(v, ",") {
+			appendValue(item)
+		}
+	default:
+		appendValue(v)
+	}
+	return out
+}
+
+func featureDependencyString(value any) string {
+	if value == nil {
+		return ""
+	}
+	text := strings.TrimSpace(fmt.Sprint(value))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
+}
+
 func normalizeFeatureName(value any) string {
-	return strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	if value == nil {
+		return ""
+	}
+	text := strings.ToLower(strings.TrimSpace(fmt.Sprint(value)))
+	if text == "<nil>" {
+		return ""
+	}
+	return text
 }
 
 func featurePayloadMap(value any) map[string]any {
@@ -1810,6 +1924,48 @@ func featurePayloadMap(value any) map[string]any {
 		}
 		return map[string]any{"value": value}
 	}
+}
+
+func normalizeFeatureScorePayload(featureKey string, metrics map[string]any, payload map[string]any) (map[string]any, bool) {
+	schema := normalizeFeatureName(metrics["feature_schema"])
+	if payloadSchema := normalizeFeatureName(payload["feature_schema"]); payloadSchema != "" {
+		schema = payloadSchema
+	}
+	if schema != featureScoreSchema {
+		return nil, false
+	}
+	out := cloneFeaturePayload(payload)
+	score, ok := metricFloat(out["score"])
+	if !ok {
+		score, ok = metricFloat(metrics["score"])
+	}
+	if !ok {
+		score = 0
+	}
+	out["score"] = clampFeatureScore(score)
+	out["feature_key"] = normalizeFeatureName(featureKey)
+	out["feature_schema"] = featureScoreSchema
+	return out, true
+}
+
+func missingFeatureScorePayload(featureKey string) map[string]any {
+	return map[string]any{
+		"feature_key":    normalizeFeatureName(featureKey),
+		"feature_schema": featureScoreSchema,
+		"score":          0.0,
+		"missing":        true,
+		"reference":      "feature score missing",
+	}
+}
+
+func clampFeatureScore(score float64) float64 {
+	if score < 0 {
+		return 0
+	}
+	if score > 10 {
+		return 10
+	}
+	return score
 }
 
 func cloneFeaturePayload(in map[string]any) map[string]any {
@@ -2023,7 +2179,8 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 			"signal_id":       id,
 		},
 	})
-	plan := m.exec.PlanWithCurrent(inst, m.currentExecutionPosition(symbol), decision.TargetPosition, mode)
+	instancePlan := m.exec.PlanInstanceTarget(inst, symbol, decision.TargetPosition, mode, m.currentExecutionPosition(symbol))
+	plan := instancePlan.Plan
 	externalResult := m.submitExternalOrderIfNeeded(inst, symbol, mode, eventTime, decision, &plan)
 	m.appendSignalEventLog(inst, symbol, mode, eventTime, decision, plan, bar)
 	m.persistTrace(inst, symbol, mode, eventTime, StrategyTraceRecord{
@@ -2035,31 +2192,39 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		Status:    plan.RiskStatus,
 		Reason:    plan.RiskReason,
 		Metrics: map[string]any{
-			"current_position": plan.CurrentPosition,
-			"target_position":  plan.TargetPosition,
-			"planned_delta":    plan.PlannedDelta,
-			"order_status":     plan.OrderStatus,
-			"external_order":   externalResult,
+			"current_position":          plan.CurrentPosition,
+			"target_position":           plan.TargetPosition,
+			"planned_delta":             plan.PlannedDelta,
+			"order_status":              plan.OrderStatus,
+			"external_order":            externalResult,
+			"instance_current_position": instancePlan.InstanceCurrentPosition,
+			"instance_target_position":  instancePlan.InstanceTargetPosition,
+			"net_current_target":        instancePlan.NetCurrentTarget,
+			"net_target_position":       instancePlan.NetTargetPosition,
 		},
 	})
-	m.exec.Apply(symbol, plan)
+	m.exec.ApplyInstanceTarget(inst, symbol, decision.TargetPosition, mode, plan)
 	audit := OrderAuditRecord{
 		InstanceID:      inst.InstanceID,
 		StrategyID:      inst.StrategyID,
 		Symbol:          symbol,
 		Mode:            mode,
 		EventTime:       eventTime,
-		TargetPosition:  decision.TargetPosition,
+		TargetPosition:  plan.TargetPosition,
 		CurrentPosition: plan.CurrentPosition,
 		PlannedDelta:    plan.PlannedDelta,
 		RiskStatus:      plan.RiskStatus,
 		RiskReason:      plan.RiskReason,
 		OrderStatus:     plan.OrderStatus,
 		Audit: map[string]any{
-			"reason":         decision.Reason,
-			"confidence":     decision.Confidence,
-			"metrics":        decision.Metrics,
-			"external_order": externalResult,
+			"reason":                    decision.Reason,
+			"confidence":                decision.Confidence,
+			"metrics":                   decision.Metrics,
+			"external_order":            externalResult,
+			"instance_current_position": instancePlan.InstanceCurrentPosition,
+			"instance_target_position":  instancePlan.InstanceTargetPosition,
+			"net_current_target":        instancePlan.NetCurrentTarget,
+			"net_target_position":       instancePlan.NetTargetPosition,
 		},
 		CreatedAt: time.Now(),
 	}
@@ -2074,13 +2239,17 @@ func (m *Manager) persistDecision(inst StrategyInstance, symbol string, mode str
 		Status:    plan.OrderStatus,
 		Reason:    plan.RiskReason,
 		Metrics: map[string]any{
-			"risk_status":      plan.RiskStatus,
-			"risk_reason":      plan.RiskReason,
-			"order_status":     plan.OrderStatus,
-			"current_position": plan.CurrentPosition,
-			"target_position":  plan.TargetPosition,
-			"planned_delta":    plan.PlannedDelta,
-			"external_order":   externalResult,
+			"risk_status":               plan.RiskStatus,
+			"risk_reason":               plan.RiskReason,
+			"order_status":              plan.OrderStatus,
+			"current_position":          plan.CurrentPosition,
+			"target_position":           plan.TargetPosition,
+			"planned_delta":             plan.PlannedDelta,
+			"external_order":            externalResult,
+			"instance_current_position": instancePlan.InstanceCurrentPosition,
+			"instance_target_position":  instancePlan.InstanceTargetPosition,
+			"net_current_target":        instancePlan.NetCurrentTarget,
+			"net_target_position":       instancePlan.NetTargetPosition,
 		},
 	})
 	now := time.Now()

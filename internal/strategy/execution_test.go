@@ -94,6 +94,47 @@ func TestExecutionEnginePlanWithExternalCurrentPosition(t *testing.T) {
 	}
 }
 
+func TestExecutionEngineNetsMultiplePrimaryInstanceSubPositions(t *testing.T) {
+	t.Parallel()
+
+	engine := NewExecutionEngine()
+	instA := StrategyInstance{InstanceID: "primary-a", AccountID: "paper", Timeframe: "1m"}
+	instB := StrategyInstance{InstanceID: "primary-b", AccountID: "paper", Timeframe: "5m"}
+
+	openA := engine.PlanInstanceTarget(instA, "rb2601", -1, RunTypeRealtime, engine.CurrentPosition("rb2601"))
+	if openA.Plan.TargetPosition != -1 || openA.Plan.PlannedDelta != -1 {
+		t.Fatalf("openA = %+v, want net target -1 delta -1", openA)
+	}
+	engine.ApplyInstanceTarget(instA, "rb2601", -1, RunTypeRealtime, openA.Plan)
+
+	openB := engine.PlanInstanceTarget(instB, "rb2601", -1, RunTypeRealtime, engine.CurrentPosition("rb2601"))
+	if openB.Plan.TargetPosition != -2 || openB.Plan.PlannedDelta != -1 {
+		t.Fatalf("openB = %+v, want net target -2 delta -1", openB)
+	}
+	engine.ApplyInstanceTarget(instB, "rb2601", -1, RunTypeRealtime, openB.Plan)
+	if got := engine.CurrentPosition("rb2601"); got != -2 {
+		t.Fatalf("CurrentPosition after two opens = %v, want -2", got)
+	}
+
+	closeA := engine.PlanInstanceTarget(instA, "rb2601", 0, RunTypeRealtime, engine.CurrentPosition("rb2601"))
+	if closeA.Plan.TargetPosition != -1 || closeA.Plan.PlannedDelta != 1 {
+		t.Fatalf("closeA = %+v, want net target -1 delta +1", closeA)
+	}
+	engine.ApplyInstanceTarget(instA, "rb2601", 0, RunTypeRealtime, closeA.Plan)
+	if got := engine.CurrentPosition("rb2601"); got != -1 {
+		t.Fatalf("CurrentPosition after A close = %v, want -1", got)
+	}
+
+	closeB := engine.PlanInstanceTarget(instB, "rb2601", 0, RunTypeRealtime, engine.CurrentPosition("rb2601"))
+	if closeB.Plan.TargetPosition != 0 || closeB.Plan.PlannedDelta != 1 {
+		t.Fatalf("closeB = %+v, want net target 0 delta +1", closeB)
+	}
+	engine.ApplyInstanceTarget(instB, "rb2601", 0, RunTypeRealtime, closeB.Plan)
+	if got := engine.CurrentPosition("rb2601"); got != 0 {
+		t.Fatalf("CurrentPosition after all close = %v, want 0", got)
+	}
+}
+
 func TestSubmitExternalOrderFailureBlocksPlan(t *testing.T) {
 	t.Parallel()
 

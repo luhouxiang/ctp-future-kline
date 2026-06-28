@@ -42,6 +42,7 @@ class ATRZigZagIndicatorStrategy(Strategy):
     definition: StrategyDefinition = {
         "strategy_id": ZIGZAG_ATR26_INDICATOR_ID,
         "display_name": "ATR26 ZigZag 波峰波谷",
+        "kind": "indicator",
         "entry_script": "zigzag_atr_indicator.py",
         "version": "1.0.0",
         "updated_at": _rfc3339_utc_now(),
@@ -291,14 +292,21 @@ class ATRZigZagIndicatorStrategy(Strategy):
             "confirmed_low": confirmed["low"],
             "reversal_value": atr,
         }
-        payload["feature_key"] = "zigzag_atr26"
+        score_key = "zigzag_peak_recent_short" if typ == "PEAK" else "zigzag_trough_profit_short"
+        payload["feature_key"] = score_key
+        payload["feature_schema"] = "feature_score.v1"
         payload["feature_payload"] = {
-            "pivot_index": payload["pivot_index"],
-            "pivot_time": payload["pivot_time"],
-            "pivot_price": payload["pivot_price"],
-            "confirmed_time": payload["confirmed_time"],
-            "confirmed_index": payload["confirmed_index"],
-            "zigzag_type": payload["zigzag_type"],
+            "score": 10.0,
+            "direction": "short",
+            "reference": "confirmed ZigZag peak supports short entry" if typ == "PEAK" else "confirmed ZigZag trough supports short profit exit",
+            "raw": {
+                "pivot_index": payload["pivot_index"],
+                "pivot_time": payload["pivot_time"],
+                "pivot_price": payload["pivot_price"],
+                "confirmed_time": payload["confirmed_time"],
+                "confirmed_index": payload["confirmed_index"],
+                "zigzag_type": payload["zigzag_type"],
+            },
         }
         return payload
 

@@ -210,6 +210,106 @@ def _params(request: RequestDict) -> dict[str, Any]:
     return (request.get("instance") or {}).get("params") or {}
 
 
+def _feature_score_summary(request: RequestDict) -> dict[str, Any]:
+    """读取统一 0-10 指标参考分，并按主策略参数计算加权总分。
+
+    指标策略只输出 score，不输出达标结论；这里的 passed 只表示当前主策略
+    用自己的 feature_score_min 对加权总分做出的门控结果。
+    """
+    params = _params(request)
+    deps = _feature_score_dependencies(params.get("feature_score_dependencies"))
+    if not deps:
+        return {
+            "enabled": False,
+            "total_score": None,
+            "feature_score_min": _float(params.get("feature_score_min"), 0.0),
+            "passed": True,
+            "items": [],
+        }
+    features = request.get("features") or {}
+    scores = features.get("scores") if isinstance(features, dict) else {}
+    if not isinstance(scores, dict):
+        scores = {}
+    total_weight = 0.0
+    weighted = 0.0
+    items: list[dict[str, Any]] = []
+    for dep in deps:
+        key = dep["key"]
+        weight = dep["weight"]
+        payload = scores.get(key) if isinstance(scores, dict) else None
+        if not isinstance(payload, dict):
+            payload = {"score": 0.0, "missing": True}
+        score = _clamp_feature_score(_float(payload.get("score"), 0.0))
+        weighted += score * weight
+        total_weight += weight
+        items.append({
+            "key": key,
+            "weight": weight,
+            "score": score,
+            "missing": bool(payload.get("missing", False)),
+            "reference": payload.get("reference", ""),
+        })
+    total = weighted / total_weight if total_weight > 0 else 0.0
+    min_score = _float(params.get("feature_score_min"), 0.0)
+    return {
+        "enabled": True,
+        "total_score": total,
+        "feature_score_min": min_score,
+        "passed": total >= min_score,
+        "items": items,
+    }
+
+
+def _feature_score_metric_fields(summary: dict[str, Any]) -> dict[str, Any]:
+    """把 feature score 汇总展开成 trace/metrics 里稳定的字段。"""
+    return {
+        "feature_score_enabled": bool(summary.get("enabled", False)),
+        "feature_score_total": summary.get("total_score"),
+        "feature_score_min": summary.get("feature_score_min"),
+        "feature_score_passed": bool(summary.get("passed", True)),
+        "feature_scores": summary.get("items") or [],
+    }
+
+
+def _feature_score_dependencies(raw: Any) -> list[dict[str, Any]]:
+    deps: list[dict[str, Any]] = []
+    seen: set[str] = set()
+
+    def add(key: Any, weight: Any = 1.0) -> None:
+        text = str(key or "").strip().lower()
+        if not text or text in seen:
+            return
+        w = _float(weight, 1.0)
+        if w <= 0:
+            w = 1.0
+        seen.add(text)
+        deps.append({"key": text, "weight": w})
+
+    def add_item(item: Any) -> None:
+        if isinstance(item, dict):
+            add(item.get("key") or item.get("feature_key") or item.get("name"), item.get("weight", 1.0))
+        else:
+            add(item, 1.0)
+
+    if isinstance(raw, list):
+        for item in raw:
+            add_item(item)
+    elif isinstance(raw, str):
+        for item in raw.split(","):
+            add_item(item)
+    elif raw:
+        add_item(raw)
+    return deps
+
+
+def _clamp_feature_score(score: float) -> float:
+    if score < 0:
+        return 0.0
+    if score > 10:
+        return 10.0
+    return score
+
+
 def _mode_from_value(value: Any) -> ModeKey:
     """归一化运行模式，作为运行实例和状态字典的 key。"""
     return "replay" if str(value or "").strip().lower() == "replay" else "live"

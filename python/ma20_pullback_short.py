@@ -166,6 +166,7 @@ class MA20PullbackShortStrategy(Strategy):
         "strategy_id": "ma20.pullback_short",
         # 前端展示名称：策略列表中显示给用户看的名称。
         "display_name": "MA20 Pullback Short",
+        "kind": "primary",
         # Python 运行入口：Go 侧拉起策略服务时使用。
         "entry_script": "python/strategy_service.py",
         # 策略版本号：用于识别策略定义变更。

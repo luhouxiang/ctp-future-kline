@@ -77,9 +77,11 @@ class ATRZigZagIndicatorStrategyTest(unittest.TestCase):
         self.assertEqual(peak_metrics["confirmed_index"], 33)
         self.assertGreaterEqual(peak_metrics["pivot_bars_since_previous"], 5)
         self.assertAlmostEqual(peak_metrics["reversal_value"], peak_metrics["atr"] * 2.0)
-        self.assertEqual(peak_metrics["feature_key"], "zigzag_atr26")
-        self.assertEqual(peak_metrics["feature_payload"]["pivot_index"], 28)
-        self.assertEqual(peak_metrics["feature_payload"]["zigzag_type"], "PEAK")
+        self.assertEqual(peak_metrics["feature_key"], "zigzag_peak_recent_short")
+        self.assertEqual(peak_metrics["feature_schema"], "feature_score.v1")
+        self.assertEqual(peak_metrics["feature_payload"]["score"], 10.0)
+        self.assertEqual(peak_metrics["feature_payload"]["raw"]["pivot_index"], 28)
+        self.assertEqual(peak_metrics["feature_payload"]["raw"]["zigzag_type"], "PEAK")
 
         trough = outs[38]
         self.assertTrue(trough["no_signal"])
@@ -91,6 +93,9 @@ class ATRZigZagIndicatorStrategyTest(unittest.TestCase):
         self.assertEqual(trough_metrics["confirmed_time"], cases[38]["bar"]["adjusted_time"])
         self.assertGreaterEqual(trough_metrics["pivot_bars_since_previous"], 5)
         self.assertAlmostEqual(trough_metrics["reversal_value"], trough_metrics["atr"] * 2.0)
+        self.assertEqual(trough_metrics["feature_key"], "zigzag_trough_profit_short")
+        self.assertEqual(trough_metrics["feature_schema"], "feature_score.v1")
+        self.assertEqual(trough_metrics["feature_payload"]["score"], 10.0)
 
 
 if __name__ == "__main__":

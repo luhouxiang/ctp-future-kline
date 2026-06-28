@@ -3,6 +3,7 @@ package strategy
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -231,6 +232,65 @@ func TestFeatureCacheInjectsDeclaredGenericFeatureOnly(t *testing.T) {
 	}
 }
 
+func TestFeatureScoreCacheInjectsScoresAndMissingAsZero(t *testing.T) {
+	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
+	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
+		StrategyID: "indicator.score",
+		Symbol:     "rb2601",
+		Timeframe:  "1m",
+		Mode:       RunTypeRealtime,
+		Metrics: map[string]any{
+			"feature_key":    "score_a",
+			"feature_schema": featureScoreSchema,
+			"feature_payload": map[string]any{
+				"score":     12.5,
+				"reference": "too high clamps to ten",
+			},
+		},
+	})
+	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
+		StrategyID: "indicator.score",
+		Symbol:     "rb2601",
+		Timeframe:  "1m",
+		Mode:       RunTypeRealtime,
+		Metrics: map[string]any{
+			"feature_key":    "score_b",
+			"feature_schema": featureScoreSchema,
+			"feature_payload": map[string]any{
+				"score": -2,
+			},
+		},
+	})
+
+	features := m.featuresFor(StrategyInstance{
+		Timeframe: "1m",
+		Params: map[string]any{
+			"feature_score_dependencies": []any{
+				map[string]any{"key": "score_a", "weight": 0.6},
+				map[string]any{"key": "score_b", "weight": 0.4},
+				map[string]any{"key": "missing_score", "weight": 1.0},
+			},
+		},
+	}, "rb2601", RunTypeRealtime)
+
+	scores, ok := features[featureScoresKey].(map[string]any)
+	if !ok {
+		t.Fatalf("scores feature missing: %+v", features)
+	}
+	scoreA, ok := scores["score_a"].(map[string]any)
+	if !ok || scoreA["score"] != 10.0 {
+		t.Fatalf("score_a = %#v, want clamped score 10", scores["score_a"])
+	}
+	scoreB, ok := scores["score_b"].(map[string]any)
+	if !ok || scoreB["score"] != 0.0 {
+		t.Fatalf("score_b = %#v, want clamped score 0", scores["score_b"])
+	}
+	missing, ok := scores["missing_score"].(map[string]any)
+	if !ok || missing["score"] != 0.0 || missing["missing"] != true {
+		t.Fatalf("missing_score = %#v, want missing score 0", scores["missing_score"])
+	}
+}
+
 func TestFeatureDependenciesFallbackKeepsLegacyZigZag(t *testing.T) {
 	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
 	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
@@ -393,6 +453,76 @@ func TestHandleBarRunsIndicatorBeforeTradingAndInjectsFeature(t *testing.T) {
 	peak, ok := peaks[0].(map[string]any)
 	if !ok || peak["pivot_index"] != float64(7) || peak["confirmed_index"] != float64(10) {
 		t.Fatalf("trading peak = %#v, want injected zigzag pivot", peaks[0])
+	}
+}
+
+func TestIndicatorSignalDoesNotExecutePositionChange(t *testing.T) {
+	result := SignalDecision{
+		NoSignal:       false,
+		InstanceID:     "indicator-1",
+		Symbol:         "rb2601",
+		EventTime:      "2026-01-02T09:35:00+08:00",
+		TargetPosition: -1,
+		Confidence:     1,
+		Reason:         "bad indicator signal",
+		Metrics:        map[string]any{},
+	}
+	nextPushID := 0
+	results := map[string]SignalDecision{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/runtime/result" {
+			var req map[string]any
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode result request: %v", err)
+			}
+			pushID := strings.TrimSpace(fmt.Sprint(req["push_id"]))
+			raw, err := json.Marshal(results[pushID])
+			if err != nil {
+				t.Fatalf("marshal result: %v", err)
+			}
+			if err := json.NewEncoder(w).Encode(map[string]any{"status": "done", "result": json.RawMessage(raw)}); err != nil {
+				t.Fatalf("encode result response: %v", err)
+			}
+			return
+		}
+		nextPushID++
+		pushID := "push-" + strconv.Itoa(nextPushID)
+		results[pushID] = result
+		if err := json.NewEncoder(w).Encode(map[string]any{"ok": true, "push_id": pushID}); err != nil {
+			t.Fatalf("encode push response: %v", err)
+		}
+	}))
+	defer server.Close()
+
+	m := &Manager{
+		cfg:       config.StrategyConfig{RequestTimeoutMS: 3000},
+		exec:      NewExecutionEngine(),
+		client:    NewStrategyServiceClient(server.URL, server.Client()),
+		connReady: true,
+		features:  make(map[strategyFeatureKey][]map[string]any),
+	}
+	inst := StrategyInstance{
+		InstanceID: "indicator-1",
+		StrategyID: "indicator.custom",
+		Mode:       RunTypeRealtime,
+		Status:     InstanceStatusRunning,
+		Symbols:    []string{"rb2601"},
+		Timeframe:  "1m",
+	}
+
+	m.callDecision(inst, "rb2601", RunTypeRealtime, "", time.Date(2026, 1, 2, 9, 35, 0, 0, time.Local), nil, &BarEvent{
+		InstrumentID: "rb2601",
+		AdjustedTime: time.Date(2026, 1, 2, 9, 35, 0, 0, time.Local),
+		Period:       "1m",
+		Open:         3500,
+		High:         3512,
+		Low:          3498,
+		Close:        3508,
+	})
+
+	if got := m.exec.CurrentPosition("rb2601"); got != 0 {
+		t.Fatalf("indicator changed position to %v, want unchanged 0", got)
 	}
 }
 

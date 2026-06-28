@@ -68,6 +68,7 @@ type ManagerStatus struct {
 type StrategyDefinition struct {
 	StrategyID    string         `json:"strategy_id"`
 	DisplayName   string         `json:"display_name"`
+	Kind          string         `json:"kind,omitempty"`
 	EntryScript   string         `json:"entry_script"`
 	Version       string         `json:"version"`
 	DefaultParams map[string]any `json:"default_params"`
@@ -78,6 +79,7 @@ func (d *StrategyDefinition) UnmarshalJSON(data []byte) error {
 	type rawDefinition struct {
 		StrategyID    string          `json:"strategy_id"`
 		DisplayName   string          `json:"display_name"`
+		Kind          string          `json:"kind"`
 		EntryScript   string          `json:"entry_script"`
 		Version       string          `json:"version"`
 		DefaultParams map[string]any  `json:"default_params"`
@@ -91,6 +93,7 @@ func (d *StrategyDefinition) UnmarshalJSON(data []byte) error {
 
 	d.StrategyID = raw.StrategyID
 	d.DisplayName = raw.DisplayName
+	d.Kind = raw.Kind
 	d.EntryScript = raw.EntryScript
 	d.Version = raw.Version
 	d.DefaultParams = raw.DefaultParams

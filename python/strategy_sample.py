@@ -39,6 +39,7 @@ class SampleMomentumStrategy(Strategy):
     definition: StrategyDefinition = {
         "strategy_id": "sample.momentum",
         "display_name": "Sample Momentum",
+        "kind": "primary",
         "entry_script": "python/strategy_service.py",
         "version": "1.0.0",
         "default_params": {"threshold": 0.2},

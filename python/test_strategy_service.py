@@ -604,6 +604,39 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
         self.assertEqual(blocked["trace"]["checks"][2]["name"], "入场ZigZag波峰过滤")
         self.assertFalse(blocked["trace"]["checks"][2]["passed"])
 
+    def test_second_break_uses_weighted_feature_score_filter_when_configured(self):
+        self.setup_to_rebound()
+
+        blocked = self.strategy.on_bar(state_bar_req(
+            idx=24,
+            open_=99.3,
+            high=99.6,
+            low=98.0,
+            close=99.2,
+            params={
+                "ma_period": 20,
+                "max_wait_bars": 6,
+                "feature_score_dependencies": [
+                    {"key": "score_a", "weight": 0.6},
+                    {"key": "score_b", "weight": 0.4},
+                ],
+                "feature_score_min": 7.0,
+            },
+            features={
+                "scores": {
+                    "score_a": {"score": 8.0},
+                    "score_b": {"score": 4.0},
+                }
+            },
+        ))
+
+        self.assertTrue(blocked["no_signal"])
+        self.assertEqual(blocked["reason"], "entry filter blocked short")
+        self.assertEqual(blocked["trace"]["checks"][3]["name"], "入场指标加权评分过滤")
+        self.assertFalse(blocked["trace"]["checks"][3]["passed"])
+        self.assertAlmostEqual(blocked["trace"]["metrics"]["feature_score_total"], 6.4)
+        self.assertFalse(blocked["trace"]["metrics"]["feature_score_passed"])
+
     def test_holding_switches_between_profit_and_loss(self):
         self.setup_to_rebound()
         self.signal_short()

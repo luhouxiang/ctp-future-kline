@@ -79,6 +79,7 @@ class DetectBoxIndicatorStrategy(Strategy):
     definition: StrategyDefinition = {
         "strategy_id": DETECT_BOX_INDICATOR_ID,
         "display_name": "DetectBox 箱体整理",
+        "kind": "indicator",
         "entry_script": "detect_box_indicator.py",
         "version": "1.0.9",
         "updated_at": _rfc3339_utc_now(),

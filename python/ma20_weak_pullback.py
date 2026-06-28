@@ -140,6 +140,7 @@ class MA20WeakPullbackShortStrategy(Strategy):
     definition: StrategyDefinition = {
         "strategy_id": MA20_WEAK_STRATEGY_ID,
         "display_name": "MA20 Weak Pullback Short",
+        "kind": "primary",
         "entry_script": "python/strategy_service.py",
         "version": "1.0.0",
         "default_params": {
