@@ -5,6 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"ctp-future-kline/internal/ctptext"
 	"ctp-future-kline/internal/logger"
 
 	ctp "github.com/kkqy/ctp-go"
@@ -359,7 +360,7 @@ func safeRspErrorMsg(pRspInfo ctp.CThostFtdcRspInfoField) (msg string) {
 			msg = ""
 		}
 	}()
-	return strings.TrimSpace(pRspInfo.GetErrorMsg())
+	return ctptext.Decode(pRspInfo.GetErrorMsg())
 }
 
 func safeInstrumentSnapshot(pInstrument ctp.CThostFtdcInstrumentField) (out instrumentSnapshot) {
@@ -377,7 +378,7 @@ func safeInstrumentSnapshot(pInstrument ctp.CThostFtdcInstrumentField) (out inst
 	out.ID = pInstrument.GetInstrumentID()
 	out.ExchangeID = pInstrument.GetExchangeID()
 	out.ExchangeInstID = pInstrument.GetExchangeInstID()
-	out.InstrumentName = pInstrument.GetInstrumentName()
+	out.InstrumentName = ctptext.Decode(pInstrument.GetInstrumentName())
 	out.ProductID = pInstrument.GetProductID()
 	out.ProductClass = pInstrument.GetProductClass()
 	out.DeliveryYear = pInstrument.GetDeliveryYear()

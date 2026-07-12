@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"ctp-future-kline/internal/config"
+	"ctp-future-kline/internal/ctptext"
 	"ctp-future-kline/internal/logger"
 	"ctp-future-kline/internal/queuewatch"
 
@@ -830,7 +831,7 @@ func (p *ctpTradeSpi) mapOrder(field ctp.CThostFtdcOrderField) OrderRecord {
 		VolumeCanceled:      maxInt(0, field.GetVolumeTotalOriginal()-field.GetVolumeTotal()-field.GetVolumeTraded()),
 		OrderStatus:         mapOrderStatus(field.GetOrderStatus()),
 		SubmitStatus:        mapSubmitStatus(field.GetOrderSubmitStatus()),
-		StatusMsg:           field.GetStatusMsg(),
+		StatusMsg:           ctptext.Decode(field.GetStatusMsg()),
 		InsertedAt:          parseDateTime(field.GetInsertDate(), field.GetInsertTime()),
 		UpdatedAt:           parseDateTime(field.GetInsertDate(), field.GetUpdateTime()),
 	}
@@ -981,7 +982,7 @@ func rspError(rsp ctp.CThostFtdcRspInfoField) error {
 	if errID == 0 {
 		return nil
 	}
-	return fmt.Errorf("ctp error %d: %s", errID, strings.TrimSpace(rsp.GetErrorMsg()))
+	return fmt.Errorf("ctp error %d: %s", errID, ctptext.Decode(rsp.GetErrorMsg()))
 }
 
 func isNilCTPObject(v any) bool {
