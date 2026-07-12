@@ -19,6 +19,7 @@ func NewExecutionEngine() *ExecutionEngine {
 	return &ExecutionEngine{
 		positions:    make(map[string]float64),
 		subPositions: make(map[strategySubPositionKey]float64),
+		paused:       true,
 	}
 }
 

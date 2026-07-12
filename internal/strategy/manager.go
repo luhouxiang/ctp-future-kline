@@ -1639,7 +1639,7 @@ func (m *Manager) updateFeatureCacheFromTrace(trace StrategyTraceRecord) {
 
 func (m *Manager) updateLegacyZigZagFeatureCache(trace StrategyTraceRecord) {
 	indicator := normalizeFeatureName(trace.Metrics["indicator"])
-	if indicator != zigzagATR26FeatureID {
+	if !isZigZagFeatureName(indicator) {
 		return
 	}
 	typ := strings.ToUpper(strings.TrimSpace(fmt.Sprint(trace.Metrics["zigzag_type"])))
@@ -1699,8 +1699,8 @@ func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string)
 	}
 	out := make(map[string]any, len(dependencies)+1)
 	for _, name := range dependencies {
-		if name == zigzagATR26FeatureID {
-			if features := m.legacyZigZagFeatures(symbol, inst.Timeframe, mode); features != nil {
+		if isZigZagFeatureName(name) {
+			if features := m.zigZagFeatures(symbol, inst.Timeframe, mode, name); features != nil {
 				out[name] = features[name]
 				continue
 			}
@@ -1727,7 +1727,12 @@ func (m *Manager) featuresFor(inst StrategyInstance, symbol string, mode string)
 }
 
 func (m *Manager) legacyZigZagFeatures(symbol string, timeframe string, mode string) map[string]any {
-	items := m.featurePayloads(symbol, timeframe, mode, zigzagATR26FeatureID)
+	return m.zigZagFeatures(symbol, timeframe, mode, zigzagATR26FeatureID)
+}
+
+func (m *Manager) zigZagFeatures(symbol string, timeframe string, mode string, name string) map[string]any {
+	name = normalizeFeatureName(name)
+	items := m.featurePayloads(symbol, timeframe, mode, name)
 	if len(items) == 0 {
 		return nil
 	}
@@ -1754,11 +1759,16 @@ func (m *Manager) legacyZigZagFeatures(symbol string, timeframe string, mode str
 		}
 	}
 	return map[string]any{
-		zigzagATR26FeatureID: map[string]any{
+		name: map[string]any{
 			"peaks":   peaks,
 			"troughs": troughs,
 		},
 	}
+}
+
+func isZigZagFeatureName(name string) bool {
+	name = normalizeFeatureName(name)
+	return name != "" && strings.Contains(name, "zigzag")
 }
 
 func (m *Manager) latestFeaturePayload(symbol string, timeframe string, mode string, name string) (map[string]any, bool) {

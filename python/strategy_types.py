@@ -62,7 +62,9 @@ MA20_WEAK_BASELINE_STRATEGY_ID: str = "ma20.weak_pullback_short.baseline"
 MA20_WEAK_HARD_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.hard_filter"
 MA20_WEAK_SCORE_FILTER_STRATEGY_ID: str = "ma20.weak_pullback_short.score_filter"
 MA20_STATE_DIAGRAM_STRATEGY_ID: str = "ma20.state_diagram_short"
+MA20_TREND_FRIEND_SHORT_STRATEGY_ID: str = "ma20.trend_friend_short"
 ZIGZAG_ATR26_INDICATOR_ID: str = "indicator.zigzag_atr26"
+TREND_FRIEND_ZIGZAG_ATR26_INDICATOR_ID: str = "indicator.trend_friend_zigzag_atr26"
 DETECT_BOX_INDICATOR_ID: str = "indicator.detect_box"
 
 # MA20 state-diagram short strategy constants.

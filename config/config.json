@@ -3,7 +3,7 @@
     "flow_path": "./flow",
     "user_id": "668800200972",
     "user_id_path": "../ctp-future-resources",
-    "subscribe_instruments": [],
+    "subscribe_instruments": ["ao"],
     "enable_l9_async": false,
     "enable_multi_minute": false,
     "connect_wait_seconds": 5,

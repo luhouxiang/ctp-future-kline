@@ -22,6 +22,7 @@ from typing import Any
 from detect_box_indicator import DetectBoxIndicatorStrategy
 from ma20_pullback_short import MA20PullbackShortStrategy, MA20WeakPullbackBaselineStrategy
 from ma20_state_diagram_short import MA20StateDiagramShortStrategy
+from ma20_trend_friend_short import MA20TrendFriendShortStrategy
 from ma20_weak_pullback import (
     MA20WeakPullbackHardFilterStrategy,
     MA20WeakPullbackScoreFilterStrategy,
@@ -29,6 +30,7 @@ from ma20_weak_pullback import (
 )
 from strategy_common import Strategy, _instance_id, _instance_mode, _int, _mode_key, _normalize_symbols
 from strategy_sample import SampleMomentumStrategy
+from trend_friend_zigzag_atr_indicator import TrendFriendATRZigZagIndicatorStrategy
 from strategy_types import (
     JSONObject,
     RequestDict,
@@ -52,7 +54,9 @@ def _builtin_strategies() -> tuple[Strategy, ...]:
         # MA20WeakPullbackShortStrategy(),
         MA20WeakPullbackBaselineStrategy(),
         MA20StateDiagramShortStrategy(),
+        MA20TrendFriendShortStrategy(),
         ATRZigZagIndicatorStrategy(),
+        TrendFriendATRZigZagIndicatorStrategy(),
         DetectBoxIndicatorStrategy(),
         # MA20WeakPullbackHardFilterStrategy(),
         # MA20WeakPullbackScoreFilterStrategy(),
@@ -81,7 +85,11 @@ def _clone_strategy_template(strategy: Strategy) -> Strategy:
         return strategy.__class__(definition=definition)
     if isinstance(strategy, MA20StateDiagramShortStrategy):
         return strategy.__class__(definition=definition)
+    if isinstance(strategy, MA20TrendFriendShortStrategy):
+        return strategy.__class__(definition=definition)
     if isinstance(strategy, ATRZigZagIndicatorStrategy):
+        return strategy.__class__(definition=definition)
+    if isinstance(strategy, TrendFriendATRZigZagIndicatorStrategy):
         return strategy.__class__(definition=definition)
     if isinstance(strategy, DetectBoxIndicatorStrategy):
         return strategy.__class__(definition=definition)

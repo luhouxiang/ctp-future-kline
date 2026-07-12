@@ -1,14 +1,24 @@
 # ao2609 MA20 + ZigZag 5m Strategy
 
+## New Runnable Algorithm
+
+Composition ID: `ma20_state_zigzag_trend_friend_ao2609_5m`
+
+Display name: `MA20转势持盈短线@ao2609-5m`
+
+This is a separate runnable composition. It keeps the original `MA20状态图 + ZigZag指标` template available, and adds a faster ZigZag confirmation profile tuned for roughly one open/close trading signal per day on `ao2609` 5m.
+
 ## Recommended live-paper configuration
 
-Primary strategy: `ma20.state_diagram_short`
+Primary strategy: `ma20.trend_friend_short`
+
+Implementation: `python/ma20_trend_friend_short.py`. This strategy has its own strategy ID, class, state and source file; later changes do not affect `ma20.state_diagram_short`.
 
 Primary params:
 
 ```json
 {
-  "feature_dependencies": ["zigzag_atr26"],
+  "feature_dependencies": ["trend_friend_zigzag_atr26"],
   "observation_bars": 360,
   "strength_exit_bars": 6,
   "use_zigzag_trough_take_profit": true,
@@ -17,24 +27,26 @@ Primary params:
   "entry_ma60_slope_max": 0.5,
   "entry_zigzag_peak_min_bars": 0,
   "entry_zigzag_peak_max_bars": 80,
-  "profit_rebound_atr_multiple": 2.5,
-  "profit_rising_low_bars": 3,
-  "strong_bull_atr_multiple": 2.5
+  "profit_rebound_atr_multiple": 99.0,
+  "profit_rising_low_bars": 99,
+  "strong_bull_atr_multiple": 99.0
 }
 ```
 
-Helper strategy: `indicator.zigzag_atr26`
+Helper strategy: `indicator.trend_friend_zigzag_atr26`
+
+Helper implementation: `python/trend_friend_zigzag_atr_indicator.py`. It is independent from `indicator.zigzag_atr26`.
 
 Helper params:
 
 ```json
 {
-  "atr_multiple": 3.5,
-  "min_bars": 10
+  "atr_multiple": 3.0,
+  "min_bars": 8
 }
 ```
 
-The primary strategy uses ZigZag trough take-profit first. MA20/MA60 profit exits are disabled while `prefer_zigzag_trough_take_profit` is true, so profitable shorts are held until a confirmed ATR ZigZag trough or a stop condition.
+The primary strategy uses ZigZag trough take-profit first. MA20/MA60 profit exits are disabled while `prefer_zigzag_trough_take_profit` is true, so profitable shorts are held until a confirmed ATR ZigZag trough or a stop condition. The MA rebound take-profit thresholds are intentionally set very high in this template so the live behavior stays focused on confirmed trend reversal exits.
 
 Go candidate-search exit mode: `zigzag_trough`
 
@@ -44,8 +56,8 @@ Backtest-only params:
 {
   "exit_ma20_distance_atr": 1.2,
   "zigzag_atr_period": 26,
-  "zigzag_atr_multiple": 3.5,
-  "zigzag_min_bars": 10
+  "zigzag_atr_multiple": 3.0,
+  "zigzag_min_bars": 8
 }
 ```
 
@@ -65,17 +77,17 @@ Go candidate-search outputs:
 
 Primary strategy replay summary:
 
-| Window | Signals | Net points | Avg points | Profit factor | Max DD | Max loss seq | Net after 3 pts/order |
+| Window | Entries | Net points | Avg points | Profit factor | Max DD | Max single loss | Trade signals/day |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| Full sample | 69 | 352.00 | 5.10 | 1.8167 | 144.00 | 13 | 145.00 |
-| From 2026-01-01 | 39 | 303.00 | 7.77 | 2.3004 | 81.00 | 8 | 186.00 |
-| From 2026-04-01 | 14 | 220.00 | 15.71 | 5.7826 | 22.00 | 3 | 178.00 |
+| Full sample | 98 | 308.00 | 3.14 | 1.51 | 153.00 | -28.00 | 0.94 |
+| From 2026-01-01 | 65 | 270.00 | 4.15 | 1.69 | 81.00 | -28.00 | 1.02 |
+| From 2026-04-01 | 32 | 138.00 | 4.31 | 1.85 | 81.00 | -25.00 | 1.05 |
 
 Big-drop capture by `realized_profit_points / entry_to_lowest_low_points` for trades whose favorable excursion reached at least 20 points:
 
-- Full sample: `0.5848`
-- From 2026-01-01: `0.5448`
-- From 2026-04-01: `0.6591`
+- Full sample: `0.623`
+- From 2026-01-01: `0.585`
+- From 2026-04-01: `0.589`
 
 ## Live-paper operating gates
 

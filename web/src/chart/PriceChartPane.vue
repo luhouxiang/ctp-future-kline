@@ -87,6 +87,7 @@ const props = defineProps({
     type: Object,
     default: () => ({ settings: {}, decisions: [], selected_id: "" }),
   },
+  autoExecutionPaused: { type: Boolean, default: true },
   strategyTraces: { type: Array, default: () => [] },
   strategySignals: { type: Array, default: () => [] },
   activeStrategyInstanceId: { type: String, default: "" },
@@ -3617,7 +3618,7 @@ const strategyOverlayData = computed(() => {
       const symbol = String(row?.symbol || "").trim().toLowerCase();
       if (currentSymbol && symbol && symbol !== currentSymbol) return false;
       const strategyID = String(row?.strategy_id || "");
-      if (!(strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short" || strategyID === "ma20.state_diagram_short")) {
+      if (!(strategyID === "ma20.weak_pullback_short" || strategyID.startsWith("ma20.weak_pullback_short.") || strategyID === "ma20.pullback_short" || strategyID === "ma20.state_diagram_short" || strategyID === "ma20.trend_friend_short")) {
         return false;
       }
       const traceTime = strategyTraceTime(row);
@@ -5072,6 +5073,10 @@ onUnmounted(() => {
             <span class="ma60">MA60 {{ quoteMovingAverages.ma60 }}</span>
           </div>
         </div>
+        <div v-if="props.autoExecutionPaused" class="strategy-execution-paused-banner">
+          <strong>自动交易暂停</strong>
+          <span>信号继续生成，模拟/实盘委托不会自动发出</span>
+        </div>
         <div v-if="props.showChannelDebug" class="channel-debug-panel">
           <div class="channel-debug-title">
             CH Debug | seg={{ state.channelSegments.length }} | vr={{
@@ -5897,6 +5902,36 @@ onUnmounted(() => {
   inset: 0;
   pointer-events: none;
   z-index: 7;
+}
+
+.strategy-execution-paused-banner {
+  position: absolute;
+  top: 44px;
+  left: 50%;
+  z-index: 18;
+  display: inline-grid;
+  gap: 2px;
+  min-width: 280px;
+  max-width: min(520px, calc(100% - 128px));
+  padding: 8px 14px;
+  border: 1px solid rgba(245, 158, 11, 0.88);
+  background: rgba(120, 53, 15, 0.92);
+  color: #fffbeb;
+  text-align: center;
+  transform: translateX(-50%);
+  box-shadow: 0 8px 24px rgba(15, 23, 42, 0.42);
+  pointer-events: none;
+}
+
+.strategy-execution-paused-banner strong {
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.strategy-execution-paused-banner span {
+  font-size: 12px;
+  line-height: 1.35;
+  color: rgba(255, 251, 235, 0.86);
 }
 
 .zigzag-overlay-layer {

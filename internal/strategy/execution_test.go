@@ -11,6 +11,7 @@ func TestExecutionEngineAppliesRealtimePaperTarget(t *testing.T) {
 	t.Parallel()
 
 	engine := NewExecutionEngine()
+	engine.SetPaused(false)
 	plan := engine.Plan(StrategyInstance{}, "rb2601", -1, RunTypeRealtime)
 
 	if plan.RiskStatus != RiskStatusAllowed || plan.OrderStatus != OrderStatusSimulated {
@@ -22,10 +23,25 @@ func TestExecutionEngineAppliesRealtimePaperTarget(t *testing.T) {
 	}
 }
 
+func TestExecutionEngineDefaultsToPaused(t *testing.T) {
+	t.Parallel()
+
+	engine := NewExecutionEngine()
+
+	if !engine.Status().AutoExecutionPaused {
+		t.Fatalf("Status().AutoExecutionPaused = false, want true")
+	}
+	plan := engine.Plan(StrategyInstance{}, "rb2601", -1, RunTypeRealtime)
+	if plan.RiskStatus != RiskStatusBlocked || plan.OrderStatus != OrderStatusPaused {
+		t.Fatalf("Plan() = %+v, want default paused blocked", plan)
+	}
+}
+
 func TestExecutionEngineBlocksReplayTarget(t *testing.T) {
 	t.Parallel()
 
 	engine := NewExecutionEngine()
+	engine.SetPaused(false)
 	plan := engine.Plan(StrategyInstance{}, "rb2601", -1, RunTypeReplay)
 
 	if plan.RiskStatus != RiskStatusBlocked || plan.OrderStatus != OrderStatusBlocked {
@@ -60,7 +76,6 @@ func TestExecutionEngineResumeAllowsRealtimeTarget(t *testing.T) {
 	t.Parallel()
 
 	engine := NewExecutionEngine()
-	engine.SetPaused(true)
 	engine.SetPaused(false)
 	plan := engine.Plan(StrategyInstance{}, "rb2601", -1, RunTypeRealtime)
 
@@ -80,6 +95,7 @@ func TestExecutionEnginePlanWithExternalCurrentPosition(t *testing.T) {
 	t.Parallel()
 
 	engine := NewExecutionEngine()
+	engine.SetPaused(false)
 	engine.Apply("rb2601", ExecutionPlan{
 		CurrentPosition: 0,
 		TargetPosition:  -1,
@@ -98,6 +114,7 @@ func TestExecutionEngineNetsMultiplePrimaryInstanceSubPositions(t *testing.T) {
 	t.Parallel()
 
 	engine := NewExecutionEngine()
+	engine.SetPaused(false)
 	instA := StrategyInstance{InstanceID: "primary-a", AccountID: "paper", Timeframe: "1m"}
 	instB := StrategyInstance{InstanceID: "primary-b", AccountID: "paper", Timeframe: "5m"}
 
@@ -139,6 +156,7 @@ func TestSubmitExternalOrderFailureBlocksPlan(t *testing.T) {
 	t.Parallel()
 
 	engine := NewExecutionEngine()
+	engine.SetPaused(false)
 	m := &Manager{
 		exec:          engine,
 		orderExecutor: failingStrategyOrderExecutor{},

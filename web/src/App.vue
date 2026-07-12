@@ -169,12 +169,12 @@ const strategyForm = reactive({
 })
 
 const strategyCompositionForm = reactive({
-  composition_id: 'ma20_state_zigzag',
-  display_name: 'MA20状态图 + ZigZag指标',
-  primary_strategy_id: 'ma20.state_diagram_short',
-  helper_strategy_ids_text: 'indicator.zigzag_atr26',
-  primary_params_text: '{\n  "feature_dependencies": ["zigzag_atr26"],\n  "observation_bars": 360,\n  "strength_exit_bars": 6,\n  "use_zigzag_trough_take_profit": true,\n  "prefer_zigzag_trough_take_profit": true,\n  "entry_ma20_slope_max": 0.0,\n  "entry_ma60_slope_max": 0.5,\n  "entry_zigzag_peak_min_bars": 0,\n  "entry_zigzag_peak_max_bars": 80,\n  "profit_rebound_atr_multiple": 2.5,\n  "profit_rising_low_bars": 3,\n  "strong_bull_atr_multiple": 2.5\n}',
-  helper_params_text: '{\n  "indicator.zigzag_atr26": {\n    "atr_multiple": 3.5,\n    "min_bars": 10\n  }\n}',
+  composition_id: 'ma20_state_zigzag_trend_friend_ao2609_5m',
+  display_name: 'MA20转势持盈短线@ao2609-5m',
+  primary_strategy_id: 'ma20.trend_friend_short',
+  helper_strategy_ids_text: 'indicator.trend_friend_zigzag_atr26',
+  primary_params_text: '{\n  "feature_dependencies": ["trend_friend_zigzag_atr26"],\n  "observation_bars": 360,\n  "strength_exit_bars": 6,\n  "use_zigzag_trough_take_profit": true,\n  "prefer_zigzag_trough_take_profit": true,\n  "entry_ma20_slope_max": 0.0,\n  "entry_ma60_slope_max": 0.5,\n  "entry_zigzag_peak_min_bars": 0,\n  "entry_zigzag_peak_max_bars": 80,\n  "profit_rebound_atr_multiple": 99.0,\n  "profit_rising_low_bars": 99,\n  "strong_bull_atr_multiple": 99.0\n}',
+  helper_params_text: '{\n  "indicator.trend_friend_zigzag_atr26": {\n    "atr_multiple": 3.0,\n    "min_bars": 8\n  }\n}',
 })
 
 const tradeStatus = reactive({

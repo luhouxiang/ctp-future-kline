@@ -190,6 +190,41 @@ func TestZigZagFeatureCacheInjectsRecentPeaksByScope(t *testing.T) {
 	}
 }
 
+func TestNamedZigZagFeatureCacheInjectsIndependentPayload(t *testing.T) {
+	const featureName = "trend_friend_zigzag_atr26"
+	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
+	m.updateFeatureCacheFromTrace(StrategyTraceRecord{
+		StrategyID: "indicator." + featureName,
+		Symbol:     "ao2609",
+		Timeframe:  "5m",
+		Mode:       RunTypeReplay,
+		Metrics: map[string]any{
+			"indicator":       featureName,
+			"zigzag_type":     "PEAK",
+			"pivot_index":     42,
+			"confirmed_index": 47,
+		},
+	})
+
+	features := m.featuresFor(StrategyInstance{
+		Timeframe: "5m",
+		Params: map[string]any{
+			"feature_dependencies": []any{featureName},
+		},
+	}, "ao2609", RunTypeReplay)
+	payload, ok := features[featureName].(map[string]any)
+	if !ok {
+		t.Fatalf("features missing named zigzag payload: %+v", features)
+	}
+	peaks, ok := payload["peaks"].([]map[string]any)
+	if !ok || len(peaks) != 1 || peaks[0]["pivot_index"] != 42 {
+		t.Fatalf("peaks = %#v, want independent named peak", payload["peaks"])
+	}
+	if legacy := m.legacyZigZagFeatures("ao2609", "5m", RunTypeReplay); legacy != nil {
+		t.Fatalf("named zigzag leaked into legacy cache: %+v", legacy)
+	}
+}
+
 func TestFeatureCacheInjectsDeclaredGenericFeatureOnly(t *testing.T) {
 	m := &Manager{features: make(map[strategyFeatureKey][]map[string]any)}
 	m.updateFeatureCacheFromTrace(StrategyTraceRecord{

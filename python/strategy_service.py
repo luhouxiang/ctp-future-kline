@@ -11,6 +11,7 @@
 - strategy_sample.py：最小示例策略；
 - ma20_pullback_short.py：MA20 baseline/pullback-short 状态机；
 - ma20_weak_pullback.py：弱反弹状态机以及 hard/score 过滤变体；
+- ma20_trend_friend_short.py：独立的 MA20 转势持盈短线状态机；
 - strategy_registry.py：策略注册表、运行实例工厂、StartInstance 生命周期；
 - strategy_runtime_service.py：与传输层无关的策略服务门面；
 - strategy_http.py：Falcon/uvicorn HTTP 服务入口和异步 push_id 运行时。
@@ -30,6 +31,7 @@ from ma20_pullback_short import (
     PullbackShortState,
 )
 from ma20_state_diagram_short import MA20StateDiagramShortStrategy, StateDiagramShortState
+from ma20_trend_friend_short import MA20TrendFriendShortStrategy, TrendFriendShortState
 from ma20_weak_pullback import (
     MA20WeakPullbackHardFilterStrategy,
     MA20WeakPullbackScoreFilterStrategy,
@@ -78,6 +80,7 @@ except ModuleNotFoundError as exc:  # pragma: no cover - HTTP runtime requires o
 from strategy_registry import StrategyFactory, StrategyRegistryEntry, StrategyRuntimeInstance
 from strategy_runtime_service import StrategyService
 from strategy_sample import SampleMomentumStrategy
+from trend_friend_zigzag_atr_indicator import TrendFriendATRZigZagIndicatorStrategy, TrendFriendZigZagState
 from strategy_types import *
 
 __all__ = [name for name in globals() if not name.startswith("__")]

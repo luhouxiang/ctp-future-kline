@@ -2240,6 +2240,8 @@ func (s *Server) handleStrategyCompositions(w http.ResponseWriter, r *http.Reque
 		}
 		if !ok || len(items) == 0 {
 			items = defaultStrategyCompositions()
+		} else {
+			items = mergeDefaultStrategyCompositions(items, defaultStrategyCompositions())
 		}
 		items = s.filterArchivedStrategyCompositions(items, 20)
 		writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -2342,15 +2344,32 @@ func (s *Server) filterArchivedStrategyCompositions(items []userconfig.StrategyC
 		}
 	}
 	out := make([]userconfig.StrategyComposition, 0, min(len(items), limit))
+	defaultIDs := defaultStrategyCompositionIDs()
 	for _, item := range items {
 		if hasArchive {
-			if info, err := os.Stat(s.strategyCompositionArchivePath(item.CompositionID)); err != nil || info.IsDir() {
+			id := strings.TrimSpace(item.CompositionID)
+			if id == "" {
 				continue
+			}
+			if _, ok := defaultIDs[id]; !ok {
+				if info, err := os.Stat(s.strategyCompositionArchivePath(item.CompositionID)); err != nil || info.IsDir() {
+					continue
+				}
 			}
 		}
 		out = append(out, item)
 		if len(out) >= limit {
 			break
+		}
+	}
+	return out
+}
+
+func defaultStrategyCompositionIDs() map[string]struct{} {
+	out := make(map[string]struct{})
+	for _, item := range defaultStrategyCompositions() {
+		if id := strings.TrimSpace(item.CompositionID); id != "" {
+			out[id] = struct{}{}
 		}
 	}
 	return out
@@ -2386,7 +2405,67 @@ func defaultStrategyCompositions() []userconfig.StrategyComposition {
 			},
 			UpdatedAt: now,
 		},
+		{
+			CompositionID:     "ma20_state_zigzag_trend_friend_ao2609_5m",
+			DisplayName:       "MA20转势持盈短线@ao2609-5m",
+			PrimaryStrategyID: "ma20.trend_friend_short",
+			HelperStrategyIDs: []string{"indicator.trend_friend_zigzag_atr26"},
+			PrimaryParams: map[string]any{
+				"feature_dependencies":             []string{"trend_friend_zigzag_atr26"},
+				"observation_bars":                 360,
+				"strength_exit_bars":               6,
+				"use_zigzag_trough_take_profit":    true,
+				"prefer_zigzag_trough_take_profit": true,
+				"entry_ma20_slope_max":             0.0,
+				"entry_ma60_slope_max":             0.5,
+				"entry_zigzag_peak_min_bars":       0,
+				"entry_zigzag_peak_max_bars":       80,
+				"profit_rebound_atr_multiple":      99.0,
+				"profit_rising_low_bars":           99,
+				"strong_bull_atr_multiple":         99.0,
+			},
+			HelperParamsByStrategy: map[string]map[string]any{
+				"indicator.trend_friend_zigzag_atr26": {
+					"atr_multiple": 3.0,
+					"min_bars":     8,
+				},
+			},
+			UpdatedAt: now,
+		},
 	}
+}
+
+func mergeDefaultStrategyCompositions(items []userconfig.StrategyComposition, defaults []userconfig.StrategyComposition) []userconfig.StrategyComposition {
+	seen := make(map[string]struct{}, len(items))
+	defaultByID := make(map[string]userconfig.StrategyComposition, len(defaults))
+	for _, item := range defaults {
+		if id := strings.TrimSpace(item.CompositionID); id != "" {
+			defaultByID[id] = item
+		}
+	}
+	out := make([]userconfig.StrategyComposition, 0, len(items)+len(defaults))
+	for _, item := range items {
+		id := strings.TrimSpace(item.CompositionID)
+		if id != "" {
+			seen[id] = struct{}{}
+			if current, ok := defaultByID[id]; ok {
+				item = current
+			}
+		}
+		out = append(out, item)
+	}
+	for _, item := range defaults {
+		id := strings.TrimSpace(item.CompositionID)
+		if id == "" {
+			continue
+		}
+		if _, ok := seen[id]; ok {
+			continue
+		}
+		out = append(out, item)
+		seen[id] = struct{}{}
+	}
+	return out
 }
 
 func (s *Server) handleStrategyInstances(w http.ResponseWriter, r *http.Request) {

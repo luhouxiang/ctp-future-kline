@@ -402,7 +402,7 @@ const strategyStepRows = computed(() => {
   let base = [{ key: currentKey || 'CURRENT', label: trace.step_label || currentKey || '当前步骤', index: currentIndex || 1 }]
   // ma20.weak_pullback_short.baseline 虽然带 weak 前缀，但算法本身已经重构成 baseline 的 5 状态机。
   // 这里显式区分 baseline 与 hard/score 变体，避免前端把不存在的趋势过滤步骤展示给用户。
-  if (strategyID === 'ma20.state_diagram_short') base = ma20StateDiagramSteps
+  if (strategyID === 'ma20.state_diagram_short' || strategyID === 'ma20.trend_friend_short') base = ma20StateDiagramSteps
   else if (strategyID === 'ma20.pullback_short' || strategyID === 'ma20.weak_pullback_short.baseline' || !strategyID) base = ma20BaselineSteps
   else if (strategyID === 'ma20.weak_pullback_short' || strategyID.startsWith('ma20.weak_pullback_short.')) base = ma20WeakSteps
   return base.map((step) => {

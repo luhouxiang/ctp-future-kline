@@ -15,6 +15,7 @@ from strategy_service import (  # noqa: E402
     MA20_WEAK_SCORE_FILTER_STRATEGY_ID,
     MA20_WEAK_STRATEGY_ID,
     MA20_STATE_DIAGRAM_STRATEGY_ID,
+    MA20_TREND_FRIEND_SHORT_STRATEGY_ID,
     PROFIT_HOLDING,
     REBOUND_TO_HIGH,
     SECOND_BREAK_SIGNAL,
@@ -28,6 +29,7 @@ from strategy_service import (  # noqa: E402
     WAIT_PULLBACK_TOUCH_MA20,
     TREND_STRUCTURE_FILTER,
     MA20StateDiagramShortStrategy,
+    MA20TrendFriendShortStrategy,
     MA20PullbackShortStrategy,
     MA20WeakPullbackShortStrategy,
     PullbackShortState,
@@ -830,6 +832,19 @@ class MA20StateDiagramShortStrategyTest(unittest.TestCase):
 
 
 class StrategyServiceRegistryTest(unittest.TestCase):
+    def test_trend_friend_is_an_independent_strategy_implementation(self):
+        state_diagram = MA20StateDiagramShortStrategy()
+        trend_friend = MA20TrendFriendShortStrategy()
+
+        self.assertEqual(state_diagram.definition["strategy_id"], MA20_STATE_DIAGRAM_STRATEGY_ID)
+        self.assertEqual(trend_friend.definition["strategy_id"], MA20_TREND_FRIEND_SHORT_STRATEGY_ID)
+        self.assertEqual(trend_friend.definition["entry_script"], "python/ma20_trend_friend_short.py")
+        self.assertNotEqual(type(state_diagram), type(trend_friend))
+        self.assertEqual(type(state_diagram).__module__, "ma20_state_diagram_short")
+        self.assertEqual(type(trend_friend).__module__, "ma20_trend_friend_short")
+        state_diagram.states[("live", "original", "ao2609")] = StateDiagramShortState()
+        self.assertEqual(trend_friend.states, {})
+
     def test_get_start_requirements_comes_from_python_strategies(self):
         service = StrategyService()
 
@@ -946,6 +961,7 @@ class StrategyServiceRegistryTest(unittest.TestCase):
 
         self.assertEqual(definitions[MA20_WEAK_BASELINE_STRATEGY_ID], "python/ma20_weak_pullback_baseline.py")
         self.assertEqual(definitions[MA20_STATE_DIAGRAM_STRATEGY_ID], "python/strategy_service.py")
+        self.assertEqual(definitions[MA20_TREND_FRIEND_SHORT_STRATEGY_ID], "python/ma20_trend_friend_short.py")
         self.assertEqual(definitions[MA20_WEAK_HARD_FILTER_STRATEGY_ID], "python/ma20_weak_pullback_hard_filter.py")
         self.assertEqual(definitions[MA20_WEAK_SCORE_FILTER_STRATEGY_ID], "python/ma20_weak_pullback_score_filter.py")
 
